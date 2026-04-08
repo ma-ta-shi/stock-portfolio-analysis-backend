@@ -1,9 +1,16 @@
-from sqlalchemy import Column, Integer, String
-from .database import Base
+from pydantic import BaseModel, EmailStr
+from uuid import UUID
 
-class Item(Base):
-    __tablename__ = "items"
+# what client sends
+class UserProfileCreate(BaseModel):
+    display_name: str
+    is_active: bool = True
 
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, index=True)
-    description = Column(String)
+# what API returns
+class UserProfileResponse(BaseModel):
+    user_id: UUID
+    display_name: str
+    is_active: bool
+
+    class Config:
+        from_attributes = True
