@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      # requirements.txt doesn't pin dev tooling yet (see CLAUDE.md "Setup gap") —
+      # installed directly here until that's settled with the backend developer.
+      - run: pip install pytest pytest-asyncio httpx ruff
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -xvs --timeout=30
