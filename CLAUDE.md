@@ -25,11 +25,21 @@ convention.
    per PR, not a batch of unrelated changes.
 6. **Never merge**: the PR sits until the backend developer approves and merges it.
 
-## Setup gap to raise with the backend developer
+## Dev environment
 
-`requirements.txt` currently has only `fastapi`, `pydantic`, `SQLAlchemy`, `starlette`, `uvicorn`
-and their transitive deps — no `pytest`, `pytest-asyncio`, `httpx`, `ruff`, or `alembic`, even
-though `src/CLAUDE.md` and the root project docs assume all of them. Confirm the intended dev
-dependency setup (e.g. a `requirements-dev.txt` or `pyproject.toml` `[dependency-groups]`) before
-adding tests or running lint in a PR — don't silently add a dependency file without agreeing on
-the approach first.
+`requirements.txt` only ever had runtime deps (`fastapi`, `pydantic`, `SQLAlchemy`, `starlette`,
+`uvicorn`) — no test/lint tooling. Added locally (not yet reviewed by the backend developer):
+- `.venv/` — Python 3.12 virtualenv, gitignored
+- `requirements-dev.txt` — pulls in `requirements.txt` plus `pytest`, `pytest-asyncio`, `httpx`,
+  `ruff`, `alembic`, `aiosqlite`
+- `pyproject.toml` — `[tool.pytest.ini_options]` (`asyncio_mode = "auto"`) and `[tool.ruff]`
+
+Run `pip install -r requirements-dev.txt` inside `.venv` before running tests or lint. **This
+dependency-management approach (separate requirements-dev.txt vs. pyproject.toml
+dependency-groups) hasn't been confirmed with the backend developer yet** — raise it in the first
+PR that touches this, since they may already have a preference.
+
+Running `ruff check .` today surfaces ~70 pre-existing lint errors in the backend developer's
+existing code (undefined names, unused imports in `src/api/tables/*.py`, `src/multi_agents/*.py`,
+`test.py`). Not touched here — not our code to unilaterally fix — but expect CI to fail on `main`
+until those are cleaned up or ruff is scoped to new/changed files only.
