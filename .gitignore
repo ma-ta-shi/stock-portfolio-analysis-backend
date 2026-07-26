@@ -1,5 +1,6 @@
 *.env
 stock
+.claude/
 
 # Python
 .venv/
