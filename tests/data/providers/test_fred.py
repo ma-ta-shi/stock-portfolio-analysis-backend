@@ -82,6 +82,16 @@ async def test_get_macro_data_defaults_to_documented_series_set(provider, monkey
     assert seen_ids == DEFAULT_SERIES_IDS
 
 
+async def test_get_macro_data_empty_list_returns_empty_dict_not_defaults(provider, monkeypatch):
+    """An explicit [] means "fetch nothing" — must not be treated the same as
+    unset/None just because [] is falsy in Python."""
+    monkeypatch.setattr(provider._client, "get_series", lambda series_id: _series([1.0]))
+
+    result = await provider.get_macro_data([])
+
+    assert result == {}
+
+
 async def test_get_interest_rates_returns_expected_keys(provider, monkeypatch):
     monkeypatch.setattr(provider._client, "get_series", lambda series_id: _series([1.111, 2.222]))
 

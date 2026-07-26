@@ -54,7 +54,7 @@ class FredMacroDataProvider(MacroDataProvider):
         concurrently. fredapi's HTTP call is blocking, so it's offloaded to a thread
         rather than run directly on the event loop."""
         result: dict[str, pd.Series] = {}
-        for series_id in series_ids or DEFAULT_SERIES_IDS:
+        for series_id in DEFAULT_SERIES_IDS if series_ids is None else series_ids:
             clean_id = series_id.strip().upper()
             try:
                 result[clean_id] = await asyncio.to_thread(self._client.get_series, clean_id)
