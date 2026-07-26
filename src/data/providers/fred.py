@@ -83,5 +83,5 @@ class FredMacroDataProvider(MacroDataProvider):
         logger.debug("fred_exchange_rates_not_supported", pair=pair)
         return {
             "pair": pair.strip().upper(),
-            "status": "not supported by FredMacroDataProvider — see BankOfCanadaMacroDataProvider in boc.py",
+            "status": "not supported by FredMacroDataProvider — see BOCMacroDataProvider in boc.py",
         }
