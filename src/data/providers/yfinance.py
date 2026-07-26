@@ -15,7 +15,7 @@ MAPPING = {
     ('quarterly', 'cashflow'): 'quarterly_cash_flow'
 }
 
-class StockDataProvider(StockDataProvider):
+class YFinanceDataProvider(StockDataProvider):
     """Abstract base for stock-centric financial data yfinance."""
     
     async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
