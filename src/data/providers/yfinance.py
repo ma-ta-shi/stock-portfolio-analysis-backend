@@ -276,6 +276,29 @@ class YFinanceDataProvider(StockDataProvider):
         df_dividends["Date"] = df_dividends["Date"].dt.tz_localize(None)
         return df_dividends
 
+    async def get_quote(self, ticker: str) -> dict:
+        """Not on StockDataProvider. Mirrors FMPDataProvider.get_quote's shape
+        (symbol/price at minimum) so the US-equity composite router can fall
+        back here transparently. Yahoo's fast_info raises KeyError rather than
+        returning empty for an invalid/delisted ticker, so that's the one
+        failure mode this needs to catch explicitly."""
+        stock = yf.Ticker(ticker)
+        try:
+            fi = stock.fast_info
+            price = fi.get("lastPrice")
+        except Exception:
+            return {}
+        if price is None:
+            return {}
+        return {
+            "symbol": ticker.upper(),
+            "price": price,
+            "previousClose": fi.get("previousClose"),
+            "dayLow": fi.get("dayLow"),
+            "dayHigh": fi.get("dayHigh"),
+            "volume": fi.get("lastVolume"),
+        }
+
 
 class NewsProvider(NewsProvider):
     """news data (FMP news, Finnhub news with sentiment)."""
