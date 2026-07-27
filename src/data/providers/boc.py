@@ -1,6 +1,6 @@
 import pandas as pd
 import aiohttp
-from .base import MacroDataProvider
+from data.providers.base import MacroDataProvider
 import logging
 
 logger = logging.getLogger(__name__)

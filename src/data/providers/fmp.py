@@ -7,6 +7,9 @@ import structlog
 
 from data.providers.base import NewsProvider, StockDataProvider
 
+from dotenv import load_dotenv
+load_dotenv()
+
 logger = structlog.get_logger(__name__)
 
 BASE_URL = "https://financialmodelingprep.com/stable"

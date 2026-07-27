@@ -1,7 +1,9 @@
+import sys
+sys.path.insert(0, 'src')
 # ============================================================================
 # Testing yfinance.py
 # ============================================================================
-from src.data.providers.boc import BOCMacroDataProvider
+
 # from openbb import obb
 
 # quote = obb.equity.price.quote("ry", provider="tmx")
@@ -19,13 +21,13 @@ from src.data.providers.boc import BOCMacroDataProvider
 # Testing boc.py
 # ============================================================================
 import asyncio
-
+from src.data.providers.boc import BOCMacroDataProvider
 async def test_boc():
     async with BOCMacroDataProvider() as provider:
         # ✅ All async calls must use await
-        rates = await provider.get_interest_rates("2026-07-23", "2026-07-24")
+        rates = await provider.get_interest_rates()
         exchange = await provider.get_exchange_rates("USDCAD")
-        macro = await provider.get_macro_data(["FXUSDCAD"], "2026-07-23", "2026-07-24")
+        macro = await provider.get_macro_data(["FXUSDCAD"])
         
         print(f"Rates: {rates}")
         print(f"Exchange: {exchange}")
@@ -36,3 +38,16 @@ asyncio.run(test_boc())
 # ============================================================================
 # Testing fmp.py
 # ============================================================================
+from src.data.providers.fmp import FMPDataProvider
+async def test_fmp():
+    async with FMPDataProvider() as provider:
+        # ✅ All async calls must use await
+        hist = await provider.get_price_history("AAPL", "1mo", "1d")
+        print(f"hist: {hist}")
+        info = await provider.get_company_info("AAPL")
+        # print(f"info: {info}")
+        analysis_est = await provider.get_analyst_estimates("AAPL")
+        # print(f"analysis_est: {analysis_est}")
+
+# Run it
+asyncio.run(test_fmp())
