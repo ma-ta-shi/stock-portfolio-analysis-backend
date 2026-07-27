@@ -29,9 +29,9 @@ async def test_boc():
         exchange = await provider.get_exchange_rates("USDCAD")
         macro = await provider.get_macro_data(["FXUSDCAD"])
         
-        print(f"Rates: {rates}")
-        print(f"Exchange: {exchange}")
-        print(f"Macro: {macro}")
+        # print(f"Rates: {rates}")
+        # print(f"Exchange: {exchange}")
+        # print(f"Macro: {macro}")
 
 # Run it
 asyncio.run(test_boc())
@@ -43,7 +43,7 @@ async def test_fmp():
     async with FMPDataProvider() as provider:
         # ✅ All async calls must use await
         hist = await provider.get_price_history("AAPL", "1mo", "1d")
-        print(f"hist: {hist}")
+        # print(f"hist: {hist}")
         info = await provider.get_company_info("AAPL")
         # print(f"info: {info}")
         analysis_est = await provider.get_analyst_estimates("AAPL")
@@ -51,3 +51,17 @@ async def test_fmp():
 
 # Run it
 asyncio.run(test_fmp())
+# ============================================================================
+# Testing openbb_tmx.py
+# ============================================================================
+from src.data.providers.openbb_tmx import OpenBBTMXProvider
+async def test_open():
+    async with OpenBBTMXProvider() as provider:
+        # ✅ All async calls must use await
+        # hist = await provider.get_price_history("RY")
+        # print(f"hist: {hist}")
+        info = await provider.get_company_info("RY")
+        print(f"info: {info}")
+
+# Run it
+asyncio.run(test_open())
