@@ -16,6 +16,20 @@ MAPPING = {
 }
 
 
+def correct_alignment(df: pd.DataFrame) -> pd.DataFrame:
+    """Detect and correct the yfinance one-year column misalignment bug
+    (financial-data-api-research.md §2). The most recent column should be
+    within the last 18 months; if it's older, shift all column labels
+    forward by one year."""
+    if df.empty:
+        return df
+    most_recent = df.columns[0]  # yfinance returns newest first
+    months_old = (pd.Timestamp.now() - most_recent).days / 30
+    if months_old > 18:
+        df.columns = [c + pd.DateOffset(years=1) for c in df.columns]
+    return df
+
+
 class YFinanceDataProvider(StockDataProvider):
     """Abstract base for stock-centric financial data yfinance."""
 
