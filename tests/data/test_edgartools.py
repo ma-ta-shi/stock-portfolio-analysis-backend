@@ -4,7 +4,6 @@ import structlog
 
 from data.providers.base import StockDataProvider
 from data.providers.edgartools import EdgarToolsDataProvider
-from data.providers.yfinance import YFinanceDataProvider
 
 
 # --- Fakes standing in for the edgar (edgartools) library's object graph ---
@@ -85,12 +84,6 @@ def _income_df(concepts: list[str]) -> pd.DataFrame:
     return pd.DataFrame({"concept": concepts, "label": concepts})
 
 
-def _yfinance_style_df() -> pd.DataFrame:
-    """Shape yfinance actually returns: columns are recent period-end
-    Timestamps, index is line-item labels. correct_alignment() expects this."""
-    return pd.DataFrame({pd.Timestamp.now().normalize(): [100.0]}, index=["Total Revenue"])
-
-
 FULL_INCOME_CONCEPTS = [
     "us-gaap_Revenues",
     "us-gaap_GrossProfit",
@@ -107,7 +100,7 @@ THIN_INCOME_CONCEPTS = ["us-gaap_Revenues", "us-gaap_NetIncomeLoss"]
 
 @pytest.fixture
 def provider(monkeypatch):
-    return EdgarToolsDataProvider(fallback=YFinanceDataProvider())
+    return EdgarToolsDataProvider()
 
 
 def _patch_company(monkeypatch, company_factory):
@@ -159,23 +152,19 @@ async def test_get_financials_thin_statement_passes_through_without_fallback(pro
     assert list(df["concept"]) == THIN_INCOME_CONCEPTS
 
 
-async def test_get_financials_none_financials_falls_back_to_yfinance(provider, monkeypatch):
+async def test_get_financials_none_financials_returns_empty_dataframe(provider, monkeypatch):
     """get_financials()/get_quarterly_financials() can return None outright —
-    not just a thin statement — and must also trigger the fallback."""
+    not just a thin statement. This class no longer falls back to yfinance
+    itself (ClickUp 86bb4758g — "provider adapters stay dumb, router owns
+    every completeness check") — it returns an empty DataFrame and lets the
+    caller (router.py) decide whether to try another source."""
     fake = FakeCompany(annual=None)
     _patch_company(monkeypatch, lambda ticker: fake)
-
-    fallback_df = _yfinance_style_df()
-
-    async def fake_fallback_get_financials(ticker, statement, period):
-        return fallback_df
-
-    monkeypatch.setattr(provider._fallback, "get_financials", fake_fallback_get_financials)
 
     with structlog.testing.capture_logs() as logs:
         df = await provider.get_financials("NODATA", "income", "annual")
 
-    assert df is fallback_df
+    assert df.empty
     assert any(log["event"] == "edgar_financials_missing" for log in logs)
 
 

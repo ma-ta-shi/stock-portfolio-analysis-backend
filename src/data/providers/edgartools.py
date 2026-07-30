@@ -6,7 +6,6 @@ import structlog
 from edgar import Company, set_identity
 
 from data.providers.base import StockDataProvider
-from data.providers.yfinance import YFinanceDataProvider, correct_alignment
 
 logger = structlog.get_logger(__name__)
 
@@ -30,9 +29,14 @@ STATEMENT_MAP = {
 # thin filers like pre-revenue biotechs) and it never fired below 3-of-5 on any of
 # them — while a literal "all 5 required" reading misfired on JPM, Visa, and P&G
 # (mega-caps whose sector legitimately has no GrossProfit/OperatingIncome line,
-# not an XBRL tagging problem). The only fallback trigger kept is get_financials()
-# returning None outright (no computed Financials object — e.g. no XBRL-tagged
-# filings), which is real and cheap to check.
+# not an XBRL tagging problem).
+#
+# get_financials() returning no data outright (no computed Financials object —
+# e.g. no XBRL-tagged filings) used to trigger an internal fallback to
+# yfinance here. Moved out to router.py (ClickUp 86bb4758g) — "provider
+# adapters stay dumb, router owns every completeness check." This class no
+# longer constructs or calls another provider; it returns an empty DataFrame
+# and lets the caller decide what to do next.
 
 
 class EdgarToolsDataProvider(StockDataProvider):
@@ -41,9 +45,6 @@ class EdgarToolsDataProvider(StockDataProvider):
     free-tier annual-only fundamentals. Covers only the US-stock routing branch:
     prices, profile, estimates, ratings, peers, earnings calendar, and dividends
     are fmp.py's job, not this provider's."""
-
-    def __init__(self, fallback: YFinanceDataProvider | None = None) -> None:
-        self._fallback = fallback or YFinanceDataProvider()
 
     async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
         key = statement.lower()
@@ -61,14 +62,10 @@ class EdgarToolsDataProvider(StockDataProvider):
             logger.warning(
                 "edgar_financials_missing", ticker=ticker, statement=statement, period=period
             )
-            return await self._fallback_financials(ticker, statement, period)
+            return pd.DataFrame()
 
         statement_fn = STATEMENT_MAP[key](financials)
         return await asyncio.to_thread(lambda: statement_fn().to_dataframe())
-
-    async def _fallback_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
-        df = await self._fallback.get_financials(ticker, statement, period)
-        return correct_alignment(df)
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         """Transactional-level Form 4 data (date, shares, price, insider name) —
