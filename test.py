@@ -55,13 +55,17 @@ asyncio.run(test_fmp())
 # Testing openbb_tmx.py
 # ============================================================================
 from src.data.providers.openbb_tmx import OpenBBTMXProvider
-async def test_open():
-    async with OpenBBTMXProvider() as provider:
-        # ✅ All async calls must use await
-        # hist = await provider.get_price_history("RY")
-        # print(f"hist: {hist}")
-        info = await provider.get_company_info("RY")
-        print(f"info: {info}")
+async def test_get_price_history():
+    provider = OpenBBTMXProvider()
+    df = await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+    
+    print(f"Rows returned: {len(df)}")
+    print(df.head())
+    
+    assert not df.empty, "Expected non-empty DataFrame"
+    assert "close" in df.columns.str.lower(), "Expected a 'close' column"
+    
+    print("✅ get_price_history test passed")
 
 # Run it
-asyncio.run(test_open())
+asyncio.run(test_get_price_history())
