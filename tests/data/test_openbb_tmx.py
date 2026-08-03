@@ -1,8 +1,11 @@
 import asyncio
 from unittest.mock import MagicMock, patch
-from data.providers.boc import OpenBBTMXProvider
+
 import pandas as pd
 import pytest
+
+import data.providers.openbb_tmx as tmx_module
+from data.providers.openbb_tmx import OpenBBTMXProvider
 
 
 # ---------- Helpers ----------
@@ -19,6 +22,19 @@ def provider():
     return OpenBBTMXProvider()
 
 
+@pytest.fixture
+def mock_obb():
+    """Replace the `obb` name inside the provider module with a MagicMock.
+
+    We patch the module-level symbol (not the dotted openbb.* path) because
+    OpenBB's `obb` object resolves its command tree dynamically, so patching
+    a nested dotted path doesn't reliably intercept calls made from inside
+    the provider. Swapping the whole `obb` reference does.
+    """
+    with patch.object(tmx_module, "obb") as mock:
+        yield mock
+
+
 # ---------- get_price_history ----------
 
 @pytest.mark.asyncio
@@ -30,171 +46,201 @@ async def test_get_price_history_is_coroutine(provider):
 
 
 @pytest.mark.asyncio
-async def test_get_price_history_calls_correct_obb_endpoint(provider):
+async def test_get_price_history_calls_correct_obb_endpoint(provider, mock_obb):
     """Must call obb.equity.price.historical, not some other fetcher."""
     fake_df = pd.DataFrame({"close": [1.0, 2.0]})
-    with patch("openbb.obb.equity.price.historical", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
-        mock_call.assert_called_once()
+    mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
+    await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
+    mock_obb.equity.price.historical.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_price_history_uses_tmx_provider(provider):
+async def test_get_price_history_uses_tmx_provider(provider, mock_obb):
     """Must route through the 'tmx' provider specifically."""
     fake_df = pd.DataFrame({"close": [1.0]})
-    with patch("openbb.obb.equity.price.historical", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
-        _, kwargs = mock_call.call_args
-        assert kwargs["provider"] == "tmx"
+    mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
+    await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
+    _, kwargs = mock_obb.equity.price.historical.call_args
+    assert kwargs["provider"] == "tmx"
 
 
 @pytest.mark.asyncio
-async def test_get_price_history_passes_ticker_and_interval(provider):
+async def test_get_price_history_passes_ticker_and_interval(provider, mock_obb):
     """Must forward ticker as `symbol` and interval unchanged."""
     fake_df = pd.DataFrame({"close": [1.0]})
-    with patch("openbb.obb.equity.price.historical", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_price_history(ticker="RY", period="6mo", interval="1wk")
-        _, kwargs = mock_call.call_args
-        assert kwargs["symbol"] == "RY"
-        assert kwargs["interval"] == "1wk"
+    mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
+    await provider.get_price_history(ticker="RY", period="6mo", interval="1wk")
+
+    _, kwargs = mock_obb.equity.price.historical.call_args
+    assert kwargs["symbol"] == "RY"
+    assert kwargs["interval"] == "1wk"
 
 
 @pytest.mark.asyncio
-async def test_get_price_history_returns_dataframe(provider):
+async def test_get_price_history_returns_dataframe(provider, mock_obb):
     """Return type must be a pandas DataFrame."""
     fake_df = pd.DataFrame({"close": [1.0, 2.0]})
-    with patch("openbb.obb.equity.price.historical", return_value=make_obb_result(fake_df)):
-        result = await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
-        assert isinstance(result, pd.DataFrame)
+    mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
+    assert isinstance(result, pd.DataFrame)
 
 
 @pytest.mark.asyncio
-async def test_get_price_history_returns_underlying_data_unchanged(provider):
+async def test_get_price_history_returns_underlying_data_unchanged(provider, mock_obb):
     """DataFrame content must match what obb returned (no silent mutation)."""
     fake_df = pd.DataFrame({"close": [10.5, 11.2]})
-    with patch("openbb.obb.equity.price.historical", return_value=make_obb_result(fake_df)):
-        result = await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
-        pd.testing.assert_frame_equal(result, fake_df)
+    mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
+    pd.testing.assert_frame_equal(result, fake_df)
 
 
 # ---------- get_financials ----------
 
 @pytest.mark.asyncio
-async def test_get_financials_routes_income_statement(provider):
+async def test_get_financials_routes_income_statement(provider, mock_obb):
     """statement='income' must call obb.equity.fundamental.income."""
     fake_df = pd.DataFrame({"revenue": [100]})
-    with patch("openbb.obb.equity.fundamental.income", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_financials(ticker="SHOP", statement="income", period="annual")
-        mock_call.assert_called_once()
+    mock_obb.equity.fundamental.income.return_value = make_obb_result(fake_df)
+
+    await provider.get_financials(ticker="SHOP", statement="income", period="annual")
+
+    mock_obb.equity.fundamental.income.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_financials_routes_balance_statement(provider):
+async def test_get_financials_routes_balance_statement(provider, mock_obb):
     """statement='balance' must call obb.equity.fundamental.balance."""
     fake_df = pd.DataFrame({"assets": [100]})
-    with patch("openbb.obb.equity.fundamental.balance", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_financials(ticker="SHOP", statement="balance", period="annual")
-        mock_call.assert_called_once()
+    mock_obb.equity.fundamental.balance.return_value = make_obb_result(fake_df)
+
+    await provider.get_financials(ticker="SHOP", statement="balance", period="annual")
+
+    mock_obb.equity.fundamental.balance.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_financials_routes_cash_statement(provider):
+async def test_get_financials_routes_cash_statement(provider, mock_obb):
     """statement='cash' must call obb.equity.fundamental.cash."""
     fake_df = pd.DataFrame({"operating_cf": [100]})
-    with patch("openbb.obb.equity.fundamental.cash", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_financials(ticker="SHOP", statement="cash", period="annual")
-        mock_call.assert_called_once()
+    mock_obb.equity.fundamental.cash.return_value = make_obb_result(fake_df)
+
+    await provider.get_financials(ticker="SHOP", statement="cash", period="annual")
+
+    mock_obb.equity.fundamental.cash.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_financials_unknown_statement_raises_value_error(provider):
+async def test_get_financials_unknown_statement_raises_value_error(provider, mock_obb):
     """Unknown statement type must raise ValueError, not silently fetch something."""
     with pytest.raises(ValueError):
         await provider.get_financials(ticker="SHOP", statement="cashflowzz", period="annual")
 
 
 @pytest.mark.asyncio
-async def test_get_financials_returns_dataframe(provider):
+async def test_get_financials_returns_dataframe(provider, mock_obb):
     """Return type must be a pandas DataFrame."""
     fake_df = pd.DataFrame({"revenue": [100]})
-    with patch("openbb.obb.equity.fundamental.income", return_value=make_obb_result(fake_df)):
-        result = await provider.get_financials(ticker="SHOP", statement="income", period="annual")
-        assert isinstance(result, pd.DataFrame)
+    mock_obb.equity.fundamental.income.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_financials(ticker="SHOP", statement="income", period="annual")
+
+    assert isinstance(result, pd.DataFrame)
 
 
 # ---------- get_company_info ----------
 
 @pytest.mark.asyncio
-async def test_get_company_info_calls_profile_endpoint(provider):
+async def test_get_company_info_calls_profile_endpoint(provider, mock_obb):
     """Must call obb.equity.profile."""
     fake_df = pd.DataFrame([{"name": "Shopify Inc.", "sector": "Tech"}])
-    with patch("openbb.obb.equity.profile", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_company_info(ticker="SHOP")
-        mock_call.assert_called_once()
+    mock_obb.equity.profile.return_value = make_obb_result(fake_df)
+
+    await provider.get_company_info(ticker="SHOP")
+
+    mock_obb.equity.profile.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_company_info_returns_dict(provider):
+async def test_get_company_info_returns_dict(provider, mock_obb):
     """Return type must be a plain dict (single-row profile)."""
     fake_df = pd.DataFrame([{"name": "Shopify Inc.", "sector": "Tech"}])
-    with patch("openbb.obb.equity.profile", return_value=make_obb_result(fake_df)):
-        result = await provider.get_company_info(ticker="SHOP")
-        assert isinstance(result, dict)
+    mock_obb.equity.profile.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_company_info(ticker="SHOP")
+
+    assert isinstance(result, dict)
 
 
 @pytest.mark.asyncio
-async def test_get_company_info_returns_first_row_only(provider):
+async def test_get_company_info_returns_first_row_only(provider, mock_obb):
     """If multiple rows are returned, only the first row's data should be used."""
     fake_df = pd.DataFrame([
         {"name": "Row One"},
         {"name": "Row Two"},
     ])
-    with patch("openbb.obb.equity.profile", return_value=make_obb_result(fake_df)):
-        result = await provider.get_company_info(ticker="SHOP")
-        assert result["name"] == "Row One"
+    mock_obb.equity.profile.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_company_info(ticker="SHOP")
+
+    assert result["name"] == "Row One"
 
 
 # ---------- get_dividend_history ----------
 
 @pytest.mark.asyncio
-async def test_get_dividend_history_calls_dividends_endpoint(provider):
+async def test_get_dividend_history_calls_dividends_endpoint(provider, mock_obb):
     """Must call obb.equity.fundamental.dividends."""
     fake_df = pd.DataFrame(
         {"amount": [0.5, 0.5]},
         index=pd.to_datetime(["2023-01-01", "2023-06-01"]),
     )
-    with patch("openbb.obb.equity.fundamental.dividends", return_value=make_obb_result(fake_df)) as mock_call:
-        await provider.get_dividend_history(ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31")
-        mock_call.assert_called_once()
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
+
+    await provider.get_dividend_history(ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31")
+
+    mock_obb.equity.fundamental.dividends.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_dividend_history_filters_by_date_range(provider):
+async def test_get_dividend_history_filters_by_date_range(provider, mock_obb):
     """Rows outside [from_date, to_date] must be excluded."""
     fake_df = pd.DataFrame(
         {"amount": [0.5, 0.5, 0.5]},
         index=pd.to_datetime(["2022-01-01", "2023-06-01", "2024-01-01"]),
     )
-    with patch("openbb.obb.equity.fundamental.dividends", return_value=make_obb_result(fake_df)):
-        result = await provider.get_dividend_history(
-            ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
-        )
-        assert len(result) == 1
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_dividend_history(
+        ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
+    )
+
+    assert len(result) == 1
 
 
 @pytest.mark.asyncio
-async def test_get_dividend_history_returns_list_of_dicts(provider):
+async def test_get_dividend_history_returns_list_of_dicts(provider, mock_obb):
     """Return type must be list[dict], per base class contract."""
     fake_df = pd.DataFrame(
         {"amount": [0.5]},
         index=pd.to_datetime(["2023-06-01"]),
     )
-    with patch("openbb.obb.equity.fundamental.dividends", return_value=make_obb_result(fake_df)):
-        result = await provider.get_dividend_history(
-            ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
-        )
-        assert isinstance(result, list)
-        assert all(isinstance(row, dict) for row in result)
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_dividend_history(
+        ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
+    )
+
+    assert isinstance(result, list)
+    assert all(isinstance(row, dict) for row in result)
 
 
 # ---------- Unsupported methods (should raise NotImplementedError) ----------
