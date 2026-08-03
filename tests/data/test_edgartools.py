@@ -61,11 +61,16 @@ class FakeFilingsResult(list):
 
 class FakeCompany:
     def __init__(
-        self, annual=None, quarterly=None, filings: list[FakeFiling] | None = None
+        self,
+        annual=None,
+        quarterly=None,
+        filings: list[FakeFiling] | None = None,
+        filings_by_form: dict[str, list] | None = None,
     ) -> None:
         self._annual = annual
         self._quarterly = quarterly
         self._filings = filings or []
+        self._filings_by_form = filings_by_form or {}
 
     def get_financials(self) -> FakeFinancials | None:
         return self._annual
@@ -73,7 +78,9 @@ class FakeCompany:
     def get_quarterly_financials(self) -> FakeFinancials | None:
         return self._quarterly
 
-    def get_filings(self, form: str | None = None) -> FakeFilingsResult:
+    def get_filings(self, form: str | None = None, amendments: bool = True) -> FakeFilingsResult:
+        if form is not None and form in self._filings_by_form:
+            return FakeFilingsResult(self._filings_by_form[form])
         return FakeFilingsResult(self._filings)
 
 

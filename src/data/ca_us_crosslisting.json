@@ -1,0 +1,82 @@
+{
+  "BCE.TO": {
+    "cik": 718940,
+    "company_name": "BCE INC",
+    "form_type": "40-F",
+    "us_ticker": "BCE"
+  },
+  "BMO.TO": {
+    "cik": 927971,
+    "company_name": "BANK OF MONTREAL /CAN/",
+    "form_type": "40-F",
+    "us_ticker": "BMO"
+  },
+  "BNS.TO": {
+    "cik": 9631,
+    "company_name": "BANK OF NOVA SCOTIA",
+    "form_type": "40-F",
+    "us_ticker": "BNS"
+  },
+  "CM.TO": {
+    "cik": 1045520,
+    "company_name": "CANADIAN IMPERIAL BANK OF COMMERCE /CAN/",
+    "form_type": "40-F",
+    "manually_confirmed": "resolver flagged CIBC vs the legal name as a name mismatch (correctly, per the resolver's own logic) - ticker and filing-type both check out; CIBC is just the common name for this bank, confirmed 2026-07-30",
+    "us_ticker": "CM"
+  },
+  "CNR.TO": {
+    "cik": 16868,
+    "company_name": "CANADIAN NATIONAL RAILWAY CO",
+    "form_type": "40-F",
+    "manually_confirmed": "resolver's direct ticker match (CNR -> Core Natural Resources, Inc.) was correctly rejected as unrelated; this is the resolver's own name-fallback suggestion, verified 2026-07-30 - CNR.TO's actual NYSE ticker is CNI, not CNR",
+    "us_ticker": "CNI"
+  },
+  "CP.TO": {
+    "cik": 16875,
+    "company_name": "CANADIAN PACIFIC KANSAS CITY LTD/CN",
+    "form_type": "10-K",
+    "us_ticker": "CP"
+  },
+  "ENB.TO": {
+    "cik": 895728,
+    "company_name": "ENBRIDGE INC",
+    "form_type": "40-F",
+    "us_ticker": "ENB"
+  },
+  "MFC.TO": {
+    "cik": 1086888,
+    "company_name": "MANULIFE FINANCIAL CORP",
+    "form_type": "40-F",
+    "us_ticker": "MFC"
+  },
+  "RY.TO": {
+    "cik": 1000275,
+    "company_name": "ROYAL BANK OF CANADA",
+    "form_type": "40-F",
+    "us_ticker": "RY"
+  },
+  "SHOP.TO": {
+    "cik": 1594805,
+    "company_name": "SHOPIFY INC.",
+    "form_type": "40-F",
+    "us_ticker": "SHOP"
+  },
+  "SU.TO": {
+    "cik": 311337,
+    "company_name": "SUNCOR ENERGY INC",
+    "form_type": "40-F",
+    "us_ticker": "SU"
+  },
+  "TD.TO": {
+    "cik": 947263,
+    "company_name": "TORONTO DOMINION BANK",
+    "form_type": "40-F",
+    "us_ticker": "TD"
+  },
+  "TRI.TO": {
+    "cik": 1075124,
+    "company_name": "THOMSON REUTERS CORP /CAN/",
+    "form_type": "40-F",
+    "us_ticker": "TRI"
+  }
+}
