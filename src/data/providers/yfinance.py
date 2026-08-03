@@ -300,7 +300,7 @@ class YFinanceDataProvider(StockDataProvider):
         }
 
 
-class NewsProvider(NewsProvider):
+class YFinanceNewsProvider(NewsProvider):
     """news data (FMP news, Finnhub news with sentiment)."""
 
     async def get_news(self, ticker: str, days: int) -> list[dict]:
