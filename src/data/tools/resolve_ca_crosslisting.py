@@ -3,7 +3,7 @@ type), for ClickUp 86bb47560. Offline maintenance tool — run whenever the
 watchlist changes, never from the live agent pipeline. Writes two artifacts:
 
 - data/ca_us_crosslisting.json — auto-verified entries, read at runtime by
-  edgartools.py's get_crosslisted_* methods.
+  data/providers/ca_crosslisting.py's get_crosslisted_* functions.
 - data/ca_us_crosslisting_review.md — anything that didn't cleanly verify,
   in plain language with the specific reason. Not written to the mapping
   file; that ticker keeps the existing canadian_data_limited fallback until
@@ -43,6 +43,8 @@ from pathlib import Path
 
 import aiohttp
 import structlog
+
+from data.providers.ca_crosslisting import _CROSSLISTING_PATH
 
 logger = structlog.get_logger(__name__)
 
@@ -390,8 +392,8 @@ def _load_manually_confirmed_tickers(mapping_path: Path) -> set[str]:
 
 
 async def main() -> None:
-    data_dir = Path(__file__).resolve().parents[2] / "data"
-    mapping_path = data_dir / "ca_us_crosslisting.json"
+    mapping_path = _CROSSLISTING_PATH
+    data_dir = mapping_path.parent
     already_confirmed = _load_manually_confirmed_tickers(mapping_path)
 
     async with aiohttp.ClientSession(headers={"User-Agent": _user_agent()}) as session:
