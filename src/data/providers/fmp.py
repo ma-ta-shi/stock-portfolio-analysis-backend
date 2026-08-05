@@ -8,6 +8,7 @@ import structlog
 from data.providers.base import NewsProvider, StockDataProvider
 
 from dotenv import load_dotenv
+
 load_dotenv()
 
 logger = structlog.get_logger(__name__)
@@ -40,21 +41,33 @@ def _period_to_from_date(period: str) -> str:
 class FMPDataProvider(StockDataProvider, NewsProvider):
     """US-stock prices, profiles, and analyst data via FMP's free tier.
 
-    Free-tier gaps confirmed live (2026-07-26/27, ClickUp 86bagzcu5) — not assumed:
-    - Dual/multi-class-share tickers (BRK.B, GOOG) are paywalled outright (HTTP 402)
-      across every per-symbol endpoint, not just price history. `_request()` treats
-      this as "no data for this ticker" rather than a fatal error.
-    - ETFs/index funds are paywalled the same way, and much more broadly than the
-      dual-class-share case — this is NOT in the original ticket, found by testing
-      QQQ, GLD, VOO, IWM, XLK, ARKK, DIA: all HTTP 402 on price history/quote/
-      dividends, only `/profile` works. SPY is the sole free exception (likely
-      FMP's demo ticker). Since ETFs are core TFSA/RRSP holdings for this platform's
-      target users, this is a real coverage gap for US-listed ETFs (which route
-      through FMP as ordinary non-.TO tickers) — not a hypothetical. No fallback
-      exists yet; flag before this ships if ETF holdings are expected soon.
+    Free-tier gaps confirmed live (2026-07-26/27, ClickUp 86bagzcu5; re-verified
+    and revised 2026-08-04, ClickUp 86bb7j0kh) — not assumed:
+    - The paywall boundary is per-ticker and drifts over time, not a fixed,
+      exhaustive list — treat every example below as "confirmed paywalled/open
+      as of its own date," not a permanent classification. Confirmed live
+      2026-08-04: BRK.B is still paywalled on get_company_info, but GOOG's
+      /profile now returns real data directly (no longer paywalled there,
+      despite still being a dual-class ticker) — FMP's own tier policy
+      evidently changed since the original 2026-07-26 finding. Also newly
+      confirmed 2026-08-04: FTNT and ALB (ordinary US large-caps, not ETFs or
+      dual-class shares) 402 on get_price_history — the paywall is broader and
+      more arbitrary than "ETFs + dual-class shares," the original two
+      categories found.
+    - ETFs/index funds are paywalled broadly — found by testing QQQ, GLD, VOO,
+      IWM, XLK, ARKK, DIA: all HTTP 402 on price history/quote/dividends, only
+      `/profile` works. SPY is the sole free exception (likely FMP's demo
+      ticker). Since ETFs are core TFSA/RRSP holdings for this platform's
+      target users, this was a real coverage gap for US-listed ETFs — router.py
+      (`US_CHAINS`) now falls back to yfinance for get_price_history/
+      get_dividend_history/get_quote/get_company_info, confirmed live working
+      2026-08-04; this docstring previously said "no fallback exists yet,"
+      which is now stale.
       (Canadian ETFs like ZQQ/XEI/XGD show the same 402 pattern when queried with
       a .TO suffix, but shouldn't reach this provider at all per the .TO routing
       rule — openbb-tmx/yfinance own those regardless of this gap.)
+    - `_request()` treats a 402 as "no data for this ticker" rather than a
+      fatal error, on every endpoint here — dual-class, ETF, or otherwise.
     - No bulk quote — `quote` and every other per-symbol endpoint here take exactly
       one symbol per call.
     - No news at any endpoint (HTTP 402 "Restricted Endpoint") — Finnhub is the sole
