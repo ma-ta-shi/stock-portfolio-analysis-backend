@@ -9,7 +9,7 @@ from data.schemas.research_sources_bundle import ManagementSignals, ResearchSour
 
 def _signals(**overrides) -> ManagementSignals:
     defaults = dict(
-        c_suite_changes_12mo=False,
+        c_suite_changes_12mo=0,
         changes_detail="",
         insider_net_direction_90d="neutral",
         buyback_activity="",
@@ -47,6 +47,7 @@ def _bundle(**overrides) -> ResearchSourcesBundle:
         latest_news_age_days=1,
         transcript_count=1,
         news_item_count=1,
+        missing_sources_list=[],
     )
     return ResearchSourcesBundle(**{**defaults, **overrides})
 
@@ -76,12 +77,30 @@ def test_management_signals_accepts_none_insider_direction():
 def test_management_signals_is_frozen():
     signals = _signals()
     with pytest.raises(ValidationError):
-        signals.c_suite_changes_12mo = True
+        signals.c_suite_changes_12mo = 5
 
 
 def test_management_signals_forbids_extra_fields():
     with pytest.raises(ValidationError):
         _signals(unexpected="field")
+
+
+def test_c_suite_changes_12mo_accepts_a_real_count():
+    """Changed 2026-08-07: this is a count, not a flag — the live Stock
+    Researcher prompt renders it as c_suite_changes_12mo=3 in its own
+    worked example."""
+    signals = _signals(c_suite_changes_12mo=3)
+    assert signals.c_suite_changes_12mo == 3
+
+
+def test_c_suite_changes_12mo_rejects_negative():
+    with pytest.raises(ValidationError):
+        _signals(c_suite_changes_12mo=-1)
+
+
+def test_c_suite_changes_12mo_accepts_zero():
+    signals = _signals(c_suite_changes_12mo=0)
+    assert signals.c_suite_changes_12mo == 0
 
 
 # ---------- ResearchSourcesBundle: valid construction ----------
@@ -243,3 +262,35 @@ def test_bundle_json_mode_dump_is_json_serializable_and_round_trips():
     json.dumps(dumped)  # raises if the nested NewsItem.date isn't JSON-primitive
     assert isinstance(dumped["news_items"][0]["date"], str)
     assert ResearchSourcesBundle.model_validate(dumped) == bundle
+
+
+# ---------- missing_sources_list (2026-08-07 contract-vs-consumer audit) ----------
+
+
+def test_missing_sources_list_defaults_to_empty():
+    bundle = _bundle()
+    assert bundle.missing_sources_list == []
+
+
+def test_missing_sources_list_accepts_real_entries():
+    bundle = _bundle(missing_sources_list=["transcript", "analyst_estimates"])
+    assert bundle.missing_sources_list == ["transcript", "analyst_estimates"]
+
+
+# ---------- TranscriptExcerpt "mgmt" type (2026-08-07 contract-vs-consumer
+# audit) ----------
+
+
+def test_transcript_excerpt_accepts_mgmt_type():
+    excerpt = TranscriptExcerpt(quarter="Q2-2026", type="mgmt", content="...", token_count=100)
+    assert excerpt.type == "mgmt"
+
+
+def test_bundle_accepts_all_three_transcript_types_in_one_quarter():
+    excerpts = [
+        TranscriptExcerpt(quarter="Q2-2026", type="mgmt", content="...", token_count=100),
+        TranscriptExcerpt(quarter="Q2-2026", type="guidance", content="...", token_count=100),
+        TranscriptExcerpt(quarter="Q2-2026", type="qa", content="...", token_count=100),
+    ]
+    bundle = _bundle(transcript_excerpts=excerpts, transcript_count=3)
+    assert len(bundle.transcript_excerpts) == 3

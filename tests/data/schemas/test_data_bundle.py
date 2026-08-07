@@ -32,7 +32,7 @@ def _empty_research_sources() -> ResearchSourcesBundle:
         news_items=[],
         peer_blocks=[],
         management_signals=ManagementSignals(
-            c_suite_changes_12mo=False,
+            c_suite_changes_12mo=0,
             changes_detail="",
             insider_net_direction_90d=None,
             buyback_activity="",
@@ -46,6 +46,7 @@ def _empty_research_sources() -> ResearchSourcesBundle:
         latest_news_age_days=None,
         transcript_count=0,
         news_item_count=0,
+        missing_sources_list=[],
     )
 
 
@@ -77,6 +78,8 @@ def _empty_macro_sources() -> MacroSourcesBundle:
         cpi_trend=None,
         cad_trend=None,
         vix_regime=None,
+        us_curve_shape=None,
+        ca_curve_shape=None,
         sector_commodity_relevant=False,
         sector_commodity_name=None,
         sector_commodity_level=None,
@@ -86,6 +89,7 @@ def _empty_macro_sources() -> MacroSourcesBundle:
         usd_revenue_exposure_pct=None,
         cb_commentary_items=[],
         cb_commentary_count=0,
+        cb_stance_note=None,
         policy_rate_age_days=None,
         cpi_age_days=None,
         gdp_age_days=None,

@@ -6,6 +6,21 @@ stays a top-level DataBundle field (used by multiple agents), not part of
 this bundle. analyst_reports_summary intentionally excluded — no FMP
 endpoint produces summarized analyst reports at the current provider tier;
 re-add only when a provider method for get_analyst_reports() exists.
+
+Amended 2026-08-07 (contract-vs-consumer audit, see docs/decision-log.md):
+`missing_sources_list` added — real gap vs. the live Stock Researcher
+Agent Prompt.md, which references `{missing_sources_list}` in its payload
+template with no contract equivalent. `ManagementSignals.c_suite_changes_12mo`
+changed bool -> NonNegativeInt — the prompt renders and reasons about it as
+a count (`c_suite_changes_12mo=3`), not a flag.
+
+Deliberately NOT added despite a live prompt reference:
+`canadian_data_limited`. data-pipeline.md states outright that
+`CanadianDataFlags` "Replaces the scattered boolean flags
+(has_finnhub_sentiment, canadian_data_limited)" — the prompt's reference
+to this field is stale, predating that consolidation. The fix is updating
+the prompt to read CanadianDataFlags's per-dimension fields directly, not
+resurrecting a field the design doc explicitly deprecated.
 """
 
 from typing import Literal
@@ -31,9 +46,14 @@ class ManagementSignals(ContractModel):
     resolved to a specific value" distinguishable. buyback_activity/
     dividend_activity/changes_detail stay required str — an empty string
     is already a natural, unambiguous "nothing to report" for free text,
-    unlike a closed enum."""
+    unlike a closed enum.
 
-    c_suite_changes_12mo: bool
+    c_suite_changes_12mo is NonNegativeInt, not bool (changed 2026-08-07,
+    contract-vs-consumer audit) — the live Stock Researcher Agent Prompt.md
+    renders and reasons about this as a count ("c_suite_changes_12mo=3" in
+    its own worked example), not a flag."""
+
+    c_suite_changes_12mo: NonNegativeInt
     changes_detail: str
     insider_net_direction_90d: Literal["buying", "neutral", "selling"] | None
     buyback_activity: str
@@ -70,6 +90,14 @@ class ResearchSourcesBundle(ContractModel):
     dual_class_flag: bool
     cik_verified: bool
     sedar_filing_available: bool
+
+    # Added 2026-08-07 (contract-vs-consumer audit): which of the
+    # attempted data sources failed to resolve for this run (e.g.
+    # ["transcript", "analyst_estimates"]) — the live Stock Researcher
+    # Agent Prompt.md's payload template references
+    # `{missing_sources_list}` directly, distinct from the per-field
+    # None/empty values elsewhere in this bundle.
+    missing_sources_list: list[str]
 
     # Reliability counters for compute_base_reliability_researcher()
     latest_filing_age_days: NonNegativeInt | None

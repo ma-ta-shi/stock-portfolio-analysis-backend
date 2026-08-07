@@ -39,6 +39,9 @@ def _bundle(**overrides) -> MacroSourcesBundle:
         cpi_trend="stable",
         cad_trend="stable",
         vix_regime="low",
+        # Yield curve shape
+        us_curve_shape="normal",
+        ca_curve_shape="normal",
         # Sector-commodity relevance
         sector_commodity_relevant=False,
         sector_commodity_name=None,
@@ -51,6 +54,7 @@ def _bundle(**overrides) -> MacroSourcesBundle:
         # CB commentary
         cb_commentary_items=[],
         cb_commentary_count=0,
+        cb_stance_note=None,
         # Series age fields
         policy_rate_age_days=1,
         cpi_age_days=15,
@@ -92,6 +96,82 @@ def test_rejects_invalid_cad_trend():
 def test_rejects_invalid_vix_regime():
     with pytest.raises(ValidationError):
         _bundle(vix_regime="extreme")
+
+
+# ---------- yield curve shape (2026-08-07 contract-vs-consumer audit) ----------
+
+
+@pytest.mark.parametrize("shape", ["normal", "flat", "inverted"])
+def test_accepts_all_real_curve_shapes(shape):
+    bundle = _bundle(us_curve_shape=shape, ca_curve_shape=shape)
+    assert bundle.us_curve_shape == shape
+
+
+def test_rejects_invalid_us_curve_shape():
+    with pytest.raises(ValidationError):
+        _bundle(us_curve_shape="steep")
+
+
+def test_rejects_invalid_ca_curve_shape():
+    with pytest.raises(ValidationError):
+        _bundle(ca_curve_shape="steep")
+
+
+def test_curve_shape_accepts_none_gracefully():
+    """A curve shape can only be None when at least one of its two
+    underlying yield points is also None — see the bidirectional
+    _check_curve_shape_requires_both_yield_points validator."""
+    bundle = _bundle(
+        treasury_2y=None,
+        treasury_10y=None,
+        canada_bond_2y=None,
+        canada_bond_10y=None,
+        us_curve_shape=None,
+        ca_curve_shape=None,
+    )
+    assert bundle.us_curve_shape is None
+    assert bundle.ca_curve_shape is None
+
+
+def test_rejects_curve_shape_set_when_a_yield_point_is_missing():
+    with pytest.raises(ValidationError):
+        _bundle(treasury_10y=None, us_curve_shape="normal")
+
+
+def test_rejects_curve_shape_none_when_both_yield_points_present():
+    with pytest.raises(ValidationError):
+        _bundle(us_curve_shape=None)
+
+
+# ---------- cb_stance_note <-> cb_commentary_items (2026-08-07 audit) ----------
+
+
+def test_cb_stance_note_none_with_empty_items_is_valid():
+    bundle = _bundle(cb_commentary_items=[], cb_commentary_count=0, cb_stance_note=None)
+    assert bundle.cb_stance_note is None
+
+
+def test_cb_stance_note_rejects_real_value_with_empty_items():
+    with pytest.raises(ValidationError):
+        _bundle(cb_commentary_items=[], cb_commentary_count=0, cb_stance_note="BoC: dovish pivot")
+
+
+def test_cb_stance_note_can_be_none_even_with_real_items():
+    """One-directional: having commentary items doesn't guarantee one was
+    material enough to produce a stance note."""
+    items = [CBCommentaryItem(date="2026-08-01", headline="Fed holds rates")]
+    bundle = _bundle(cb_commentary_items=items, cb_commentary_count=1, cb_stance_note=None)
+    assert bundle.cb_stance_note is None
+
+
+def test_cb_stance_note_real_value_with_real_items_is_valid():
+    items = [CBCommentaryItem(date="2026-08-01", headline="Fed holds rates")]
+    bundle = _bundle(
+        cb_commentary_items=items,
+        cb_commentary_count=1,
+        cb_stance_note="Fed: holding steady, no near-term move signaled",
+    )
+    assert bundle.cb_stance_note == "Fed: holding steady, no near-term move signaled"
 
 
 # ---------- sector-commodity conditional-null cluster ----------
@@ -207,7 +287,7 @@ def test_forbids_extra_fields():
 def test_accepts_none_for_a_single_failed_fred_series():
     """One series failing (e.g. FRED down for treasury_10y) shouldn't
     block constructing the rest of the bundle."""
-    bundle = _bundle(treasury_10y=None)
+    bundle = _bundle(treasury_10y=None, us_curve_shape=None)
     assert bundle.treasury_10y is None
     assert bundle.fed_funds_rate == 5.25  # everything else still resolved
 
@@ -261,6 +341,8 @@ def test_accepts_totally_empty_macro_data_without_raising():
         cpi_trend=None,
         cad_trend=None,
         vix_regime=None,
+        us_curve_shape=None,
+        ca_curve_shape=None,
         policy_rate_age_days=None,
         cpi_age_days=None,
         gdp_age_days=None,
@@ -297,9 +379,11 @@ def test_round_trips_totally_empty_macro_data():
     bundle = _bundle(
         fed_funds_rate=None,
         treasury_2y=None,
+        treasury_10y=None,
         boc_rate=None,
         rate_trend=None,
         vix_regime=None,
+        us_curve_shape=None,
         policy_rate_age_days=None,
     )
     assert MacroSourcesBundle.model_validate(bundle.model_dump()) == bundle

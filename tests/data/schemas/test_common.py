@@ -68,6 +68,14 @@ def test_transcript_excerpt_rejects_invalid_type():
         TranscriptExcerpt(quarter="Q2-2026", type="summary", content="...", token_count=150)
 
 
+def test_transcript_excerpt_accepts_mgmt_type():
+    """Added 2026-08-07 (contract-vs-consumer audit) — the live Stock
+    Researcher prompt expects a third excerpt type for management
+    commentary, distinct from guidance/qa."""
+    excerpt = TranscriptExcerpt(quarter="Q2-2026", type="mgmt", content="...", token_count=150)
+    assert excerpt.type == "mgmt"
+
+
 # ---------- PeerBlock ----------
 
 
@@ -129,14 +137,22 @@ def test_stock_ref_is_frozen():
 
 def test_news_item_round_trips_through_model_dump():
     item = NewsItem(
-        id="N1", date=datetime(2026, 8, 4, 9, 30), headline="Bank raises rates", source="Reuters", quality_tier="primary"
+        id="N1",
+        date=datetime(2026, 8, 4, 9, 30),
+        headline="Bank raises rates",
+        source="Reuters",
+        quality_tier="primary",
     )
     assert NewsItem.model_validate(item.model_dump()) == item
 
 
 def test_news_item_json_mode_dump_is_json_serializable_and_round_trips():
     item = NewsItem(
-        id="N1", date=datetime(2026, 8, 4, 9, 30), headline="Bank raises rates", source="Reuters", quality_tier="primary"
+        id="N1",
+        date=datetime(2026, 8, 4, 9, 30),
+        headline="Bank raises rates",
+        source="Reuters",
+        quality_tier="primary",
     )
     dumped = item.model_dump(mode="json")
     json.dumps(dumped)  # raises if anything isn't JSON-primitive (e.g. a raw datetime)

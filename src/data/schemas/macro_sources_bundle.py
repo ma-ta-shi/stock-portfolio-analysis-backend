@@ -4,6 +4,29 @@ Full field spec: docs/technical/data-pipeline.md §3 (precompute/macro_sources.p
 contract), §4 (MacroSourcesBundle). Removed fields — don't reintroduce:
 geopolitical_news_items (G{num} pipeline is dead infrastructure, removed in
 Macro v1.2).
+
+Amended 2026-08-07 (contract-vs-consumer audit, see docs/decision-log.md):
+data-pipeline.md's own dataclass sketch was cross-checked only against
+itself when this model was first built, never against the actual live
+Macro Economist Agent Prompt.md that consumes it. Three real gaps found
+and closed here:
+- `us_curve_shape`/`ca_curve_shape` — the doc never mentioned yield-curve-
+  shape classification at all, but the prompt's payload template expects
+  it for both jurisdictions (`{us_curve_shape}`/`{ca_curve_shape}`). Pure
+  computation from treasury_2y/10y and canada_bond_2y/10y, no new external
+  dependency.
+- `cb_stance_note` — the doc's `cb_commentary_items`/`cb_commentary_count`
+  fields (kept below, still used for raw grounding) reflect an OLDER
+  design the live prompt explicitly says it replaced in v1.2: "`CB_COMM`
+  as a separate citation token and payload block [removed]. Material
+  central bank stance is rolled into the RATE block as an optional one-
+  liner" (prompt line 13). The prompt reads `{cb_stance_note}`, a single
+  optional string, not the list.
+Deliberately NOT added despite prompt references, pending a real data
+source (confirmed live 2026-08-07: both FRED's OECD-mirrored Canada CPI
+[CPALTT01CAM657N, stale since 2024-02] and Canada GDP [CANRGDPR, stale
+since 2011] series are dead infrastructure, not usable):
+`ca_cpi_trend`/`ca_cpi_3m_delta`/`ca_cpi_yoy`, `ca_gdp_qoq`/`ca_gdp_4q_trend`.
 """
 
 from typing import Literal
@@ -21,11 +44,12 @@ class MacroSourcesBundle(ContractModel):
     macro_sources.py (not yet built).
 
     Type definition only — trend classification happens in the precompute
-    module before this is constructed, not here. The two model_validators
+    module before this is constructed, not here. The model_validators
     below are basic data-validity invariants (a count that must match its
     own list, conditional-null fields that must actually be null when the
-    doc says they should be), not business/scoring logic, so they stay in
-    scope per the same reasoning applied in CanadianDataFlags (86bawp80f).
+    doc says they should be, a derived field requiring its own source
+    data), not business/scoring logic, so they stay in scope per the same
+    reasoning applied in CanadianDataFlags (86bawp80f).
 
     Design decision (2026-08-05, confirmed with user, deviates from the
     ticket's literal spec — every field below was originally required
@@ -80,6 +104,12 @@ class MacroSourcesBundle(ContractModel):
     cad_trend: Literal["cad_strengthening", "stable", "cad_weakening"] | None
     vix_regime: Literal["low", "elevated", "high"] | None
 
+    # --- Yield curve shape per jurisdiction (added 2026-08-07 — real gap
+    # vs. the live Macro Economist prompt, missing from data-pipeline.md
+    # entirely) ---
+    us_curve_shape: Literal["normal", "flat", "inverted"] | None
+    ca_curve_shape: Literal["normal", "flat", "inverted"] | None
+
     # --- Sector-commodity relevance ---
     sector_commodity_relevant: bool
     sector_commodity_name: str | None
@@ -94,6 +124,11 @@ class MacroSourcesBundle(ContractModel):
     # --- Central bank commentary (pre-summarized) ---
     cb_commentary_items: list[CBCommentaryItem]
     cb_commentary_count: NonNegativeInt
+    # Added 2026-08-07: the actual field the live Macro Economist prompt
+    # reads (`{cb_stance_note}`) — a single optional one-liner derived
+    # from cb_commentary_items, not the raw list itself. cb_commentary_items
+    # is kept for raw grounding/citation, not dead weight.
+    cb_stance_note: str | None
 
     # --- Series age fields for reliability scoring ---
     # Note: sector_commodity_age_days_reliability is a DIFFERENT field from
@@ -150,5 +185,40 @@ class MacroSourcesBundle(ContractModel):
             raise ValueError(
                 f"cb_commentary_count ({self.cb_commentary_count}) must match "
                 f"len(cb_commentary_items) ({len(self.cb_commentary_items)})"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _check_cb_stance_note_requires_commentary_items(self) -> "MacroSourcesBundle":
+        """One-directional: cb_stance_note is derived FROM cb_commentary_items
+        (see class docstring), so an empty list can't have produced a real
+        stance note. The reverse isn't constrained — having items doesn't
+        guarantee one was material enough to produce a note."""
+        if not self.cb_commentary_items and self.cb_stance_note is not None:
+            raise ValueError("cb_stance_note must be None when cb_commentary_items is empty")
+        return self
+
+    @model_validator(mode="after")
+    def _check_curve_shape_requires_both_yield_points(self) -> "MacroSourcesBundle":
+        """Real gap caught on review: us_curve_shape/ca_curve_shape were
+        added without enforcing the invariant their own existence implies
+        — a curve shape can only be classified when BOTH yield-curve
+        endpoints resolved, and if both did resolve, classification is
+        deterministic (no missing-data path), so it must not be left
+        unresolved. Bidirectional, unlike this class's other value/age
+        pairings, precisely because there's no ambiguity here: the mapping
+        is exactly two named fields, not a guess at precompute's internal
+        construction logic."""
+        if (self.treasury_2y is None or self.treasury_10y is None) != (self.us_curve_shape is None):
+            raise ValueError(
+                "us_curve_shape must be set if and only if both treasury_2y "
+                "and treasury_10y resolved"
+            )
+        if (self.canada_bond_2y is None or self.canada_bond_10y is None) != (
+            self.ca_curve_shape is None
+        ):
+            raise ValueError(
+                "ca_curve_shape must be set if and only if both canada_bond_2y "
+                "and canada_bond_10y resolved"
             )
         return self
