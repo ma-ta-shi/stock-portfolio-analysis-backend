@@ -47,3 +47,20 @@ def test_analysis_context_is_frozen():
 def test_analysis_context_forbids_extra_fields():
     with pytest.raises(ValidationError):
         AnalysisContext(account_type="tfsa", timeline="medium_term", user_id="some-id")
+
+
+# ---------- model_dump() round-trip (ClickUp 86bawp88h) ----------
+
+
+def test_analysis_context_round_trips_through_model_dump():
+    context = AnalysisContext(account_type="rrsp", timeline="long_term")
+    assert AnalysisContext.model_validate(context.model_dump()) == context
+
+
+def test_analysis_context_json_mode_dump_is_json_serializable():
+    import json
+
+    context = AnalysisContext(account_type="rrsp", timeline="long_term")
+    dumped = context.model_dump(mode="json")
+    json.dumps(dumped)
+    assert AnalysisContext.model_validate(dumped) == context
