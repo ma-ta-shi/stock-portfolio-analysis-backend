@@ -108,7 +108,12 @@ US_CHAINS: dict[str, list[str]] = {
 CA_CHAINS: dict[str, list[str]] = {
     "get_price_history": ["openbb_tmx", "yfinance"],
     "get_dividend_history": ["openbb_tmx"],
-    "get_quote": ["openbb_tmx", "yfinance"],
+    # openbb_tmx has no get_quote method at all (confirmed live 2026-08-04,
+    # 86bb7j0kh) — yfinance-only, not a real two-link chain. Previously
+    # listed openbb_tmx first, which _try_chain's getattr(provider,
+    # method_name, None) silently skipped every single call, same as a
+    # NotImplementedError would — misleading, not a real fallback.
+    "get_quote": ["yfinance"],
     "get_company_info": ["openbb_tmx"],
     "get_financials": ["yfinance"],
     "get_insider_trading": ["openbb_tmx"],
