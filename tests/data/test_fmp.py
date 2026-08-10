@@ -343,12 +343,51 @@ async def test_get_dividend_history_no_data_returns_empty_list(provider):
 # --- get_quote / get_ratios_ttm (not on the ABC) ---
 
 
-async def test_get_quote_returns_first_record(provider):
-    _wire(provider, FakeResponse(200, json_data=[{"symbol": "AAPL", "price": 334.96}]))
+async def test_get_quote_maps_to_normalized_shape(provider):
+    _wire(
+        provider,
+        FakeResponse(
+            200,
+            json_data=[
+                {
+                    "symbol": "AAPL",
+                    "price": 334.96,
+                    "marketCap": 4_500_000_000_000,
+                    "yearHigh": 344.57,
+                    "yearLow": 223.78,
+                }
+            ],
+        ),
+    )
 
     result = await provider.get_quote("AAPL")
 
-    assert result["price"] == 334.96
+    assert result == {
+        "current_price": 334.96,
+        "market_cap": 4_500_000_000_000,
+        "currency": "USD",
+        "high_52w": 344.57,
+        "low_52w": 223.78,
+    }
+
+
+async def test_get_quote_no_data_returns_empty_dict(provider):
+    _wire(provider, FakeResponse(200, json_data=[]))
+
+    result = await provider.get_quote("ZZZZ")
+
+    assert result == {}
+
+
+async def test_get_quote_null_price_returns_empty_dict(provider):
+    """Real bug caught on review: .get("price", 0.0) only guards a missing
+    key, not an explicit null in the API response — would have silently
+    fabricated a $0.00 quote instead of signaling "no real price"."""
+    _wire(provider, FakeResponse(200, json_data=[{"symbol": "ZZZZ", "price": None}]))
+
+    result = await provider.get_quote("ZZZZ")
+
+    assert result == {}
 
 
 async def test_get_ratios_ttm_returns_first_record(provider):

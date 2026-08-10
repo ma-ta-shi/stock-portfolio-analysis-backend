@@ -9,6 +9,7 @@ from data.providers.base import (
     NewsProvider,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
+    NormalizedQuote,
     StockDataProvider,
 )
 
@@ -214,22 +215,52 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         )
         if not data:
             return []
+        # Real bug caught in a later sweep: .get(key, default) only guards a
+        # missing key, not an explicit null in the API response. Worse than
+        # the silent-None-in-str-field pattern found elsewhere — the old
+        # filter line would have crashed with a TypeError (comparing None
+        # to a string with <=) instead of just producing bad data.
         return [
             NormalizedDividendRecord(
-                ex_date=row.get("date", ""),
+                ex_date=row.get("date") or "",
                 payment_date=row.get("paymentDate"),
-                amount_per_share=row.get("dividend", 0.0),
+                amount_per_share=row.get("dividend") or 0.0,
             )
             for row in data
-            if from_date <= row.get("date", "") <= to_date
+            if from_date <= (row.get("date") or "") <= to_date
         ]
 
-    async def get_quote(self, ticker: str) -> dict:
+    async def get_quote(self, ticker: str) -> NormalizedQuote:
         """Not on StockDataProvider — used internally for the Portfolio Optimizer's
-        bulk price refresh. No bulk quote on the free tier (comma-separated `symbol`
-        returns HTTP 402), so callers must loop this one ticker at a time."""
+        bulk price refresh, and (86bbb17pw) as the price_info source for
+        fundamentals.py. No bulk quote on the free tier (comma-separated `symbol`
+        returns HTTP 402), so callers must loop this one ticker at a time.
+
+        Maps onto NormalizedQuote — real FMP raw field names confirmed live
+        2026-08-10 against AAPL: price, marketCap, yearHigh, yearLow. FMP's
+        /quote has no currency field at all — real, disclosed gap; FMP is
+        US-only in this codebase's routing (CLAUDE.md), so hardcoding "USD"
+        here is the same safe, established pattern as openbb_tmx hardcoding
+        "CAD" in get_company_info() (86bbb001k)."""
         data = await self._request("quote", {"symbol": ticker})
-        return data[0] if data else {}
+        if not data:
+            return {}
+        raw = data[0]
+        price = raw.get("price")
+        # Real bug caught on review: .get("price", 0.0) only guards a missing
+        # key, not an explicit null — and would have silently fabricated a
+        # $0.00 quote instead of signaling "no real price," inconsistent
+        # with yfinance.get_quote()'s own "no valid price -> empty dict"
+        # behavior below.
+        if price is None:
+            return {}
+        return NormalizedQuote(
+            current_price=price,
+            market_cap=raw.get("marketCap"),
+            currency="USD",
+            high_52w=raw.get("yearHigh"),
+            low_52w=raw.get("yearLow"),
+        )
 
     async def get_ratios_ttm(self, ticker: str) -> dict:
         """Not on StockDataProvider. Cross-check only — edgartools.py stays primary
