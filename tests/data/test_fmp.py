@@ -214,12 +214,37 @@ async def test_get_price_history_etf_paywalled_returns_empty_dataframe_not_crash
 # --- get_company_info ---
 
 
-async def test_get_company_info_returns_first_record(provider):
-    _wire(provider, FakeResponse(200, json_data=[{"symbol": "AAPL", "companyName": "Apple Inc."}]))
+async def test_get_company_info_maps_to_normalized_shape(provider):
+    _wire(
+        provider,
+        FakeResponse(
+            200,
+            json_data=[
+                {
+                    "symbol": "AAPL",
+                    "companyName": "Apple Inc.",
+                    "sector": "Technology",
+                    "industry": "Consumer Electronics",
+                    "marketCap": 3_000_000_000_000,
+                    "currency": "USD",
+                    "country": "US",
+                    "exchange": "NASDAQ",
+                }
+            ],
+        ),
+    )
 
     info = await provider.get_company_info("AAPL")
 
-    assert info["companyName"] == "Apple Inc."
+    assert info == {
+        "name": "Apple Inc.",
+        "sector": "Technology",
+        "industry": "Consumer Electronics",
+        "market_cap": 3_000_000_000_000,
+        "currency": "USD",
+        "country": "US",
+        "primary_exchange": "NASDAQ",
+    }
 
 
 async def test_get_company_info_paywalled_ticker_returns_empty_dict(provider):
@@ -292,15 +317,19 @@ async def test_get_earnings_calendar_no_match_returns_empty_list(provider):
 
 async def test_get_dividend_history_filters_by_date_range(provider):
     rows = [
-        {"symbol": "AAPL", "date": "2026-05-11", "dividend": 0.27},
-        {"symbol": "AAPL", "date": "2025-11-10", "dividend": 0.25},
+        {"symbol": "AAPL", "date": "2026-05-11", "dividend": 0.27, "paymentDate": "2026-05-14"},
+        {"symbol": "AAPL", "date": "2025-11-10", "dividend": 0.25, "paymentDate": "2025-11-13"},
     ]
     _wire(provider, FakeResponse(200, json_data=rows))
 
     result = await provider.get_dividend_history("AAPL", "2026-01-01", "2026-12-31")
 
     assert len(result) == 1
-    assert result[0]["date"] == "2026-05-11"
+    assert result[0] == {
+        "ex_date": "2026-05-11",
+        "payment_date": "2026-05-14",
+        "amount_per_share": 0.27,
+    }
 
 
 async def test_get_dividend_history_no_data_returns_empty_list(provider):

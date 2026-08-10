@@ -1,9 +1,19 @@
 import yfinance as yf
 import pandas as pd
+import structlog
 from datetime import datetime, timedelta
 import pandas_datareader.data as web
-from data.providers.base import StockDataProvider, NewsProvider, MacroDataProvider
+from data.providers.base import (
+    StockDataProvider,
+    NewsProvider,
+    MacroDataProvider,
+    NormalizedCompanyInfo,
+    NormalizedDividendRecord,
+    NormalizedFinancials,
+)
 import time
+
+logger = structlog.get_logger(__name__)
 
 # Map the combination of period and statement to the correct yfinance property
 MAPPING = {
@@ -16,6 +26,53 @@ MAPPING = {
 }
 
 
+# Row-label maps for normalize_financials() (86bbb001k) — confirmed live against
+# AAPL's quarterly_financials/quarterly_balance_sheet/quarterly_cashflow (2026-08-07),
+# not guessed. "Interest Expense" is a real row for debt-heavy companies (confirmed
+# on T) but genuinely absent for cash-rich ones like AAPL — a normal None, not a bug.
+_INCOME_ROWS = {
+    "revenue": "Total Revenue",
+    "net_income": "Net Income",
+    "eps": "Diluted EPS",
+    "operating_income": "Operating Income",
+    "interest_expense": "Interest Expense",
+    "tax_expense": "Tax Provision",
+    "cost_of_revenue": "Cost Of Revenue",
+    "shares_outstanding": "Diluted Average Shares",
+}
+_CASHFLOW_ROWS = {
+    "depreciation_amortization": "Depreciation And Amortization",
+    "dividends_paid": "Cash Dividends Paid",
+    "operating_cash_flow": "Operating Cash Flow",
+    "capital_expenditures": "Capital Expenditure",
+}
+_BALANCE_ROWS = {
+    "total_assets": "Total Assets",
+    "total_liabilities": "Total Liabilities Net Minority Interest",
+    "total_equity": "Stockholders Equity",
+    "total_debt": "Total Debt",
+    "cash_and_equivalents": "Cash And Cash Equivalents",
+    "current_assets": "Current Assets",
+    "current_liabilities": "Current Liabilities",
+}
+
+
+def _extract_row(df: pd.DataFrame, row_label: str, column) -> float | None:
+    """Defensive single-cell lookup — a missing row (e.g. no Interest Expense
+    for a cash-rich company) or missing period column returns None rather
+    than raising, matching NormalizedFinancials' graceful-degradation design.
+    Also guards against a duplicate-labeled index (unverified but plausible
+    for messier statements than AAPL/RY.TO) — df.loc[row_label, column]
+    returns a Series, not a scalar, when row_label repeats, which would
+    otherwise crash pd.isna()/float() with an ambiguous-truth-value error."""
+    if row_label not in df.index or column not in df.columns:
+        return None
+    value = df.loc[row_label, column]
+    if isinstance(value, pd.Series):
+        value = value.iloc[0]
+    return None if pd.isna(value) else float(value)
+
+
 def correct_alignment(df: pd.DataFrame) -> pd.DataFrame:
     """Detect and correct the yfinance one-year column misalignment bug
     (financial-data-api-research.md §2). The most recent column should be
@@ -24,6 +81,24 @@ def correct_alignment(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     most_recent = df.columns[0]  # yfinance returns newest first
+    months_old = (pd.Timestamp.now() - most_recent).days / 30
+    if months_old > 18:
+        df.columns = [c + pd.DateOffset(years=1) for c in df.columns]
+    return df
+
+
+def _correct_alignment_like(reference: pd.DataFrame, df: pd.DataFrame) -> pd.DataFrame:
+    """Applies correct_alignment()'s shift decision from `reference` (the
+    always-fetched income statement) to `df`, rather than letting each
+    statement decide independently. Real desync risk otherwise: income and
+    cashflow are separate get_financials() calls, so if their staleness
+    happened to straddle the 18-month threshold differently, correct_alignment()
+    could shift one but not the other, silently misaligning their columns
+    against each other even though the merge in _periods() assumes they
+    share the same column labels."""
+    if df.empty or reference.empty:
+        return df
+    most_recent = reference.columns[0]
     months_old = (pd.Timestamp.now() - most_recent).days / 30
     if months_old > 18:
         df.columns = [c + pd.DateOffset(years=1) for c in df.columns]
@@ -50,24 +125,71 @@ class YFinanceDataProvider(StockDataProvider):
         df = getattr(stock, attribute_name)
         return df
 
-    async def get_company_info(self, ticker: str) -> dict:
+    async def _periods(self, ticker: str, period: str) -> list[dict]:
+        """One entry per period (newest first), merging income + cashflow
+        rows via _INCOME_ROWS/_CASHFLOW_ROWS. Cashflow rows are genuinely
+        absent from the balance sheet's own period columns — a period with
+        income data but no matching cashflow column just gets None for
+        those fields, not dropped entirely."""
+        raw_income = await self.get_financials(ticker, "income", period)
+        cashflow = _correct_alignment_like(raw_income, await self.get_financials(ticker, "cashflow", period))
+        income = correct_alignment(raw_income)
+        if income.empty:
+            return []
+        periods = []
+        for column in income.columns:
+            row = {"period_end": column.date().isoformat()}
+            for field, label in _INCOME_ROWS.items():
+                row[field] = _extract_row(income, label, column)
+            for field, label in _CASHFLOW_ROWS.items():
+                row[field] = _extract_row(cashflow, label, column)
+            periods.append(row)
+        return periods
+
+    async def normalize_financials(self, ticker: str) -> NormalizedFinancials:
+        """Builds NormalizedFinancials (86bbb001k) from this adapter's own
+        get_financials() calls — 4 calls (income/cashflow x quarterly/annual)
+        for quarters/annual, plus one quarterly balance-sheet call for the
+        single latest balance_sheet dict (no per-period balance history
+        needed, per NormalizedFinancials' own "latest only" design)."""
+        quarters = await self._periods(ticker, "quarterly")
+        annual = await self._periods(ticker, "annual")
+
+        balance = correct_alignment(await self.get_financials(ticker, "balance", "quarterly"))
+        balance_sheet: dict = {}
+        if not balance.empty:
+            latest_column = balance.columns[0]
+            for field, label in _BALANCE_ROWS.items():
+                balance_sheet[field] = _extract_row(balance, label, latest_column)
+
+        info = yf.Ticker(ticker).info
+        return NormalizedFinancials(
+            quarters=quarters,
+            annual=annual,
+            balance_sheet=balance_sheet,
+            currency=info.get("currency", ""),
+        )
+
+    async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo:
+        """Maps yfinance's .info onto NormalizedCompanyInfo (86bbb001k).
+        currency/exchange/industry/country/market_cap were previously never
+        extracted at all despite .info having them — real bug, not just a
+        rename."""
         stock = yf.Ticker(ticker)
         info = stock.info
-        # Safely extract key metadata points using .get() to prevent KeyError if data is missing
-        company_profile = {
-            "Symbol": info.get("symbol", ticker.upper()),
-            "Company Name": info.get("longName", "N/A"),
-            "Sector": info.get("sector", "N/A"),
-            "Industry": info.get("industry", "N/A"),
-            "Country": info.get("country", "N/A"),
-            "Full-Time Employees": info.get("fullTimeEmployees", "N/A"),
-            "Website": info.get("website", "N/A"),
-            "Market Cap": info.get("marketCap", "N/A"),
-            "Trailing P/E": info.get("trailingPE", "N/A"),
-            "Forward P/E": info.get("forwardPE", "N/A"),
-            "Business Summary": info.get("longBusinessSummary", "N/A"),
-        }
-        return company_profile
+        # .get(key) or "" (not .get(key, "")) — yfinance's .info can hold an
+        # explicit None for these keys, not just omit them; .get(key, "")
+        # only covers the omitted case and would silently store None in a
+        # str field.
+        return NormalizedCompanyInfo(
+            name=info.get("longName") or "",
+            sector=info.get("sector") or "",
+            industry=info.get("industry") or "",
+            market_cap=info.get("marketCap"),
+            currency=info.get("currency") or "",
+            country=info.get("country") or "",
+            primary_exchange=info.get("exchange") or "",
+        )
 
     async def get_analyst_estimates(self, ticker: str) -> dict:
         stock = yf.Ticker(ticker)
@@ -242,39 +364,46 @@ class YFinanceDataProvider(StockDataProvider):
         }
         return calendar_data
 
-    async def get_dividend_history(self, ticker: str, from_date: str, to_date: str) -> list[dict]:
-        """
-        Retrieves historical dividend payments for a stock within a specific date range.
+    async def get_dividend_history(
+        self, ticker: str, from_date: str, to_date: str
+    ) -> list[NormalizedDividendRecord]:
+        """Retrieves historical dividend payments for a stock within a
+        specific date range, mapped onto NormalizedDividendRecord (86bbb001k).
+
+        Real, confirmed bug fixed here: this method declared -> list[dict]
+        but every code path actually returned a pd.DataFrame — a type-
+        contract violation (not just an unnormalized shape) that would have
+        silently iterated column-name strings instead of dividend records
+        for any caller treating the result as list[dict], per the ABC's own
+        contract. payment_date is a real, disclosed gap for yfinance
+        specifically: its raw .dividends Series has only the ex-dividend
+        date, no separate payment date (unlike FMP/openbb_tmx, both
+        confirmed live to have a real paymentDate/payment_date field).
+
         :param ticker: Stock ticker symbol (e.g., 'KO', 'MSFT')
         :param from_date: Start date string in 'YYYY-MM-DD' format
         :param to_date: End date string in 'YYYY-MM-DD' format
-        :return: A Pandas DataFrame with dates and dividend amounts
         """
         stock = yf.Ticker(ticker)
-        # Fetch the complete raw dividend history Series
         dividends_series = stock.dividends
-        # Guard clause: Check if the stock pays a dividend at all
         if dividends_series is None or dividends_series.empty:
-            print(f"No dividend history found for {ticker.upper()}.")
-            return pd.DataFrame(columns=["Date", "Dividend"])
-        # Filter the Series using the date parameters
-        # Slicing works directly with string dates in Pandas Series
-        try:
-            filtered_series = dividends_series.loc[from_date:to_date]
-        except KeyError:
-            # Handle edge case where exact boundary dates cause lookup errors
-            # Convert series index to string dates for uniform comparison
-            df_temp = dividends_series.to_frame().reset_index()
-            df_temp["Date"] = df_temp["Date"].dt.strftime("%Y-%m-%d")
-            filtered_df = df_temp[(df_temp["Date"] >= from_date) & (df_temp["Date"] <= to_date)]
-            filtered_df.columns = ["Date", "Dividend"]
-            return filtered_df
-        # Restructure the sliced Series into a clean DataFrame
-        df_dividends = filtered_series.to_frame().reset_index()
-        df_dividends.columns = ["Date", "Dividend"]
-        # Clean up the Date column format (remove timezone offset if present)
-        df_dividends["Date"] = df_dividends["Date"].dt.tz_localize(None)
-        return df_dividends
+            logger.info("yfinance_no_dividend_history", ticker=ticker)
+            return []
+        # Normalize the index to plain date strings first so from_date/to_date
+        # comparison is uniform regardless of yfinance's tz-aware index —
+        # avoids the previous code's separate KeyError-catch branch entirely.
+        df = dividends_series.to_frame(name="amount_per_share").reset_index()
+        df.columns = ["ex_date", "amount_per_share"]
+        df["ex_date"] = df["ex_date"].dt.tz_localize(None).dt.strftime("%Y-%m-%d")
+        filtered = df[(df["ex_date"] >= from_date) & (df["ex_date"] <= to_date)]
+        return [
+            NormalizedDividendRecord(
+                ex_date=row["ex_date"],
+                payment_date=None,
+                amount_per_share=float(row["amount_per_share"]),
+            )
+            for row in filtered.to_dict("records")
+        ]
 
     async def get_quote(self, ticker: str) -> dict:
         """Not on StockDataProvider. Mirrors FMPDataProvider.get_quote's shape

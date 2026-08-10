@@ -220,16 +220,23 @@ class Router(StockDataProvider, NewsProvider):
         result, _ = await self._try_chain("get_price_history", ticker, period, interval)
         return result if not _is_empty(result) else pd.DataFrame()
 
-    async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
-        # correct_alignment fixes a yfinance-specific column-misalignment bug
-        # (financial-data-api-research.md §2) — apply it whenever yfinance is
-        # the source, regardless of whether it's the CA primary or US fallback.
+    async def get_financials(
+        self, ticker: str, statement: str, period: str
+    ) -> tuple[pd.DataFrame, str | None]:
+        """Returns (DataFrame, source) — source exposed (86bbb001k) so callers
+        can dispatch to the right adapter's normalize_financials() without
+        Router itself doing any shape translation. _is_empty()/_try_chain()
+        are untouched; this only surfaces a value _try_chain already computed.
+
+        correct_alignment fixes a yfinance-specific column-misalignment bug
+        (financial-data-api-research.md §2) — apply it whenever yfinance is
+        the source, regardless of whether it's the CA primary or US fallback."""
         result, source = await self._try_chain("get_financials", ticker, statement, period)
         if _is_empty(result):
-            return pd.DataFrame()
+            return pd.DataFrame(), source
         if source == "yfinance":
             result = correct_alignment(result)
-        return result
+        return result, source
 
     async def get_company_info(self, ticker: str) -> dict:
         result, _ = await self._try_chain("get_company_info", ticker)

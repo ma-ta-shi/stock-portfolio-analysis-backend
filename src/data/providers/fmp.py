@@ -5,7 +5,12 @@ import aiohttp
 import pandas as pd
 import structlog
 
-from data.providers.base import NewsProvider, StockDataProvider
+from data.providers.base import (
+    NewsProvider,
+    NormalizedCompanyInfo,
+    NormalizedDividendRecord,
+    StockDataProvider,
+)
 
 from dotenv import load_dotenv
 
@@ -150,9 +155,29 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values("date").set_index("date")
 
-    async def get_company_info(self, ticker: str) -> dict:
+    async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo:
+        """Maps FMP's raw /profile response onto NormalizedCompanyInfo
+        (86bbb001k) — real FMP field names confirmed via openbb_fmp's own
+        /profile wrapper (openbb_fmp/models/equity_profile.py's alias dict)
+        and cross-checked against a live-observed field in
+        tests/live/test_provider_completeness.py. All 6 canonical fields
+        are present directly, no derivation needed."""
         data = await self._request("profile", {"symbol": ticker})
-        return data[0] if data else {}
+        if not data:
+            return {}
+        raw = data[0]
+        # .get(key) or "" (not .get(key, "")) — FMP can return an explicit
+        # null for these fields, not just omit the key; .get(key, "") only
+        # covers the omitted case and would silently store None in a str field.
+        return NormalizedCompanyInfo(
+            name=raw.get("companyName") or "",
+            sector=raw.get("sector") or "",
+            industry=raw.get("industry") or "",
+            market_cap=raw.get("marketCap"),
+            currency=raw.get("currency") or "",
+            country=raw.get("country") or "",
+            primary_exchange=raw.get("exchange") or "",
+        )
 
     async def get_analyst_estimates(self, ticker: str) -> dict:
         # `period` is a required param — FMP 400s without it.
@@ -176,15 +201,28 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         ticker_upper = ticker.upper()
         return [row for row in data if row.get("symbol", "").upper() == ticker_upper]
 
-    async def get_dividend_history(self, ticker: str, from_date: str, to_date: str) -> list[dict]:
-        # Renamed from historical-price-full/stock_dividend/{symbol}. Filtered
-        # client-side too, in case the API's own from/to filtering is inconsistent.
+    async def get_dividend_history(
+        self, ticker: str, from_date: str, to_date: str
+    ) -> list[NormalizedDividendRecord]:
+        """Maps FMP's raw /dividends response onto NormalizedDividendRecord
+        (86bbb001k) — real FMP field names confirmed live 2026-08-07 against
+        AAPL: date, dividend, paymentDate. Renamed from
+        historical-price-full/stock_dividend/{symbol}. Filtered client-side
+        too, in case the API's own from/to filtering is inconsistent."""
         data = await self._request(
             "dividends", {"symbol": ticker, "from": from_date, "to": to_date}
         )
         if not data:
             return []
-        return [row for row in data if from_date <= row.get("date", "") <= to_date]
+        return [
+            NormalizedDividendRecord(
+                ex_date=row.get("date", ""),
+                payment_date=row.get("paymentDate"),
+                amount_per_share=row.get("dividend", 0.0),
+            )
+            for row in data
+            if from_date <= row.get("date", "") <= to_date
+        ]
 
     async def get_quote(self, ticker: str) -> dict:
         """Not on StockDataProvider — used internally for the Portfolio Optimizer's

@@ -31,7 +31,12 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from openbb import obb
-from data.providers.base import StockDataProvider, NewsProvider
+from data.providers.base import (
+    StockDataProvider,
+    NewsProvider,
+    NormalizedCompanyInfo,
+    NormalizedDividendRecord,
+)
 
 
 class OpenBBTMXProvider(StockDataProvider, NewsProvider):
@@ -87,14 +92,39 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         requesting the exact format TMX itself returns: strip the .TO/.V
         suffix and swap hyphens for periods, same transform already used
         in get_earnings_calendar — confirmed live for both a plain ticker
-        (RY) and a multi-class/trust-unit one (RCI.B, CAR.UN)."""
+        (RY) and a multi-class/trust-unit one (RCI.B, CAR.UN).
+
+        Maps onto NormalizedCompanyInfo (86bbb001k). Two real, confirmed
+        gaps (live-verified against RY 2026-08-07, not guessed): OpenBB's
+        standard EquityInfo model has no market_cap or currency field at
+        all (TMX's own provider extension only adds email/issue_type/
+        shares_outstanding/shares_escrow/shares_total/dividend_frequency —
+        still neither), and hq_country/inc_country are both None even for
+        a plain, unambiguous TSX primary listing like RY — not just an
+        edge case. currency is safe to hardcode "CAD" (this codebase's own
+        _is_canadian_stock() already treats TSX/TSXV-listed == CAD as a
+        given); market_cap and country are left as their empty/None
+        sentinels — real, disclosed data gaps, not derived from a second
+        API call. industry uses industry_category ("Banking") over the
+        finer industry_group ("Diversified Banks") — closer to the
+        single-level granularity FMP/yfinance's own `industry` field
+        represents."""
         bare_symbol = ticker.removesuffix(".TO").removesuffix(".V").replace("-", ".")
         result = await asyncio.to_thread(
             obb.equity.profile, symbol=bare_symbol, provider=self.PROVIDER
         )
         if not result.results:
             return {}
-        return result.results[0].model_dump()
+        raw = result.results[0].model_dump()
+        return NormalizedCompanyInfo(
+            name=raw.get("name") or "",
+            sector=raw.get("sector") or "",
+            industry=raw.get("industry_category") or "",
+            market_cap=None,
+            currency="CAD",
+            country=raw.get("hq_country") or raw.get("inc_country") or "",
+            primary_exchange=raw.get("stock_exchange") or "",
+        )
 
     async def get_analyst_estimates(self, ticker: str) -> dict:
         """Live-verified 2026-08-04 (86bb7j0kh): one row per ticker —
@@ -172,13 +202,21 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         bare_symbol = ticker.removesuffix(".TO").removesuffix(".V").replace("-", ".")
         return df[df["symbol"] == bare_symbol].to_dict("records")
 
-    async def get_dividend_history(self, ticker: str, from_date: str, to_date: str) -> list[dict]:
+    async def get_dividend_history(
+        self, ticker: str, from_date: str, to_date: str
+    ) -> list[NormalizedDividendRecord]:
         """Fixed 2026-08-04 (86bb7j0kh) — real bug, confirmed live: `.to_df()`
         does NOT set a DatetimeIndex here despite index="date" being the
         default. TMX's dividend model's date field is named
         `ex_dividend_date`, not `date`, so the index falls back to a plain
         RangeIndex and the old `df.index >= from_date` comparison raised
-        TypeError for every CA ticker. Filter on the real column instead."""
+        TypeError for every CA ticker. Filter on the real column instead.
+
+        Maps onto NormalizedDividendRecord (86bbb001k) — confirmed live
+        2026-08-07 that .to_df() already exposes clean, standardized
+        columns (ex_dividend_date, amount, payment_date), unlike
+        get_company_info()'s raw GraphQL keys — just a rename, no derived/
+        missing fields here."""
         result = await asyncio.to_thread(
             obb.equity.fundamental.dividends,
             symbol=ticker,
@@ -191,7 +229,14 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             return []
         dates = pd.to_datetime(df["ex_dividend_date"])
         mask = (dates >= from_date) & (dates <= to_date)
-        return df.loc[mask].to_dict("records")
+        return [
+            NormalizedDividendRecord(
+                ex_date=str(row["ex_dividend_date"]),
+                payment_date=str(row["payment_date"]) if pd.notna(row.get("payment_date")) else None,
+                amount_per_share=float(row["amount"]),
+            )
+            for row in df.loc[mask].to_dict("records")
+        ]
 
     # ---------- NewsProvider ----------
 

@@ -220,6 +220,40 @@ async def test_get_company_info_returns_first_result_only(provider, mock_obb):
 
 
 @pytest.mark.asyncio
+async def test_get_company_info_maps_to_normalized_shape(provider, mock_obb):
+    """86bbb001k: real, confirmed gaps for TMX — no market_cap/currency field
+    exists anywhere in OpenBB's EquityInfo model or TMX's own extension of
+    it (confirmed live against RY 2026-08-07); currency is safe to hardcode
+    "CAD" (any TSX/TSXV listing trades in CAD), market_cap is left None
+    (disclosed gap, not derived via a second API call). industry uses
+    industry_category (coarser, closer to how FMP/yfinance's own `industry`
+    field reads) over the finer industry_group."""
+    mock_obb.equity.profile.return_value = make_results_result(
+        [
+            {
+                "name": "Royal Bank of Canada",
+                "sector": "Finance",
+                "industry_category": "Banking",
+                "industry_group": "Diversified Banks",
+                "stock_exchange": "TSX",
+                "hq_country": None,
+                "inc_country": "CA",
+            }
+        ]
+    )
+    result = await provider.get_company_info(ticker="RY")
+    assert result == {
+        "name": "Royal Bank of Canada",
+        "sector": "Finance",
+        "industry": "Banking",
+        "market_cap": None,
+        "currency": "CAD",
+        "country": "CA",
+        "primary_exchange": "TSX",
+    }
+
+
+@pytest.mark.asyncio
 async def test_get_company_info_empty_results_returns_empty_dict(provider, mock_obb):
     """Real bug fixed 2026-08-04 (86bb7j0kh): the old .to_df()-based code
     would raise on a genuinely empty result rather than returning {}."""
