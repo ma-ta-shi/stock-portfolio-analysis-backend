@@ -328,13 +328,39 @@ async def test_get_cpi_by_province_unrecognized_vector_in_response_is_skipped_an
     )
 
 
+# --- _yoy_pct_for_period ---
+
+
+def test_yoy_pct_for_period_computes_correct_percentage(provider):
+    points = {
+        "2025-06-01": _point("2025-06-01", 100.0),
+        "2026-06-01": _point("2026-06-01", 110.0),
+    }
+    assert provider._yoy_pct_for_period(points, "2026-06-01") == pytest.approx(10.0)
+
+
+def test_yoy_pct_for_period_missing_current_returns_none(provider):
+    points = {"2025-06-01": _point("2025-06-01", 100.0)}
+    assert provider._yoy_pct_for_period(points, "2026-06-01") is None
+
+
+def test_yoy_pct_for_period_missing_prior_year_returns_none(provider):
+    points = {"2026-06-01": _point("2026-06-01", 110.0)}
+    assert provider._yoy_pct_for_period(points, "2026-06-01") is None
+
+
 # --- get_cpi_national ---
 
 
-async def test_get_cpi_national_computes_yoy_and_3m_delta(provider, monkeypatch):
+async def test_get_cpi_national_computes_yoy_and_pp_delta(provider, monkeypatch):
+    """delta_3m_pp is a percentage-point change in the YoY rate (YoY now
+    minus YoY as of 3 months ago), not a percent change of the index —
+    needs 4 points: latest, 3mo-ago, 12mo-ago, and 15mo-ago (the base for
+    'YoY as of 3 months ago')."""
     row = _success_row(
+        _point("2025-03-01", 100.0),  # 15mo ago
         _point("2025-06-01", 100.0),  # 12mo ago
-        _point("2026-03-01", 100.0),  # 3mo ago
+        _point("2026-03-01", 106.0),  # 3mo ago
         _point("2026-06-01", 110.0),  # latest
     )
     _mock_fetch(monkeypatch, provider, [[row]])
@@ -342,12 +368,13 @@ async def test_get_cpi_national_computes_yoy_and_3m_delta(provider, monkeypatch)
     result = await provider.get_cpi_national()
 
     assert result["value"] == pytest.approx(110.0)
-    assert result["yoy_pct"] == pytest.approx(10.0)
-    assert result["delta_3m_pct"] == pytest.approx(10.0)
+    assert result["yoy_pct"] == pytest.approx(10.0)  # 110 vs 100
+    # YoY now (10.0) minus YoY 3mo ago (106 vs 100 = 6.0) = 4.0pp
+    assert result["delta_3m_pp"] == pytest.approx(4.0)
     assert result["reference_period"] == "2026-06-01"
 
 
-async def test_get_cpi_national_requests_14_periods(provider, monkeypatch):
+async def test_get_cpi_national_requests_17_periods(provider, monkeypatch):
     calls = _mock_fetch(
         monkeypatch, provider, [[_success_row(_point("2026-06-01", 110.0))]]
     )
@@ -355,10 +382,14 @@ async def test_get_cpi_national_requests_14_periods(provider, monkeypatch):
     await provider.get_cpi_national()
 
     _, latest_n = calls[0]
-    assert latest_n == 14
+    assert latest_n == 17
 
 
 async def test_get_cpi_national_missing_lookback_points_returns_none_deltas(provider, monkeypatch):
+    """Only the latest point exists — both yoy_pct and delta_3m_pp fail
+    for the same underlying reason (no 12mo-back point at all). Only
+    no_prior_year should log; no_prior_3m_yoy would be a misleading
+    second warning for what's really one root cause."""
     row = _success_row(_point("2026-06-01", 110.0))
     _mock_fetch(monkeypatch, provider, [[row]])
 
@@ -367,9 +398,28 @@ async def test_get_cpi_national_missing_lookback_points_returns_none_deltas(prov
 
     assert result["value"] == pytest.approx(110.0)
     assert result["yoy_pct"] is None
-    assert result["delta_3m_pct"] is None
+    assert result["delta_3m_pp"] is None
     assert any(log["event"] == "statcan_cpi_national_no_prior_year" for log in logs)
-    assert any(log["event"] == "statcan_cpi_national_no_prior_3m" for log in logs)
+    assert not any(log["event"] == "statcan_cpi_national_no_prior_3m_yoy" for log in logs)
+
+
+async def test_get_cpi_national_missing_only_15mo_point_returns_none_delta(provider, monkeypatch):
+    """3mo-ago point exists (so YoY-now resolves fine), but its own
+    prior-year point (15mo back) is missing — delta_3m_pp must still
+    come back None, not a wrong number computed from a partial YoY."""
+    row = _success_row(
+        _point("2025-06-01", 100.0),  # 12mo ago
+        _point("2026-03-01", 106.0),  # 3mo ago
+        _point("2026-06-01", 110.0),  # latest
+    )
+    _mock_fetch(monkeypatch, provider, [[row]])
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_cpi_national()
+
+    assert result["yoy_pct"] == pytest.approx(10.0)
+    assert result["delta_3m_pp"] is None
+    assert any(log["event"] == "statcan_cpi_national_no_prior_3m_yoy" for log in logs)
 
 
 async def test_get_cpi_national_failed_status_returns_none(provider, monkeypatch):

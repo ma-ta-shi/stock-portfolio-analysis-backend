@@ -89,7 +89,7 @@ def _full_fred_series() -> dict[str, pd.Series]:
         "DGS2": _series({0: 4.25}),
         "DGS5": _series({0: 4.40}),
         "DGS10": _series({0: 4.70}),
-        "CPIAUCSL": _series({90: 320.0, 0: 322.0}),
+        "CPIAUCSL": _series({455: 310.0, 365: 313.0, 90: 320.0, 0: 322.0}),
         "CPILFESL": _series({0: 330.0}),
         "GDP": _series({0: 28000.0}),
         "UNRATE": _series({180: 3.9, 0: 4.2}),
@@ -162,6 +162,18 @@ async def test_unemployment_delta_is_point_delta_not_pct():
     """3.9% -> 4.2% over ~6mo = +0.3 (point delta, not percent change)."""
     bundle = await _compute()
     assert bundle.unemployment_6m_delta == pytest.approx(0.3, abs=0.001)
+
+
+@pytest.mark.asyncio
+async def test_cpi_delta_is_pp_change_in_yoy_rate_not_pct_of_index():
+    """CPIAUCSL: 310 (455d ago), 313 (365d ago), 320 (90d ago), 322 (now).
+    YoY now = 322 vs 313 = +2.88%. YoY 3mo ago = 320 vs 310 = +3.23%.
+    cpi_3m_delta_pp = 2.88 - 3.23 = -0.35pp (not a percent change of the
+    index itself, and not the same number a naive _pct_change(90d) would
+    give)."""
+    bundle = await _compute()
+    assert bundle.cpi_3m_delta_pp == pytest.approx(-0.35, abs=0.01)
+    assert bundle.cpi_trend == "falling"  # -0.35 < -0.3 deadband
 
 
 @pytest.mark.asyncio
@@ -395,7 +407,7 @@ async def test_statcan_called_and_populated_for_a_canadian_stock():
     stats_canada = _FakeStatsCanada(
         unemployment={"value": 6.8, "released": "2026-07-04"},
         cpi_by_province={"value": {"ON": 160.1, "BC": 158.4}, "released": None},
-        cpi_national={"value": 169.0, "yoy_pct": 10.0, "delta_3m_pct": 0.5, "reference_period": "2026-06-01", "released": "2026-07-20T08:30"},
+        cpi_national={"value": 169.0, "yoy_pct": 10.0, "delta_3m_pp": 0.5, "reference_period": "2026-06-01", "released": "2026-07-20T08:30"},
         gdp_index={"value": 116.8, "qoq_annualized_pct": 2.1, "yoy_pct": -1.5, "reference_period": "2026-01-01", "released": "2026-05-29T08:30"},
     )
     bundle = await _compute(is_canadian_stock=True, stats_canada=stats_canada)
@@ -424,7 +436,7 @@ async def test_statcan_age_days_falls_back_to_cpi_or_gdp_when_others_fail():
         cpi_national={
             "value": 169.0,
             "yoy_pct": 2.8,
-            "delta_3m_pct": 0.5,
+            "delta_3m_pp": 0.5,
             "reference_period": "2026-06-01",
             "released": "2026-07-20T08:30",
         },
@@ -432,6 +444,25 @@ async def test_statcan_age_days_falls_back_to_cpi_or_gdp_when_others_fail():
     bundle = await _compute(is_canadian_stock=True, stats_canada=stats_canada)
     assert bundle.statcan_age_days is not None
     assert bundle.canada_cpi == 169.0
+
+
+@pytest.mark.asyncio
+async def test_ca_cpi_yoy_and_delta_rounded_to_2_decimals():
+    """StatsCanadaProvider always returns raw, unrounded floats — rounding
+    is macro_sources.py's job, matching cpi_3m_delta_pp's precision on
+    the US side. Regression test for 86bbeu0jy."""
+    stats_canada = _FakeStatsCanada(
+        cpi_national={
+            "value": 169.0,
+            "yoy_pct": 2.7980535279805316,
+            "delta_3m_pp": 0.9557945041815976,
+            "reference_period": "2026-06-01",
+            "released": "2026-07-20T08:30",
+        },
+    )
+    bundle = await _compute(is_canadian_stock=True, stats_canada=stats_canada)
+    assert bundle.ca_cpi_yoy == pytest.approx(2.80)
+    assert bundle.ca_cpi_3m_delta == pytest.approx(0.96)
 
 
 @pytest.mark.asyncio

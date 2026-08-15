@@ -255,20 +255,52 @@ class StatsCanadaProvider:
             "released": None,
         }
 
+    @staticmethod
+    def _yoy_pct_for_period(points: dict[str, dict], period: str) -> float | None:
+        """YoY % change for a specific period, using already-fetched
+        points. Pure computation, no logging — callers log with their own
+        context-specific event names, since 'which point was missing'
+        means something different depending on what's being computed
+        from the result.
+
+        Returns unrounded, matching every other method's convention on
+        this provider. Note (86bbeu0jy): get_cpi_national()'s delta_3m_pp
+        is the difference of two unrounded calls to this method, rounded
+        once at the end — the US-side equivalent (macro_sources.py's
+        _yoy_pct_at) instead rounds each YoY component before subtracting,
+        then rounds the difference again. Both are defensible and the
+        numeric gap between them is negligible in practice, but it's an
+        unexplained asymmetry between two code paths doing the same
+        conceptual thing. Not worth unifying on its own; worth knowing if
+        the two ever need to agree to the last digit for some future
+        comparison (e.g. cross-jurisdiction calibration)."""
+        current = points.get(period)
+        prior = points.get(_shift_year(period, -1))
+        if current is None or prior is None:
+            return None
+        current_value = StatsCanadaProvider._scaled_value(current)
+        prior_value = StatsCanadaProvider._scaled_value(prior)
+        if prior_value == 0:
+            return None
+        return ((current_value - prior_value) / prior_value) * 100
+
     async def get_cpi_national(self) -> dict | None:
         """All-items CPI index level for Canada (replaces the dead FRED
         CPALTT01CAM657N series — see ClickUp 86bbahum6). Maps to
         MacroSourcesBundle.canada_cpi/ca_cpi_yoy/ca_cpi_3m_delta, and
-        indirectly ca_cpi_trend (precompute classifies delta_3m_pct into
+        indirectly ca_cpi_trend (precompute classifies delta_3m_pp into
         the trend enum, not this method).
 
-        latest_n=14 covers the latest point plus both lookback comparisons
-        (12mo-ago for YoY, 3mo-ago for the delta) with room to spare.
-        Lookback points are found by exact refPer match, not list
-        position — same rationale as get_retail_sales_yoy(): a positional
-        lookup would silently return the wrong calendar period if the
-        series has a gap."""
-        data = await self._fetch_vectors([_CPI_NATIONAL_VECTOR], latest_n=14)
+        delta_3m_pp is a percentage-point change in the YoY inflation
+        rate (YoY now minus YoY as of 3 months ago), not a percent change
+        of the index — see ClickUp 86bbeu0jy. That needs the index value
+        15 months back (3 + 12) as the oldest point, so latest_n=17
+        (16 minimum + 1 month buffer, matching get_real_gdp_index()'s
+        buffer-over-minimum convention). Lookback points are found by
+        exact refPer match, not list position — same rationale as
+        get_retail_sales_yoy(): a positional lookup would silently return
+        the wrong calendar period if the series has a gap."""
+        data = await self._fetch_vectors([_CPI_NATIONAL_VECTOR], latest_n=17)
         row = data[0]
         if row.get("status") != "SUCCESS":
             logger.warning("statcan_cpi_national_missing")
@@ -283,26 +315,27 @@ class StatsCanadaProvider:
         latest = points[latest_period]
         latest_value = self._scaled_value(latest)
 
-        yoy_pct = None
-        prior_year = points.get(_shift_year(latest_period, -1))
-        if prior_year is not None:
-            prior_year_value = self._scaled_value(prior_year)
-            yoy_pct = ((latest_value - prior_year_value) / prior_year_value) * 100
-        else:
+        yoy_pct = self._yoy_pct_for_period(points, latest_period)
+        if yoy_pct is None:
             logger.warning("statcan_cpi_national_no_prior_year", latest_period=latest_period)
 
-        delta_3m_pct = None
-        prior_3m = points.get(_shift_months(latest_period, -3))
-        if prior_3m is not None:
-            prior_3m_value = self._scaled_value(prior_3m)
-            delta_3m_pct = ((latest_value - prior_3m_value) / prior_3m_value) * 100
-        else:
-            logger.warning("statcan_cpi_national_no_prior_3m", latest_period=latest_period)
+        delta_3m_pp = None
+        three_m_ago_period = _shift_months(latest_period, -3)
+        yoy_3mo_ago = self._yoy_pct_for_period(points, three_m_ago_period)
+        if yoy_pct is not None and yoy_3mo_ago is not None:
+            delta_3m_pp = yoy_pct - yoy_3mo_ago
+        elif yoy_pct is not None:
+            # Only warn about the 3-month-specific lookback here when the
+            # 12-month one (yoy_pct) actually succeeded — otherwise this
+            # would double-log a single root cause (e.g. a large series
+            # gap) as two seemingly-unrelated problems; the no_prior_year
+            # warning above already covers the yoy_pct failure case.
+            logger.warning("statcan_cpi_national_no_prior_3m_yoy", latest_period=latest_period)
 
         return {
             "value": latest_value,
             "yoy_pct": yoy_pct,
-            "delta_3m_pct": delta_3m_pct,
+            "delta_3m_pp": delta_3m_pp,
             "reference_period": latest_period,
             "released": latest["releaseTime"],
         }

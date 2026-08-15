@@ -45,6 +45,12 @@ MacroSourcesBundle dataclass, and financial-data-api-research.md):
   mappings (Energy, Materials, Industrials, Utilities) are documented
   anywhere found; all other sectors fall through to
   sector_commodity_relevant=False.
+- cpi_3m_delta_pp/ca_cpi_3m_delta were computed as a percent change of
+  the raw CPI index (_pct_change, same formula as CAD/commodity) until
+  86bbeu0jy (2026-08-15) — wrong: the doc labels this field "(percentage
+  points)", distinct from the "(pct)"-labeled CAD/commodity fields, and
+  the live prompt confirms it wants a change in the YoY inflation rate,
+  not the index. Fixed for both jurisdictions together.
 
 Trend-classification thresholds (rate_trend/cpi_trend/cad_trend/
 vix_regime/gdp_trend) are first-pass, not sourced from any doc — same
@@ -178,12 +184,33 @@ def _point_delta(series: pd.Series, as_of: date, lookback_days: int) -> float | 
 
 def _pct_change(series: pd.Series, as_of: date, lookback_days: int) -> float | None:
     """Percent change (latest vs past), for fields expressed as an index
-    level or price (CPI index, CAD/USD, commodity levels)."""
+    level or price (CAD/USD, commodity levels)."""
     latest = _latest_value(series)
     past = _value_n_days_ago(series, as_of, lookback_days)
     if latest is None or past is None or past == 0:
         return None
     return round((latest / past - 1) * 100, 2)
+
+
+def _yoy_pct_at(series: pd.Series, as_of: date, days_ago: int) -> float | None:
+    """YoY % change as of (as_of - days_ago), not as of today — needed to
+    compare 'the inflation rate now' against 'the inflation rate 3 months
+    ago', not just the index level at those two points. See ClickUp
+    86bbeu0jy: CPI's delta must be a percentage-point change in the YoY
+    rate, not a percent change of the raw index (that's what _pct_change
+    is for, and what this field wrongly used before).
+
+    Rounds each YoY component before the caller subtracts them (and the
+    caller rounds the difference again) — the Canada-side equivalent
+    (stats_canada.py's _yoy_pct_for_period) does it the other way,
+    subtracting fully unrounded values and rounding only the final
+    result. See that function's docstring for why this asymmetry exists
+    and is left as-is."""
+    current = _value_n_days_ago(series, as_of, days_ago)
+    prior = _value_n_days_ago(series, as_of, days_ago + 365)
+    if current is None or prior is None or prior == 0:
+        return None
+    return round((current / prior - 1) * 100, 2)
 
 
 def _policy_rate_delta_bp(fed_funds: pd.Series, as_of: date) -> float | None:
@@ -413,6 +440,24 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
     # dropped, not persisted.
     gdp_yoy_pct = gdp_index["yoy_pct"] if gdp_index else None
 
+    # Rounded to 2 decimals here (not in stats_canada.py, which always
+    # returns raw) to match cpi_3m_delta_pp's precision on the US side —
+    # StatCan's own published index is only precise to ~1 decimal, so
+    # anything past 2 decimals in a computed ratio is arithmetic noise,
+    # not signal. ca_cpi_trend classifies off this same rounded value,
+    # not the raw one, so the stored field and its trend never disagree
+    # about which side of the threshold they're on. See ClickUp 86bbeu0jy.
+    ca_cpi_yoy = (
+        round(cpi_national["yoy_pct"], 2)
+        if cpi_national and cpi_national["yoy_pct"] is not None
+        else None
+    )
+    ca_cpi_3m_delta = (
+        round(cpi_national["delta_3m_pp"], 2)
+        if cpi_national and cpi_national["delta_3m_pp"] is not None
+        else None
+    )
+
     return {
         "statcan_unemployment_ca": unemployment["value"] if unemployment else None,
         "statcan_housing_starts": housing["value"] if housing else None,
@@ -420,9 +465,9 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
         "statcan_cpi_by_province": cpi_by_province["value"] if cpi_by_province else None,
         "statcan_age_days": age_days,
         "canada_cpi": cpi_national["value"] if cpi_national else None,
-        "ca_cpi_yoy": cpi_national["yoy_pct"] if cpi_national else None,
-        "ca_cpi_3m_delta": cpi_national["delta_3m_pct"] if cpi_national else None,
-        "ca_cpi_trend": _cpi_trend(cpi_national["delta_3m_pct"]) if cpi_national else None,
+        "ca_cpi_yoy": ca_cpi_yoy,
+        "ca_cpi_3m_delta": ca_cpi_3m_delta,
+        "ca_cpi_trend": _cpi_trend(ca_cpi_3m_delta),
         "ca_gdp_qoq": gdp_index["qoq_annualized_pct"] if gdp_index else None,
         "ca_gdp_4q_trend": _gdp_trend(gdp_yoy_pct),
     }
@@ -500,7 +545,13 @@ async def compute_macro_sources(
     gdp_series = fred_series_for("gdp")
 
     policy_rate_delta_bp = _policy_rate_delta_bp(fed_funds_series, as_of_date)
-    cpi_delta_pct = _pct_change(cpi_series, as_of_date, 90)
+    cpi_yoy_now = _yoy_pct_at(cpi_series, as_of_date, 0)
+    cpi_yoy_3mo_ago = _yoy_pct_at(cpi_series, as_of_date, 90)
+    cpi_delta_pp = (
+        None
+        if cpi_yoy_now is None or cpi_yoy_3mo_ago is None
+        else round(cpi_yoy_now - cpi_yoy_3mo_ago, 2)
+    )
     cad_change_pct = _pct_change(cad_usd_fred_series, as_of_date, 90)
     unemployment_delta = _point_delta(unemployment_series, as_of_date, 180)  # ~6 months
     latest_vix = _latest_value(vix_series)
@@ -538,12 +589,12 @@ async def compute_macro_sources(
         canada_bond_5y=_latest_value(boc_series_for("canada_bond_5y")),
         canada_bond_10y=canada_bond_10y,
         policy_rate_90d_delta_bp=policy_rate_delta_bp,
-        cpi_3m_delta_pp=cpi_delta_pct,
+        cpi_3m_delta_pp=cpi_delta_pp,
         cad_usd_90d_change_pct=cad_change_pct,
         commodity_90d_change_pct=sector_commodity["commodity_90d_change_pct"],
         unemployment_6m_delta=unemployment_delta,
         rate_trend=_rate_trend(policy_rate_delta_bp),
-        cpi_trend=_cpi_trend(cpi_delta_pct),
+        cpi_trend=_cpi_trend(cpi_delta_pp),
         cad_trend=_cad_trend(cad_change_pct),
         vix_regime=_vix_regime(latest_vix),
         us_curve_shape=us_curve_shape,
