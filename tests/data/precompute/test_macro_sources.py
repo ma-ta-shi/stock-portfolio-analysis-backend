@@ -46,11 +46,21 @@ class _FakeFinnhub:
 
 
 class _FakeStatsCanada:
-    def __init__(self, unemployment=None, housing=None, retail=None, cpi_by_province=None):
+    def __init__(
+        self,
+        unemployment=None,
+        housing=None,
+        retail=None,
+        cpi_by_province=None,
+        cpi_national=None,
+        gdp_index=None,
+    ):
         self._unemployment = unemployment
         self._housing = housing
         self._retail = retail
         self._cpi_by_province = cpi_by_province
+        self._cpi_national = cpi_national
+        self._gdp_index = gdp_index
         self.call_count = 0
 
     async def get_unemployment_rate(self):
@@ -66,6 +76,12 @@ class _FakeStatsCanada:
     async def get_cpi_by_province(self):
         return self._cpi_by_province
 
+    async def get_cpi_national(self):
+        return self._cpi_national
+
+    async def get_real_gdp_index(self):
+        return self._gdp_index
+
 
 def _full_fred_series() -> dict[str, pd.Series]:
     return {
@@ -80,7 +96,6 @@ def _full_fred_series() -> dict[str, pd.Series]:
         "VIXCLS": _series({0: 16.5}),
         "DEXCAUS": _series({90: 1.35, 0: 1.40}),
         "DCOILWTICO": _series({0: 78.5}),
-        "CPALTT01CAM657N": _series({0: 160.0}),
     }
 
 
@@ -123,7 +138,7 @@ async def test_full_construction_with_all_series_present():
     assert bundle.boc_rate == 4.5
     assert bundle.cad_usd == 0.73
     assert bundle.canada_bond_10y == 3.8
-    assert bundle.canada_cpi == 160.0
+    assert bundle.canada_cpi is None  # StatsCanada-sourced now; no provider passed here
 
 
 @pytest.mark.asyncio
@@ -371,6 +386,8 @@ async def test_statcan_not_called_for_a_us_stock():
     bundle = await _compute(is_canadian_stock=False, stats_canada=stats_canada)
     assert stats_canada.call_count == 0
     assert bundle.statcan_unemployment_ca is None
+    assert bundle.canada_cpi is None
+    assert bundle.ca_gdp_qoq is None
 
 
 @pytest.mark.asyncio
@@ -378,12 +395,43 @@ async def test_statcan_called_and_populated_for_a_canadian_stock():
     stats_canada = _FakeStatsCanada(
         unemployment={"value": 6.8, "released": "2026-07-04"},
         cpi_by_province={"value": {"ON": 160.1, "BC": 158.4}, "released": None},
+        cpi_national={"value": 169.0, "yoy_pct": 10.0, "delta_3m_pct": 0.5, "reference_period": "2026-06-01", "released": "2026-07-20T08:30"},
+        gdp_index={"value": 116.8, "qoq_annualized_pct": 2.1, "yoy_pct": -1.5, "reference_period": "2026-01-01", "released": "2026-05-29T08:30"},
     )
     bundle = await _compute(is_canadian_stock=True, stats_canada=stats_canada)
     assert stats_canada.call_count == 1
     assert bundle.statcan_unemployment_ca == 6.8
     assert bundle.statcan_cpi_by_province == {"ON": 160.1, "BC": 158.4}
     assert bundle.statcan_age_days is not None
+    assert bundle.canada_cpi == 169.0
+    assert bundle.ca_cpi_yoy == 10.0
+    assert bundle.ca_cpi_3m_delta == 0.5
+    assert bundle.ca_cpi_trend == "rising"  # 0.5 > 0.3 deadband
+    assert bundle.ca_gdp_qoq == 2.1
+    assert bundle.ca_gdp_4q_trend == "falling"  # yoy_pct -1.5 < -1.0 deadband
+
+
+@pytest.mark.asyncio
+async def test_statcan_age_days_falls_back_to_cpi_or_gdp_when_others_fail():
+    """Regression test: unemployment/housing/retail all failing must not
+    report statcan_age_days=None if cpi_national/gdp_index actually
+    succeeded — real Canadian macro data was fetched, the age tracking
+    must reflect that."""
+    stats_canada = _FakeStatsCanada(
+        unemployment=None,
+        housing=None,
+        retail=None,
+        cpi_national={
+            "value": 169.0,
+            "yoy_pct": 2.8,
+            "delta_3m_pct": 0.5,
+            "reference_period": "2026-06-01",
+            "released": "2026-07-20T08:30",
+        },
+    )
+    bundle = await _compute(is_canadian_stock=True, stats_canada=stats_canada)
+    assert bundle.statcan_age_days is not None
+    assert bundle.canada_cpi == 169.0
 
 
 @pytest.mark.asyncio
@@ -392,6 +440,10 @@ async def test_canadian_stock_with_no_stats_canada_provider_stays_none():
     crash, just skip (matches the None-default parameter)."""
     bundle = await _compute(is_canadian_stock=True, stats_canada=None)
     assert bundle.statcan_unemployment_ca is None
+    assert bundle.canada_cpi is None
+    assert bundle.ca_cpi_trend is None
+    assert bundle.ca_gdp_qoq is None
+    assert bundle.ca_gdp_4q_trend is None
 
 
 # ---------- reliability age fields ----------

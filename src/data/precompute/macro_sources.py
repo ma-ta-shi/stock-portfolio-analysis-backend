@@ -14,13 +14,11 @@ MacroSourcesBundle dataclass, and financial-data-api-research.md):
   field exists) — Canada unemployment is instead covered by the
   StatCan-sourced statcan_unemployment_ca field via a different provider,
   and Canada GDP has no modeled destination at all. Not fetched here.
-- CPALTT01CAM657N (Canada CPI via OECD) IS fetched, despite
-  MacroSourcesBundle's own inline comment grouping canada_cpi under
-  "# BoC Valet series" — financial-data-api-research.md's agent-data-
-  mapping table explicitly states "Canadian CPI, unemployment | FRED (via
-  OECD)", and fred.py's own DEFAULT_SERIES_IDS already includes this
-  series, confirming FRED (not BoC) is the real source. canada_cpi is
-  FRED-sourced here.
+- canada_cpi/ca_cpi_yoy/ca_cpi_3m_delta/ca_cpi_trend/ca_gdp_qoq/
+  ca_gdp_4q_trend are StatsCanada-sourced (86bbahum6, resolved
+  2026-08-15), not FRED — CPALTT01CAM657N (the series financial-data-
+  api-research.md's original mapping table pointed to) is confirmed dead
+  (wrong shape, stale since 2024-02) and is no longer fetched at all.
 - The ticket's (a) list groups FXCADUSD under "FRED:", but
   financial-data-api-research.md §7 lists FXCADUSD as a Bank of Canada
   Valet series, and boc.py's get_exchange_rates() already uses it (via
@@ -31,13 +29,13 @@ MacroSourcesBundle dataclass, and financial-data-api-research.md):
   provider layer (no FMP revenue-by-geography method exists) — always
   None for this build, consistent with the field's Optional design.
   Building that provider method is out of this ticket's scope.
-- Single delta/trend fields (policy_rate_90d_delta_bp/rate_trend,
-  cpi_3m_delta_pp/cpi_trend) are always US-sourced (FEDFUNDS/CPIAUCSL) —
-  matching gdp/unemployment/vix, which are unconditionally US-only in
-  this contract (no CA-variant field exists for any of them). Canada gets
-  its own CPI reading (canada_cpi) and its own bond-yield/BoC-rate block,
-  but not a parallel delta/trend apparatus — this mirrors the contract's
-  own asymmetric field design, not an invented convention.
+- policy_rate_90d_delta_bp/rate_trend remain US-only (FEDFUNDS) — no BoC
+  policy-rate-delta/trend counterpart exists in the contract, matching
+  gdp/unemployment/vix (unconditionally US-only, no CA variant). CPI is
+  no longer part of that asymmetric group as of 86bbahum6: Canada now has
+  its own parallel delta/trend apparatus (ca_cpi_yoy/ca_cpi_3m_delta/
+  ca_cpi_trend, ca_gdp_qoq/ca_gdp_4q_trend), not just the raw canada_cpi
+  reading — see the reconciliation entry above.
 - Materials sector maps to copper only, not "copper/gold" as the doc
   lists — GOLDAMGBD228NLBM and GOLDPMGBD228NLBM (the standard FRED gold
   fixing series) are both discontinued (confirmed live 2026-08-07, empty
@@ -49,8 +47,8 @@ MacroSourcesBundle dataclass, and financial-data-api-research.md):
   sector_commodity_relevant=False.
 
 Trend-classification thresholds (rate_trend/cpi_trend/cad_trend/
-vix_regime) are first-pass, not sourced from any doc — same disclosure
-pattern as fundamentals.py's health_rating thresholds.
+vix_regime/gdp_trend) are first-pass, not sourced from any doc — same
+disclosure pattern as fundamentals.py's health_rating thresholds.
 """
 
 from datetime import UTC, date, datetime, timedelta
@@ -80,7 +78,6 @@ _FRED_SERIES = {
     "vix": "VIXCLS",
     "cad_usd_fred": "DEXCAUS",
     "wti_crude": "DCOILWTICO",
-    "canada_cpi": "CPALTT01CAM657N",
 }
 
 _BOC_BOND_SERIES = {
@@ -216,6 +213,21 @@ def _cpi_trend(delta_pct: float | None) -> Literal["rising", "stable", "falling"
     if delta_pct > 0.3:
         return "rising"
     if delta_pct < -0.3:
+        return "falling"
+    return "stable"
+
+
+def _gdp_trend(yoy_pct: float | None) -> Literal["rising", "stable", "falling"] | None:
+    """Own deadband, not _cpi_trend's ±0.3 — a 12-month GDP change and a
+    3-month CPI change are different-scale quantities, so reusing CPI's
+    threshold would be an unexamined borrow, not a real design choice.
+    First-pass, not sourced from any doc, same disclosure as every other
+    threshold in this module."""
+    if yoy_pct is None:
+        return None
+    if yoy_pct > 1.0:
+        return "rising"
+    if yoy_pct < -1.0:
         return "falling"
     return "stable"
 
@@ -372,16 +384,20 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
     housing = await stats_canada.get_housing_starts()
     retail = await stats_canada.get_retail_sales_yoy()
     cpi_by_province = await stats_canada.get_cpi_by_province()
+    cpi_national = await stats_canada.get_cpi_national()
+    gdp_index = await stats_canada.get_real_gdp_index()
 
     # statcan_age_days is one field, not one per statcan_* value — no doc
     # says which underlying fetch it should track, so it's taken from
-    # whichever of the four resolved first (unemployment preferred, since
+    # whichever of these resolved first (unemployment preferred, since
     # it's the statcan_* field explicitly named in the reliability-scorer
     # ticket text). get_cpi_by_province() never returns a "released" date
     # (confirmed in stats_canada.py — always None), so it can't anchor
-    # this even as a last resort.
+    # this even as a last resort. cpi_national/gdp_index included so a
+    # run where unemployment/housing/retail all fail but CPI/GDP succeed
+    # doesn't silently report no Canadian macro data was fetched at all.
     age_days = None
-    for result in (unemployment, housing, retail):
+    for result in (unemployment, housing, retail, cpi_national, gdp_index):
         if result and result.get("released"):
             try:
                 released_date = datetime.fromisoformat(result["released"]).date()
@@ -390,12 +406,25 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
                 continue
             break
 
+    # ca_gdp_4q_trend classifies off gdp_index's yoy_pct — yoy_pct itself
+    # isn't a MacroSourcesBundle field (see stats_canada.py's
+    # get_real_gdp_index() docstring: the prompt has no placeholder for
+    # it, only ca_gdp_qoq/ca_gdp_4q_trend), so it's consumed here and
+    # dropped, not persisted.
+    gdp_yoy_pct = gdp_index["yoy_pct"] if gdp_index else None
+
     return {
         "statcan_unemployment_ca": unemployment["value"] if unemployment else None,
         "statcan_housing_starts": housing["value"] if housing else None,
         "statcan_retail_sales_yoy": retail["value"] if retail else None,
         "statcan_cpi_by_province": cpi_by_province["value"] if cpi_by_province else None,
         "statcan_age_days": age_days,
+        "canada_cpi": cpi_national["value"] if cpi_national else None,
+        "ca_cpi_yoy": cpi_national["yoy_pct"] if cpi_national else None,
+        "ca_cpi_3m_delta": cpi_national["delta_3m_pct"] if cpi_national else None,
+        "ca_cpi_trend": _cpi_trend(cpi_national["delta_3m_pct"]) if cpi_national else None,
+        "ca_gdp_qoq": gdp_index["qoq_annualized_pct"] if gdp_index else None,
+        "ca_gdp_4q_trend": _gdp_trend(gdp_yoy_pct),
     }
 
 
@@ -405,6 +434,12 @@ _EMPTY_STATCAN_FIELDS = {
     "statcan_retail_sales_yoy": None,
     "statcan_cpi_by_province": None,
     "statcan_age_days": None,
+    "canada_cpi": None,
+    "ca_cpi_yoy": None,
+    "ca_cpi_3m_delta": None,
+    "ca_cpi_trend": None,
+    "ca_gdp_qoq": None,
+    "ca_gdp_4q_trend": None,
 }
 
 
@@ -502,7 +537,6 @@ async def compute_macro_sources(
         canada_bond_2y=canada_bond_2y,
         canada_bond_5y=_latest_value(boc_series_for("canada_bond_5y")),
         canada_bond_10y=canada_bond_10y,
-        canada_cpi=_latest_value(fred_series_for("canada_cpi")),
         policy_rate_90d_delta_bp=policy_rate_delta_bp,
         cpi_3m_delta_pp=cpi_delta_pct,
         cad_usd_90d_change_pct=cad_change_pct,

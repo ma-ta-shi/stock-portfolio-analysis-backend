@@ -1,4 +1,5 @@
 import aiohttp
+import pandas as pd
 import structlog
 
 logger = structlog.get_logger(__name__)
@@ -23,6 +24,18 @@ _RETAIL_SALES_VECTOR = (
     1446859481  # table 20100056, Canada, Retail trade, Total retail sales, Unadjusted
 )
 
+# table 18100004, Canada;All-items (index level, not the dead FRED
+# CPALTT01CAM657N MoM-%-change series — see ClickUp 86bbahum6). Verified
+# live 2026-08-15 via getSeriesInfoFromCubePidCoord, coordinate
+# "2.2.0.0.0.0.0.0.0.0" (Geography=Canada, Products=All-items).
+_CPI_NATIONAL_VECTOR = 41690973
+
+# table 36100105, Canada;Real gross domestic product, volume index
+# 2017=100 (quarterly). Verified live 2026-08-15 via
+# getSeriesInfoFromCubePidCoord, coordinate "1.1.0.0.0.0.0.0.0.0"
+# (Geography=Canada, Estimates=Real GDP volume index).
+_GDP_VOLUME_INDEX_VECTOR = 61992650
+
 # table 18100004, All-items CPI vector per province. Territories aren't
 # included — WDS only carries them at the city level (Whitehorse/Yellowknife/
 # Iqaluit), not province/territory-wide, so there's no matching vector.
@@ -46,12 +59,20 @@ def _shift_year(ref_per: str, delta_years: int) -> str:
     return f"{int(year) + delta_years}-{month}-{day}"
 
 
+def _shift_months(ref_per: str, delta_months: int) -> str:
+    """'2026-04-01' shifted by -3 -> '2026-01-01'. Uses pd.Period for the
+    month-rollover arithmetic rather than hand-rolled modulo math — pandas
+    is already a hard dependency of this module."""
+    period = pd.Period(ref_per, freq="M") + delta_months
+    return f"{period.year:04d}-{period.month:02d}-01"
+
+
 class StatsCanadaProvider:
     """Statistics Canada Web Data Service (WDS) — supplementary Canadian
     macro data (unemployment, housing starts, retail sales YoY, CPI by
-    province) for MacroSourcesBundle's statcan_* fields. Runs alongside
-    boc.py for Canadian stocks; supplementary, not primary — Bank of Canada
-    Valet is.
+    province, national CPI, real GDP index) for MacroSourcesBundle's
+    statcan_*/ca_cpi_*/ca_gdp_* fields. Runs alongside boc.py for
+    Canadian stocks; supplementary, not primary — Bank of Canada Valet is.
 
     Deliberately doesn't inherit MacroDataProvider — that ABC's shape
     (get_macro_data(series_ids), get_interest_rates(), get_exchange_rates())
@@ -232,4 +253,110 @@ class StatsCanadaProvider:
             "value": by_province,
             "reference_period": max(periods),
             "released": None,
+        }
+
+    async def get_cpi_national(self) -> dict | None:
+        """All-items CPI index level for Canada (replaces the dead FRED
+        CPALTT01CAM657N series — see ClickUp 86bbahum6). Maps to
+        MacroSourcesBundle.canada_cpi/ca_cpi_yoy/ca_cpi_3m_delta, and
+        indirectly ca_cpi_trend (precompute classifies delta_3m_pct into
+        the trend enum, not this method).
+
+        latest_n=14 covers the latest point plus both lookback comparisons
+        (12mo-ago for YoY, 3mo-ago for the delta) with room to spare.
+        Lookback points are found by exact refPer match, not list
+        position — same rationale as get_retail_sales_yoy(): a positional
+        lookup would silently return the wrong calendar period if the
+        series has a gap."""
+        data = await self._fetch_vectors([_CPI_NATIONAL_VECTOR], latest_n=14)
+        row = data[0]
+        if row.get("status") != "SUCCESS":
+            logger.warning("statcan_cpi_national_missing")
+            return None
+        points = {
+            p["refPer"]: p for p in row["object"]["vectorDataPoint"] if p.get("value") is not None
+        }
+        if not points:
+            logger.warning("statcan_cpi_national_missing")
+            return None
+        latest_period = max(points)
+        latest = points[latest_period]
+        latest_value = self._scaled_value(latest)
+
+        yoy_pct = None
+        prior_year = points.get(_shift_year(latest_period, -1))
+        if prior_year is not None:
+            prior_year_value = self._scaled_value(prior_year)
+            yoy_pct = ((latest_value - prior_year_value) / prior_year_value) * 100
+        else:
+            logger.warning("statcan_cpi_national_no_prior_year", latest_period=latest_period)
+
+        delta_3m_pct = None
+        prior_3m = points.get(_shift_months(latest_period, -3))
+        if prior_3m is not None:
+            prior_3m_value = self._scaled_value(prior_3m)
+            delta_3m_pct = ((latest_value - prior_3m_value) / prior_3m_value) * 100
+        else:
+            logger.warning("statcan_cpi_national_no_prior_3m", latest_period=latest_period)
+
+        return {
+            "value": latest_value,
+            "yoy_pct": yoy_pct,
+            "delta_3m_pct": delta_3m_pct,
+            "reference_period": latest_period,
+            "released": latest["releaseTime"],
+        }
+
+    async def get_real_gdp_index(self) -> dict | None:
+        """Real GDP volume index (2017=100) for Canada (replaces the dead
+        FRED CANRGDPR series — see ClickUp 86bbahum6). Maps to
+        MacroSourcesBundle.ca_gdp_qoq/ca_gdp_4q_trend (via the
+        precompute layer's yoy-based trend classifier — yoy_pct itself
+        isn't a MacroSourcesBundle field, the prompt has no placeholder
+        for it).
+
+        latest_n=6 covers the latest point, the prior quarter (QoQ), and
+        4-quarters-ago (YoY) — the oldest point either comparison needs is
+        4 quarters back (5 points), plus one quarter of buffer so a
+        single delayed/missing quarterly release doesn't blow out the
+        YoY lookback, matching get_cpi_national()'s one-period margin.
+        Lookback points are found by exact refPer match, same rationale
+        as get_cpi_national()/get_retail_sales_yoy()."""
+        data = await self._fetch_vectors([_GDP_VOLUME_INDEX_VECTOR], latest_n=6)
+        row = data[0]
+        if row.get("status") != "SUCCESS":
+            logger.warning("statcan_gdp_index_missing")
+            return None
+        points = {
+            p["refPer"]: p for p in row["object"]["vectorDataPoint"] if p.get("value") is not None
+        }
+        if not points:
+            logger.warning("statcan_gdp_index_missing")
+            return None
+        latest_period = max(points)
+        latest = points[latest_period]
+        latest_value = self._scaled_value(latest)
+
+        qoq_annualized_pct = None
+        prior_quarter = points.get(_shift_months(latest_period, -3))
+        if prior_quarter is not None:
+            prior_quarter_value = self._scaled_value(prior_quarter)
+            qoq_annualized_pct = ((latest_value / prior_quarter_value) ** 4 - 1) * 100
+        else:
+            logger.warning("statcan_gdp_index_no_prior_quarter", latest_period=latest_period)
+
+        yoy_pct = None
+        prior_year = points.get(_shift_year(latest_period, -1))
+        if prior_year is not None:
+            prior_year_value = self._scaled_value(prior_year)
+            yoy_pct = ((latest_value - prior_year_value) / prior_year_value) * 100
+        else:
+            logger.warning("statcan_gdp_index_no_prior_year", latest_period=latest_period)
+
+        return {
+            "value": latest_value,
+            "qoq_annualized_pct": qoq_annualized_pct,
+            "yoy_pct": yoy_pct,
+            "reference_period": latest_period,
+            "released": latest["releaseTime"],
         }

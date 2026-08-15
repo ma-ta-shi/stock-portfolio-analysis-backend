@@ -1,7 +1,7 @@
 import pytest
 import structlog
 
-from data.providers.stats_canada import StatsCanadaProvider, _shift_year
+from data.providers.stats_canada import StatsCanadaProvider, _shift_months, _shift_year
 
 
 @pytest.fixture
@@ -52,6 +52,21 @@ def test_shift_year_back_one():
 
 def test_shift_year_forward_one():
     assert _shift_year("2025-04-01", 1) == "2026-04-01"
+
+
+# --- _shift_months ---
+
+
+def test_shift_months_back_three():
+    assert _shift_months("2026-06-01", -3) == "2026-03-01"
+
+
+def test_shift_months_back_across_year_boundary():
+    assert _shift_months("2026-01-01", -3) == "2025-10-01"
+
+
+def test_shift_months_forward_three():
+    assert _shift_months("2025-10-01", 3) == "2026-01-01"
 
 
 # --- _scaled_value ---
@@ -311,6 +326,113 @@ async def test_get_cpi_by_province_unrecognized_vector_in_response_is_skipped_an
         and log["vector_id"] == 123456789
         for log in logs
     )
+
+
+# --- get_cpi_national ---
+
+
+async def test_get_cpi_national_computes_yoy_and_3m_delta(provider, monkeypatch):
+    row = _success_row(
+        _point("2025-06-01", 100.0),  # 12mo ago
+        _point("2026-03-01", 100.0),  # 3mo ago
+        _point("2026-06-01", 110.0),  # latest
+    )
+    _mock_fetch(monkeypatch, provider, [[row]])
+
+    result = await provider.get_cpi_national()
+
+    assert result["value"] == pytest.approx(110.0)
+    assert result["yoy_pct"] == pytest.approx(10.0)
+    assert result["delta_3m_pct"] == pytest.approx(10.0)
+    assert result["reference_period"] == "2026-06-01"
+
+
+async def test_get_cpi_national_requests_14_periods(provider, monkeypatch):
+    calls = _mock_fetch(
+        monkeypatch, provider, [[_success_row(_point("2026-06-01", 110.0))]]
+    )
+
+    await provider.get_cpi_national()
+
+    _, latest_n = calls[0]
+    assert latest_n == 14
+
+
+async def test_get_cpi_national_missing_lookback_points_returns_none_deltas(provider, monkeypatch):
+    row = _success_row(_point("2026-06-01", 110.0))
+    _mock_fetch(monkeypatch, provider, [[row]])
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_cpi_national()
+
+    assert result["value"] == pytest.approx(110.0)
+    assert result["yoy_pct"] is None
+    assert result["delta_3m_pct"] is None
+    assert any(log["event"] == "statcan_cpi_national_no_prior_year" for log in logs)
+    assert any(log["event"] == "statcan_cpi_national_no_prior_3m" for log in logs)
+
+
+async def test_get_cpi_national_failed_status_returns_none(provider, monkeypatch):
+    _mock_fetch(monkeypatch, provider, [[_failed_row()]])
+
+    result = await provider.get_cpi_national()
+
+    assert result is None
+
+
+# --- get_real_gdp_index ---
+
+
+async def test_get_real_gdp_index_computes_annualized_qoq_and_yoy(provider, monkeypatch):
+    row = _success_row(
+        _point("2025-01-01", 100.0),  # 4 quarters ago
+        _point("2025-10-01", 100.0),  # prior quarter
+        _point("2026-01-01", 110.0),  # latest
+    )
+    _mock_fetch(monkeypatch, provider, [[row]])
+
+    result = await provider.get_real_gdp_index()
+
+    assert result["value"] == pytest.approx(110.0)
+    # ((110/100)**4 - 1) * 100
+    assert result["qoq_annualized_pct"] == pytest.approx(46.41, abs=0.01)
+    assert result["yoy_pct"] == pytest.approx(10.0)
+    assert result["reference_period"] == "2026-01-01"
+
+
+async def test_get_real_gdp_index_requests_6_periods(provider, monkeypatch):
+    calls = _mock_fetch(
+        monkeypatch, provider, [[_success_row(_point("2026-01-01", 110.0))]]
+    )
+
+    await provider.get_real_gdp_index()
+
+    _, latest_n = calls[0]
+    assert latest_n == 6
+
+
+async def test_get_real_gdp_index_missing_lookback_points_returns_none_deltas(
+    provider, monkeypatch
+):
+    row = _success_row(_point("2026-01-01", 110.0))
+    _mock_fetch(monkeypatch, provider, [[row]])
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_real_gdp_index()
+
+    assert result["value"] == pytest.approx(110.0)
+    assert result["qoq_annualized_pct"] is None
+    assert result["yoy_pct"] is None
+    assert any(log["event"] == "statcan_gdp_index_no_prior_quarter" for log in logs)
+    assert any(log["event"] == "statcan_gdp_index_no_prior_year" for log in logs)
+
+
+async def test_get_real_gdp_index_failed_status_returns_none(provider, monkeypatch):
+    _mock_fetch(monkeypatch, provider, [[_failed_row()]])
+
+    result = await provider.get_real_gdp_index()
+
+    assert result is None
 
 
 # --- Session lifecycle ---
