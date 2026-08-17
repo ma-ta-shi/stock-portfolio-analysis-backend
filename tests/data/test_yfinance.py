@@ -22,6 +22,7 @@ class FakeTicker:
         raises_on_fast_info: bool = False,
         insider_transactions: pd.DataFrame | None = None,
         calendar: dict | None = None,
+        earnings_history: pd.DataFrame | None = None,
     ) -> None:
         self.info = info or {}
         self.quarterly_financials = _empty_if_none(quarterly_financials)
@@ -35,6 +36,7 @@ class FakeTicker:
         self._raises_on_fast_info = raises_on_fast_info
         self.insider_transactions = _empty_if_none(insider_transactions)
         self.calendar = calendar if calendar is not None else {}
+        self.earnings_history = _empty_if_none(earnings_history)
 
     @property
     def fast_info(self) -> dict:
@@ -428,5 +430,105 @@ async def test_get_earnings_calendar_no_data_returns_empty_list(provider, monkey
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(calendar={}))
 
     result = await provider.get_earnings_calendar("ZZZZ")
+
+    assert result == []
+
+
+# --- get_analyst_estimates (new, 86bbdu04a) ---
+
+
+async def test_get_analyst_estimates_reads_forward_eps_from_info(provider, monkeypatch):
+    """yfinance doesn't expose forward EPS via analyst_price_targets or
+    recommendations — it's a plain .info field, confirmed live for both
+    AAPL and RY.TO."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={"forwardEps": 9.50771}))
+
+    result = await provider.get_analyst_estimates("AAPL")
+
+    assert result == {"forward_eps": 9.50771}
+
+
+async def test_get_analyst_estimates_missing_forward_eps_returns_empty_dict(provider, monkeypatch):
+    """Bare {}, not {"forward_eps": None} — matches get_company_info's/
+    get_quote's own "empty dict signals no data" convention, needed for
+    Router._is_empty() to correctly recognize this as empty."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={}))
+
+    result = await provider.get_analyst_estimates("ZZZZ")
+
+    assert result == {}
+
+
+# --- get_earnings_surprises (new, 86bbdu04a) ---
+
+
+async def test_get_earnings_surprises_maps_history_to_normalized_shape(provider, monkeypatch):
+    """Period comes from the DataFrame's "quarter" index, not a column —
+    confirmed live. surprisePercent is a fraction (e.g. 0.0452), not a
+    percent — must be scaled by 100 to match FMP's convention."""
+    eh = pd.DataFrame(
+        {
+            "epsActual": [1.85, 2.84],
+            "epsEstimate": [1.76993, 2.6708],
+            "epsDifference": [0.08, 0.17],
+            "surprisePercent": [0.0452, 0.0634],
+        },
+        index=pd.Index(
+            [pd.Timestamp("2025-09-30"), pd.Timestamp("2025-12-31")], name="quarter"
+        ),
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(earnings_history=eh))
+
+    result = await provider.get_earnings_surprises("AAPL")
+
+    assert result == [
+        {
+            "period_end": "2025-09-30",
+            "eps_actual": 1.85,
+            "eps_estimated": 1.76993,
+            "eps_surprise_pct": pytest.approx(4.52),
+            "revenue_actual": None,
+            "revenue_estimated": None,
+        },
+        {
+            "period_end": "2025-12-31",
+            "eps_actual": 2.84,
+            "eps_estimated": 2.6708,
+            "eps_surprise_pct": pytest.approx(6.34),
+            "revenue_actual": None,
+            "revenue_estimated": None,
+        },
+    ]
+
+
+async def test_get_earnings_surprises_values_are_native_float_not_numpy(provider, monkeypatch):
+    """Real gap caught via live integration check: earnings_history's
+    cells are numpy.float64, a DataFrame artifact — a plain `==`
+    comparison against Python floats doesn't catch this (numpy.float64
+    compares equal to float by value), so this checks the exact type
+    instead. numpy.float64 isn't always JSON-serializable downstream and
+    nothing else in this codebase's provider layer lets it leak through."""
+    eh = pd.DataFrame(
+        {
+            "epsActual": [1.85],
+            "epsEstimate": [1.76993],
+            "epsDifference": [0.08],
+            "surprisePercent": [0.0452],
+        },
+        index=pd.Index([pd.Timestamp("2025-09-30")], name="quarter"),
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(earnings_history=eh))
+
+    result = await provider.get_earnings_surprises("AAPL")
+
+    assert type(result[0]["eps_actual"]) is float
+    assert type(result[0]["eps_estimated"]) is float
+    assert type(result[0]["eps_surprise_pct"]) is float
+
+
+async def test_get_earnings_surprises_no_data_returns_empty_list(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(earnings_history=None))
+
+    result = await provider.get_earnings_surprises("ZZZZ")
 
     assert result == []

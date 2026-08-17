@@ -16,16 +16,25 @@ ClickUp 86ban0wcr for the full reasoning):
 - The ANALYST block (consensus_rating/avg_price_target/num_analysts) is not
   this module's job — DataBundle.analyst_consensus is Sentiment Analyst's
   field, cross-read by the Fundamental prompt, not computed here.
-- forward_pe/earnings_surprises are real, deferred gaps — no provider
-  currently normalizes get_analyst_estimates() (separate follow-up ticket).
-  Left as None here, not fabricated.
+- forward_pe/earnings_surprises were real, deferred gaps — no provider
+  normalized get_analyst_estimates() and no provider method existed for
+  historical actual-vs-estimate earnings data. Closed in 86bbdu04a:
+  compute_valuation_metrics() takes an optional NormalizedAnalystEstimates
+  and compute_growth_metrics() takes an optional earnings_surprises list;
+  both default to None (graceful degradation) so an existing caller with
+  no analyst data still works unchanged.
 - guidance_vs_consensus stays LLM-interpretive (no reliable structured
   source), a separate, still-pending prompt-file inconsistency.
 """
 
 import statistics
 
-from data.providers.base import NormalizedDividendRecord, NormalizedFinancials, NormalizedQuote
+from data.providers.base import (
+    NormalizedAnalystEstimates,
+    NormalizedDividendRecord,
+    NormalizedFinancials,
+    NormalizedQuote,
+)
 
 # Fields both the sector-median PEER block and each peer_records entry need —
 # a subset of valuation/profitability/balance_sheet_metrics, not the full
@@ -166,11 +175,24 @@ def _consecutive_years_paid(years_with_payments: set[int]) -> int:
     return count
 
 
-def compute_growth_metrics(fin: NormalizedFinancials) -> dict:
+def compute_growth_metrics(
+    fin: NormalizedFinancials, earnings_surprises: list[dict] | None = None
+) -> dict:
     """revenue_growth_yoy/eps_growth_yoy use annual[0] vs annual[1] — the
     simplest well-defined YoY, always available once 2+ years of annual
     data exist. Quarterly YoY would need quarters[4], not guaranteed by
-    the ticket's own minimum-data threshold (>=2 quarters)."""
+    the ticket's own minimum-data threshold (>=2 quarters).
+
+    earnings_surprises (86bbdu04a) is passed through directly, not
+    collapsed to None when empty — None means "no data source wired for
+    this call," [] means "fetched, genuinely zero rows." compute_all()'s
+    missing_fields scan only flags None as missing; collapsing [] into
+    None would misreport a real, empty result as missing data. forward_pe
+    is a VAL-block field (compute_valuation_metrics), not GROWTH — it was
+    briefly duplicated here by mistake (caught on review: it showed
+    up twice in missing_fields, once per dict, and would have been a
+    silent last-write-wins collision in compute_peer_comparison's
+    dict merge)."""
     annual = fin.annual
     revenue_growth_yoy = None
     eps_growth_yoy = None
@@ -185,15 +207,7 @@ def compute_growth_metrics(fin: NormalizedFinancials) -> dict:
         "revenue_growth_yoy": revenue_growth_yoy,
         "revenue_growth_3yr_cagr": _cagr(annual, "revenue"),
         "eps_growth_yoy": eps_growth_yoy,
-        # Real, confirmed gap (86ban0wcr planning) — no provider normalizes
-        # get_analyst_estimates() yet; earnings-surprise history needs a
-        # separate follow-up ticket, not fabricated here. forward_pe is a
-        # VAL-block field (compute_valuation_metrics), not GROWTH — it was
-        # briefly duplicated here by mistake (caught on review: it showed
-        # up twice in missing_fields, once per dict, and would have been a
-        # silent last-write-wins collision in compute_peer_comparison's
-        # dict merge once forward_pe is ever actually computed).
-        "earnings_surprises": None,
+        "earnings_surprises": earnings_surprises,
     }
 
 
@@ -275,7 +289,10 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
 
 
 def compute_valuation_metrics(
-    fin: NormalizedFinancials, price_info: NormalizedQuote, growth: dict
+    fin: NormalizedFinancials,
+    price_info: NormalizedQuote,
+    growth: dict,
+    analyst_estimates: NormalizedAnalystEstimates | None = None,
 ) -> dict:
     current_price = price_info.get("current_price")
 
@@ -293,9 +310,14 @@ def compute_valuation_metrics(
     ttm_revenue = _ttm(fin.quarters, "revenue")
     ps_ratio = market_cap / ttm_revenue if market_cap is not None and ttm_revenue else None
 
+    # forward_pe (86bbdu04a) mirrors pe_ratio's own guard style exactly —
+    # current_price / an EPS-like denominator, None if either is missing.
+    forward_eps = analyst_estimates.get("forward_eps") if analyst_estimates else None
+    forward_pe = current_price / forward_eps if current_price is not None and forward_eps else None
+
     return {
         "pe_ratio": pe_ratio,
-        "forward_pe": None,  # same deferred gap as compute_growth_metrics
+        "forward_pe": forward_pe,
         "pb_ratio": pb_ratio,
         "ps_ratio": ps_ratio,
         "peg_ratio": _peg(pe_ratio, growth.get("eps_growth_yoy")),
@@ -421,9 +443,14 @@ def compute_all(
     price_info: NormalizedQuote,
     dividend_history: list[NormalizedDividendRecord],
     peer_data: list[tuple[str, NormalizedFinancials, NormalizedQuote]],
+    analyst_estimates: NormalizedAnalystEstimates | None = None,
+    earnings_surprises: list[dict] | None = None,
 ) -> dict:
     """Public entry point. Order matters: growth before valuation (PEG
-    needs eps_growth_yoy)."""
+    needs eps_growth_yoy). analyst_estimates/earnings_surprises (86bbdu04a)
+    default to None — an existing caller with no analyst data still works
+    unchanged, same graceful-degradation convention as every other input
+    here."""
     if fin.currency != price_info.get("currency"):
         raise ValueError(
             f"Currency mismatch: financials are {fin.currency!r}, "
@@ -431,10 +458,10 @@ def compute_all(
             "if the adapter is correct."
         )
 
-    growth = compute_growth_metrics(fin)
+    growth = compute_growth_metrics(fin, earnings_surprises)
     profitability = compute_profitability_metrics(fin)
     balance_sheet = compute_balance_sheet_metrics(fin)
-    valuation = compute_valuation_metrics(fin, price_info, growth)
+    valuation = compute_valuation_metrics(fin, price_info, growth, analyst_estimates)
     dividend = compute_dividend_info(fin, price_info, dividend_history)
     peer = compute_peer_comparison(peer_data)
 

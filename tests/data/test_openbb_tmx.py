@@ -321,45 +321,59 @@ async def test_get_dividend_history_empty_results_returns_empty_list(provider, m
     assert result == []
 
 
-# ---------- get_analyst_estimates / get_analyst_ratings ----------
+# ---------- get_analyst_estimates / get_analyst_ratings / get_earnings_surprises ----------
 # Live-verified 2026-08-04 (ClickUp 86bb7j0kh): obb.equity.estimates.consensus
 # is a real tmx-provider endpoint, not unsupported as the old stub claimed.
+# Re-verified 2026-08-17 (86bbdu04a): that consensus endpoint has no
+# forward-EPS field at all, so get_analyst_estimates() no longer calls it —
+# get_analyst_ratings() (below) is now the one that owns the real fetch.
 
 
 @pytest.mark.asyncio
-async def test_get_analyst_estimates_calls_consensus_endpoint(provider, mock_obb):
+async def test_get_analyst_estimates_never_calls_the_api(provider, mock_obb):
+    """86bbdu04a: TMX consensus has no forward-EPS field of any kind
+    (confirmed live) — nothing to fetch, so this must not call the API at
+    all, unlike the old delegating implementation. Bare {}, not
+    {"forward_eps": None} — matches get_company_info's/get_quote's own
+    "empty dict signals no data" convention, needed for Router._is_empty()
+    to let the CA chain fall through to yfinance."""
+    result = await provider.get_analyst_estimates(ticker="RY.TO")
+    mock_obb.equity.estimates.consensus.assert_not_called()
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_get_analyst_ratings_calls_consensus_endpoint(provider, mock_obb):
+    """86bbdu04a: get_analyst_ratings() now owns the real consensus fetch
+    directly (previously reached only via get_analyst_estimates()'s
+    delegation, before that method's shape changed)."""
     fake_df = pd.DataFrame([{"symbol": "RY", "target_consensus": 277.24, "buy_ratings": 7}])
     mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
-    await provider.get_analyst_estimates(ticker="RY.TO")
+    await provider.get_analyst_ratings(ticker="RY.TO")
     _, kwargs = mock_obb.equity.estimates.consensus.call_args
     assert kwargs["symbol"] == "RY.TO"
     assert kwargs["provider"] == "tmx"
 
 
 @pytest.mark.asyncio
-async def test_get_analyst_estimates_returns_first_row_as_dict(provider, mock_obb):
+async def test_get_analyst_ratings_returns_first_row_as_dict(provider, mock_obb):
     fake_df = pd.DataFrame([{"symbol": "RY", "target_consensus": 277.24}])
     mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
-    result = await provider.get_analyst_estimates(ticker="RY.TO")
+    result = await provider.get_analyst_ratings(ticker="RY.TO")
     assert result == {"symbol": "RY", "target_consensus": 277.24}
 
 
 @pytest.mark.asyncio
-async def test_get_analyst_estimates_empty_result_returns_empty_dict(provider, mock_obb):
+async def test_get_analyst_ratings_empty_result_returns_empty_dict(provider, mock_obb):
     mock_obb.equity.estimates.consensus.return_value = make_obb_result(pd.DataFrame())
-    result = await provider.get_analyst_estimates(ticker="ZZZZ.TO")
+    result = await provider.get_analyst_ratings(ticker="ZZZZ.TO")
     assert result == {}
 
 
 @pytest.mark.asyncio
-async def test_get_analyst_ratings_reuses_the_same_consensus_endpoint(provider, mock_obb):
-    """TMX has one consensus snapshot covering both target-price estimates
-    and buy/sell/hold ratings — not two separate endpoints."""
-    fake_df = pd.DataFrame([{"symbol": "RY", "consensus_action": "Buy", "buy_ratings": 7}])
-    mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
-    result = await provider.get_analyst_ratings(ticker="RY.TO")
-    mock_obb.equity.estimates.consensus.assert_called_once()
-    assert result["consensus_action"] == "Buy"
+async def test_get_earnings_surprises_not_implemented(provider):
+    with pytest.raises(NotImplementedError):
+        await provider.get_earnings_surprises(ticker="RY.TO")
 
 
 # ---------- get_insider_trading ----------

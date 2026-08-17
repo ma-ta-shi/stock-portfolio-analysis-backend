@@ -7,6 +7,7 @@ import structlog
 
 from data.providers.base import (
     NewsProvider,
+    NormalizedAnalystEstimates,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
     NormalizedQuote,
@@ -27,6 +28,7 @@ BASE_URL = "https://financialmodelingprep.com/stable"
 
 _PERIOD_RE = re.compile(r"^(\d+)(d|mo|y)$")
 _PERIOD_UNIT_DAYS = {"d": 1, "mo": 30, "y": 365}
+_EARNINGS_SURPRISE_LOOKBACK = 4  # matches yfinance's own hard 4-row limit for the same field
 
 
 def _period_to_from_date(period: str) -> str:
@@ -180,16 +182,58 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
             primary_exchange=raw.get("exchange") or "",
         )
 
-    async def get_analyst_estimates(self, ticker: str) -> dict:
+    async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
+        """Maps FMP's raw /analyst-estimates response onto
+        NormalizedAnalystEstimates (86bbdu04a). `period=annual` rows come
+        back sorted descending by fiscal-year-end date (confirmed live:
+        furthest-future year first) — estimates[0] is NOT the nearest
+        forecast, it's the furthest one. Filter to future rows and take
+        the soonest fiscal-year-end.
+
+        Bare {} on no data, not {"forward_eps": None} — see
+        NormalizedAnalystEstimates's docstring in base.py for why."""
         # `period` is a required param — FMP 400s without it.
         data = await self._request("analyst-estimates", {"symbol": ticker, "period": "annual"})
-        return {"symbol": ticker.upper(), "estimates": data or []}
+        if not data:
+            return {}
+        today = pd.Timestamp.now().normalize()
+        future_rows = [row for row in data if row.get("date") and pd.Timestamp(row["date"]) > today]
+        if not future_rows:
+            return {}
+        # date only picks the row here, it isn't returned
+        nearest = min(future_rows, key=lambda row: row["date"])
+        forward_eps = nearest.get("epsAvg")
+        return {"forward_eps": forward_eps} if forward_eps is not None else {}
 
     async def get_analyst_ratings(self, ticker: str) -> dict:
         # Renamed from /rating. A current-period snapshot (letter grade + DCF/ROE/
         # ROA/D-E/P-E/P-B sub-scores) — not a historical trend.
         data = await self._request("ratings-snapshot", {"symbol": ticker})
         return data[0] if data else {}
+
+    async def get_earnings_surprises(self, ticker: str) -> list[dict]:
+        """FMP's /earnings (not /earnings-surprises, confirmed live 404, nor
+        /earnings-surprises-bulk, confirmed live paywalled) is symbol-filtered
+        and includes both forward calendar rows (epsActual is None) and real
+        historical actual-vs-estimate rows — filter to the realized ones."""
+        data = await self._request("earnings", {"symbol": ticker})
+        realized = [row for row in (data or []) if row.get("epsActual") is not None]
+        return [
+            {
+                "period_end": row.get("date"),
+                "eps_actual": row.get("epsActual"),
+                "eps_estimated": row.get("epsEstimated"),
+                "eps_surprise_pct": (
+                    (row["epsActual"] - row["epsEstimated"]) / abs(row["epsEstimated"]) * 100
+                    if row.get("epsEstimated")
+                    else None
+                ),
+                "revenue_actual": row.get("revenueActual"),
+                "revenue_estimated": row.get("revenueEstimated"),
+            }
+            # realized is already newest-first, confirmed live
+            for row in realized[:_EARNINGS_SURPRISE_LOOKBACK]
+        ]
 
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
         """FMP's /earnings-calendar is bulk-only (no symbol filter, renamed from

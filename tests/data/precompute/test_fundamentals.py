@@ -113,6 +113,23 @@ def test_compute_growth_metrics_insufficient_annual_data_returns_none():
     assert result["revenue_growth_3yr_cagr"] is None
 
 
+def test_compute_growth_metrics_earnings_surprises_passed_through():
+    """86bbdu04a: passed through directly, not collapsed to None when
+    empty — None means no data source wired, [] means fetched-but-empty,
+    and compute_all()'s missing_fields scan only flags None as missing."""
+    surprises = [{"period_end": "2026-07-30", "eps_actual": 2.02, "eps_estimated": 1.89}]
+
+    result = compute_growth_metrics(_fin(), earnings_surprises=surprises)
+
+    assert result["earnings_surprises"] is surprises
+
+
+def test_compute_growth_metrics_empty_earnings_surprises_stays_empty_list_not_none():
+    result = compute_growth_metrics(_fin(), earnings_surprises=[])
+
+    assert result["earnings_surprises"] == []
+
+
 def test_compute_growth_metrics_cagr_none_when_base_year_non_positive():
     annual = [_ANNUAL[0], _ANNUAL[1], _ANNUAL[2], _quarter(-100.0, 0.0, 0.0, period_end="2022-12-31")]
     result = compute_growth_metrics(_fin(annual=annual))
@@ -211,6 +228,39 @@ def test_compute_valuation_metrics_happy_path():
     assert result["ev_ebitda"] == pytest.approx((5000.0 + 1000.0 - 500.0) / (200.0 + 50.0))
     assert result["forward_pe"] is None
     assert result["peg_ratio"] == pytest.approx(result["pe_ratio"] / (growth["eps_growth_yoy"] * 100))
+
+
+def test_compute_valuation_metrics_forward_pe_with_analyst_estimates():
+    """86bbdu04a: forward_pe mirrors pe_ratio's own guard style — current
+    price divided by an EPS-like denominator, None if either is missing."""
+    growth = compute_growth_metrics(_fin())
+    analyst_estimates = {"forward_eps": 5.0}
+
+    result = compute_valuation_metrics(_fin(), _price_info(), growth, analyst_estimates)
+
+    assert result["forward_pe"] == pytest.approx(50.0 / 5.0)
+
+
+def test_compute_valuation_metrics_forward_pe_none_when_forward_eps_missing():
+    growth = compute_growth_metrics(_fin())
+    analyst_estimates = {"forward_eps": None}
+
+    result = compute_valuation_metrics(_fin(), _price_info(), growth, analyst_estimates)
+
+    assert result["forward_pe"] is None
+
+
+def test_compute_valuation_metrics_forward_pe_none_with_bare_empty_dict():
+    """Real providers now return a bare {} on no data (fmp.py/openbb_tmx.py/
+    yfinance.py, 86bbdu04a review) — not {"forward_eps": None} — matching
+    get_company_info's/get_quote's own convention. Confirm this actual
+    real-world shape degrades gracefully too, not just the {"forward_eps":
+    None} shape."""
+    growth = compute_growth_metrics(_fin())
+
+    result = compute_valuation_metrics(_fin(), _price_info(), growth, {})
+
+    assert result["forward_pe"] is None
 
 
 def test_compute_valuation_metrics_thin_quarters_pe_ratio_none_not_approximated():
@@ -367,3 +417,21 @@ def test_compute_all_missing_fields_lists_none_valued_keys():
 
     assert "valuation_metrics.pe_ratio" in result["missing_fields"]
     assert "growth_metrics.revenue_growth_yoy" in result["missing_fields"]
+    # No analyst_estimates/earnings_surprises passed -> both stay None,
+    # correctly flagged as missing (86bbdu04a).
+    assert "valuation_metrics.forward_pe" in result["missing_fields"]
+
+
+def test_compute_all_wires_analyst_estimates_and_earnings_surprises():
+    """86bbdu04a: end-to-end through compute_all(), not just the two
+    compute_* functions in isolation."""
+    analyst_estimates = {"forward_eps": 5.0}
+    earnings_surprises = [{"period_end": "2026-07-30", "eps_actual": 2.02, "eps_estimated": 1.89}]
+
+    result = compute_all(
+        _fin(), _price_info(), _dividend_history(), [], analyst_estimates, earnings_surprises
+    )
+
+    assert result["valuation_metrics"]["forward_pe"] == pytest.approx(50.0 / 5.0)
+    assert result["growth_metrics"]["earnings_surprises"] == earnings_surprises
+    assert "valuation_metrics.forward_pe" not in result["missing_fields"]

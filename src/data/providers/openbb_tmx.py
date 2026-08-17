@@ -15,6 +15,13 @@ already listed "calendar, news" as openbb-tmx coverage; the code just never
 matched. Only get_peers is a genuine gap (obb.equity.compare.peers has no
 tmx provider) — that one stays NotImplementedError.
 
+Updated 86bbdu04a: get_analyst_estimates specifically no longer calls
+obb.equity.estimates.consensus at all — that endpoint (still real and
+working) has no forward-EPS field of any kind, which is the only thing
+this method's normalized contract needs, so there's nothing there worth
+fetching. The real consensus call moved to get_analyst_ratings instead,
+which still needs it for price-target/rating-breakdown fields.
+
 Known gap, documented not fixed (86bb7j0kh): get_price_history has ZERO
 real TSXV (.V) coverage — live-tested 6 real TSXV tickers (including ones
 previously believed covered from unrelated SEC-cross-listing research),
@@ -34,6 +41,7 @@ from openbb import obb
 from data.providers.base import (
     StockDataProvider,
     NewsProvider,
+    NormalizedAnalystEstimates,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
 )
@@ -43,10 +51,12 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     """OpenBB (TMX extension) provider for Canadian equities.
 
     Covers price history, fundamentals, company info, dividends, analyst
-    estimates, insider trading, earnings calendar, and news via the
-    `openbb-tmx` data provider. Only peers is NOT supported by TMX
-    (no tmx provider on obb.equity.compare.peers) — use the router's
-    static peers_json fallback for that instead.
+    ratings, insider trading, earnings calendar, and news via the
+    `openbb-tmx` data provider. Two real gaps: peers (no tmx provider on
+    obb.equity.compare.peers — use the router's static peers_json fallback)
+    and analyst *estimates* specifically (TMX's consensus endpoint has no
+    forward-EPS field — get_analyst_estimates() always returns {} without
+    calling the API; get_analyst_ratings() owns the real consensus call).
     """
 
     PROVIDER = "tmx"
@@ -126,11 +136,25 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             primary_exchange=raw.get("stock_exchange") or "",
         )
 
-    async def get_analyst_estimates(self, ticker: str) -> dict:
-        """Live-verified 2026-08-04 (86bb7j0kh): one row per ticker —
-        target_high/low/mean/consensus, buy/sell/hold_ratings,
-        consensus_action. Covers both estimates and ratings in one call
-        (get_analyst_ratings below reuses this rather than duplicating it).
+    async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
+        """TMX's consensus endpoint (obb.equity.estimates.consensus) has
+        no forward-EPS field of any kind — confirmed live 2026-08-04
+        (86bb7j0kh) and re-confirmed reviewing 86bbdu04a. Nothing to fetch,
+        so this doesn't call the API at all — get_analyst_ratings() below
+        is the one that still needs the real call, for its price-target/
+        rating fields. Bare {} on no data — see NormalizedAnalystEstimates's
+        docstring in base.py for why."""
+        return {}
+
+    async def get_analyst_ratings(self, ticker: str) -> dict:
+        """Real consensus fetch, previously delegated-to via
+        get_analyst_estimates() (TMX has one consensus snapshot with both
+        target-price and rating-breakdown fields, not two separate
+        endpoints like FMP's split) — moved here directly (86bbdu04a),
+        since get_analyst_estimates() no longer has any use for the raw
+        row itself. No real caller consumes this yet (research_sources.py
+        is still a stub), so the shape stays the raw OpenBB row, not
+        narrowed to a guessed ratings-only shape.
 
         Must check `result.results` before calling `.to_df()` — confirmed
         live (MKO.V, zero analyst coverage) that `.to_df()` itself raises
@@ -144,17 +168,8 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         df = result.to_df()
         return df.iloc[0].to_dict() if not df.empty else {}
 
-    async def get_analyst_ratings(self, ticker: str) -> dict:
-        """Deliberately returns the identical superset dict as
-        get_analyst_estimates, not a narrower ratings-only shape — TMX has
-        one consensus snapshot with both target-price and rating-breakdown
-        fields, not two separate endpoints like FMP's analyst-estimates/
-        ratings-snapshot split. No real caller consumes this yet
-        (research_sources.py is still a stub), so this wasn't narrowed to
-        guess at a shape nothing needs — revisit if a future caller
-        specifically wants a ratings-only dict without target-price
-        fields mixed in."""
-        return await self.get_analyst_estimates(ticker)
+    async def get_earnings_surprises(self, ticker: str) -> list[dict]:
+        raise NotImplementedError("Earnings-surprise history is not available via openbb-tmx.")
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         """Live-verified 2026-08-04 (86bb7j0kh): real data, but a quarterly
