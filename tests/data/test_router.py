@@ -159,16 +159,22 @@ async def test_chain_falls_back_on_not_implemented():
 
 
 async def test_chain_skips_provider_missing_the_method_entirely():
-    """openbb_tmx has no get_quote method at all — the chain must skip it via
-    getattr rather than raising AttributeError."""
+    """The chain must skip a provider lacking the method via getattr rather
+    than raising AttributeError. Originally used get_quote for this (real
+    openbb_tmx genuinely had no get_quote at all), but CA_CHAINS["get_quote"]
+    no longer lists openbb_tmx as primary (fixed 2026-08-04, 86bb7j0kh — it
+    was never actually reachable there, so that scenario stopped exercising
+    the getattr-skip path once the table was corrected). Uses
+    get_price_history instead — still a real 2-link CA chain
+    (openbb_tmx -> yfinance) — to keep this mechanism genuinely covered."""
     router = Router(
         ticker="SHOP.TO",
-        openbb_tmx=FakeProvider(),  # deliberately no get_quote
-        yfinance=FakeProvider(get_quote=_ok({"symbol": "SHOP.TO", "price": 80})),
+        openbb_tmx=FakeProvider(),  # deliberately no get_price_history
+        yfinance=FakeProvider(get_price_history=_ok(pd.DataFrame({"close": [80]}))),
         yfinance_news=FakeProvider(),
     )
-    result = await router.get_quote("SHOP.TO")
-    assert result == {"symbol": "SHOP.TO", "price": 80}
+    result = await router.get_price_history("SHOP.TO", "1y", "1d")
+    assert list(result["close"]) == [80]
 
 
 async def test_chain_reraises_auth_shaped_runtime_error():

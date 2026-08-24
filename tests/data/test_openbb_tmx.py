@@ -10,10 +10,33 @@ from data.providers.openbb_tmx import OpenBBTMXProvider
 
 # ---------- Helpers ----------
 
+
 def make_obb_result(df: pd.DataFrame) -> MagicMock:
-    """Mimic an OpenBB `OBBject`-like result whose .to_df() returns df."""
+    """Mimic an OpenBB `OBBject`-like result whose .to_df() returns df.
+    Also sets `.results` to a non-empty placeholder list so the
+    `if not result.results: return ...` guards (added 2026-08-04,
+    86bb7j0kh — real live bug: `.to_df()`/the old index-based logic both
+    raise/misbehave on a genuinely empty OBBject) don't short-circuit
+    methods that still go through .to_df() for non-empty fixtures."""
     result = MagicMock()
     result.to_df.return_value = df
+    result.results = [MagicMock()] if not df.empty else []
+    return result
+
+
+def make_results_result(records: list[dict]) -> MagicMock:
+    """Mimic an OpenBB `OBBject`-like result for methods that read
+    `.results` directly (bypassing `.to_df()`) — get_company_info (2026-
+    08-04 fix: works around a real upstream openbb-tmx KeyError bug in its
+    own .to_df() sort logic) and get_news (original design: the date field
+    isn't surfaced by .to_df() at all)."""
+    result = MagicMock()
+    items = []
+    for record in records:
+        item = MagicMock()
+        item.model_dump.return_value = record
+        items.append(item)
+    result.results = items
     return result
 
 
@@ -36,6 +59,7 @@ def mock_obb():
 
 
 # ---------- get_price_history ----------
+
 
 @pytest.mark.asyncio
 async def test_get_price_history_is_coroutine(provider):
@@ -105,6 +129,7 @@ async def test_get_price_history_returns_underlying_data_unchanged(provider, moc
 
 # ---------- get_financials ----------
 
+
 @pytest.mark.asyncio
 async def test_get_financials_routes_income_statement(provider, mock_obb):
     """statement='income' must call obb.equity.fundamental.income."""
@@ -158,6 +183,7 @@ async def test_get_financials_returns_dataframe(provider, mock_obb):
 
 # ---------- get_company_info ----------
 
+
 @pytest.mark.asyncio
 async def test_get_company_info_calls_profile_endpoint(provider, mock_obb):
     """Must call obb.equity.profile."""
@@ -196,12 +222,20 @@ async def test_get_company_info_returns_first_row_only(provider, mock_obb):
 
 # ---------- get_dividend_history ----------
 
+
+def _dividend_df(dates: list[str]) -> pd.DataFrame:
+    """Real TMX dividend shape, confirmed live 2026-08-04 (86bb7j0kh): a
+    plain RangeIndex with an `ex_dividend_date` COLUMN, not a DatetimeIndex
+    — the old fixture (DatetimeIndex, no ex_dividend_date column) didn't
+    match reality and masked the real TypeError this session found live."""
+    return pd.DataFrame({"ex_dividend_date": dates, "amount": [0.5] * len(dates)})
+
+
 @pytest.mark.asyncio
 async def test_get_dividend_history_calls_dividends_endpoint(provider, mock_obb):
     """Must call obb.equity.fundamental.dividends."""
-    fake_df = pd.DataFrame(
-        {"amount": [0.5, 0.5]},
-        index=pd.to_datetime(["2023-01-01", "2023-06-01"]),
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(
+        _dividend_df(["2023-01-01", "2023-06-01"])
     )
     mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
 
@@ -229,9 +263,11 @@ async def test_get_dividend_history_filters_by_date_range(provider, mock_obb):
 @pytest.mark.asyncio
 async def test_get_dividend_history_returns_list_of_dicts(provider, mock_obb):
     """Return type must be list[dict], per base class contract."""
-    fake_df = pd.DataFrame(
-        {"amount": [0.5]},
-        index=pd.to_datetime(["2023-06-01"]),
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(
+        _dividend_df(["2023-06-01"])
+    )
+    result = await provider.get_dividend_history(
+        ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
     )
     mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
 
@@ -243,42 +279,196 @@ async def test_get_dividend_history_returns_list_of_dicts(provider, mock_obb):
     assert all(isinstance(row, dict) for row in result)
 
 
+@pytest.mark.asyncio
+async def test_get_dividend_history_empty_results_returns_empty_list(provider, mock_obb):
+    """Real bug fixed 2026-08-04 (86bb7j0kh): raised TypeError comparing a
+    RangeIndex against string dates for every real CA ticker — this
+    confirms the genuinely-empty-results path is now also handled."""
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(pd.DataFrame())
+    result = await provider.get_dividend_history(
+        ticker="ZZZZ", from_date="2023-01-01", to_date="2023-12-31"
+    )
+    assert result == []
+
+
+# ---------- get_analyst_estimates / get_analyst_ratings ----------
+# Live-verified 2026-08-04 (ClickUp 86bb7j0kh): obb.equity.estimates.consensus
+# is a real tmx-provider endpoint, not unsupported as the old stub claimed.
+
+
+@pytest.mark.asyncio
+async def test_get_analyst_estimates_calls_consensus_endpoint(provider, mock_obb):
+    fake_df = pd.DataFrame([{"symbol": "RY", "target_consensus": 277.24, "buy_ratings": 7}])
+    mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
+    await provider.get_analyst_estimates(ticker="RY.TO")
+    _, kwargs = mock_obb.equity.estimates.consensus.call_args
+    assert kwargs["symbol"] == "RY.TO"
+    assert kwargs["provider"] == "tmx"
+
+
+@pytest.mark.asyncio
+async def test_get_analyst_estimates_returns_first_row_as_dict(provider, mock_obb):
+    fake_df = pd.DataFrame([{"symbol": "RY", "target_consensus": 277.24}])
+    mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
+    result = await provider.get_analyst_estimates(ticker="RY.TO")
+    assert result == {"symbol": "RY", "target_consensus": 277.24}
+
+
+@pytest.mark.asyncio
+async def test_get_analyst_estimates_empty_result_returns_empty_dict(provider, mock_obb):
+    mock_obb.equity.estimates.consensus.return_value = make_obb_result(pd.DataFrame())
+    result = await provider.get_analyst_estimates(ticker="ZZZZ.TO")
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_get_analyst_ratings_reuses_the_same_consensus_endpoint(provider, mock_obb):
+    """TMX has one consensus snapshot covering both target-price estimates
+    and buy/sell/hold ratings — not two separate endpoints."""
+    fake_df = pd.DataFrame([{"symbol": "RY", "consensus_action": "Buy", "buy_ratings": 7}])
+    mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
+    result = await provider.get_analyst_ratings(ticker="RY.TO")
+    mock_obb.equity.estimates.consensus.assert_called_once()
+    assert result["consensus_action"] == "Buy"
+
+
+# ---------- get_insider_trading ----------
+# Live-verified 2026-08-04: real tmx endpoint, but a quarterly aggregate
+# rollup with no per-transaction date — `days` is intentionally not applied.
+
+
+@pytest.mark.asyncio
+async def test_get_insider_trading_calls_ownership_endpoint(provider, mock_obb):
+    fake_df = pd.DataFrame([{"owner_name": "Ross, Bruce", "period": "three_months"}])
+    mock_obb.equity.ownership.insider_trading.return_value = make_obb_result(fake_df)
+    await provider.get_insider_trading(ticker="RY.TO")
+    _, kwargs = mock_obb.equity.ownership.insider_trading.call_args
+    assert kwargs["symbol"] == "RY.TO"
+    assert kwargs["provider"] == "tmx"
+
+
+@pytest.mark.asyncio
+async def test_get_insider_trading_returns_list_of_dicts(provider, mock_obb):
+    fake_df = pd.DataFrame([{"owner_name": "Ross, Bruce"}, {"owner_name": "McLaughlin, Neil"}])
+    mock_obb.equity.ownership.insider_trading.return_value = make_obb_result(fake_df)
+    result = await provider.get_insider_trading(ticker="RY.TO")
+    assert isinstance(result, list)
+    assert len(result) == 2
+    assert all(isinstance(row, dict) for row in result)
+
+
+@pytest.mark.asyncio
+async def test_get_insider_trading_empty_result_returns_empty_list(provider, mock_obb):
+    mock_obb.equity.ownership.insider_trading.return_value = make_obb_result(pd.DataFrame())
+    result = await provider.get_insider_trading(ticker="ZZZZ.TO")
+    assert result == []
+
+
+# ---------- get_earnings_calendar ----------
+# Live-verified 2026-08-04: real tmx endpoint, but bulk (no symbol filter
+# server-side) — filtered client-side, same pattern as fmp.py.
+
+
+@pytest.mark.asyncio
+async def test_get_earnings_calendar_calls_bulk_endpoint_without_symbol(provider, mock_obb):
+    """The TMX endpoint itself takes no symbol param — confirm we don't
+    pass one (that would silently be ignored by obb, misleading to read)."""
+    fake_df = pd.DataFrame([{"symbol": "RY", "report_date": "2026-08-03"}])
+    mock_obb.equity.calendar.earnings.return_value = make_obb_result(fake_df)
+    await provider.get_earnings_calendar(ticker="RY.TO")
+    _, kwargs = mock_obb.equity.calendar.earnings.call_args
+    assert "symbol" not in kwargs
+    assert kwargs["provider"] == "tmx"
+
+
+@pytest.mark.asyncio
+async def test_get_earnings_calendar_filters_to_requested_symbol(provider, mock_obb):
+    fake_df = pd.DataFrame(
+        [
+            {"symbol": "RY", "report_date": "2026-08-03"},
+            {"symbol": "AC", "report_date": "2026-08-03"},
+        ]
+    )
+    mock_obb.equity.calendar.earnings.return_value = make_obb_result(fake_df)
+    result = await provider.get_earnings_calendar(ticker="RY.TO")
+    assert len(result) == 1
+    assert result[0]["symbol"] == "RY"
+
+
+@pytest.mark.asyncio
+async def test_get_earnings_calendar_converts_hyphenated_class_suffix_to_tmx_dot_form(
+    provider, mock_obb
+):
+    """This codebase's DIR-UN.TO must match TMX's own "DIR.UN" symbol
+    convention — confirmed live 2026-08-04."""
+    fake_df = pd.DataFrame([{"symbol": "DIR.UN", "report_date": "2026-08-03"}])
+    mock_obb.equity.calendar.earnings.return_value = make_obb_result(fake_df)
+    result = await provider.get_earnings_calendar(ticker="DIR-UN.TO")
+    assert len(result) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_earnings_calendar_no_match_returns_empty_list(provider, mock_obb):
+    fake_df = pd.DataFrame([{"symbol": "AC", "report_date": "2026-08-03"}])
+    mock_obb.equity.calendar.earnings.return_value = make_obb_result(fake_df)
+    result = await provider.get_earnings_calendar(ticker="RY.TO")
+    assert result == []
+
+
+# ---------- get_news ----------
+# Live-verified 2026-08-04: real tmx endpoint with a real `date` field on
+# each result object — not surfaced by .to_df(), so this reads .results
+# directly rather than through the DataFrame helper used elsewhere.
+
+
+def _fake_news_result(articles: list[dict]) -> MagicMock:
+    result = MagicMock()
+    items = []
+    for article in articles:
+        item = MagicMock()
+        item.date = article.get("date")
+        item.model_dump.return_value = article
+        items.append(item)
+    result.results = items
+    return result
+
+
+@pytest.mark.asyncio
+async def test_get_news_calls_company_news_endpoint(provider, mock_obb):
+    mock_obb.news.company.return_value = _fake_news_result([])
+    await provider.get_news(ticker="RY.TO", days=30)
+    _, kwargs = mock_obb.news.company.call_args
+    assert kwargs["symbol"] == "RY.TO"
+    assert kwargs["provider"] == "tmx"
+
+
+@pytest.mark.asyncio
+async def test_get_news_filters_by_days(provider, mock_obb):
+    now = datetime.now()
+    recent = {"date": now - timedelta(days=5), "title": "Recent"}
+    old = {"date": now - timedelta(days=400), "title": "Old"}
+    mock_obb.news.company.return_value = _fake_news_result([recent, old])
+    result = await provider.get_news(ticker="RY.TO", days=90)
+    assert len(result) == 1
+    assert result[0]["title"] == "Recent"
+
+
+@pytest.mark.asyncio
+async def test_get_news_empty_result_returns_empty_list(provider, mock_obb):
+    mock_obb.news.company.return_value = _fake_news_result([])
+    result = await provider.get_news(ticker="ZZZZ.TO", days=30)
+    assert result == []
+
+
 # ---------- Unsupported methods (should raise NotImplementedError) ----------
-
-@pytest.mark.asyncio
-async def test_get_analyst_estimates_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        await provider.get_analyst_estimates(ticker="SHOP")
-
-
-@pytest.mark.asyncio
-async def test_get_analyst_ratings_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        await provider.get_analyst_ratings(ticker="SHOP")
-
-
-@pytest.mark.asyncio
-async def test_get_insider_trading_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        await provider.get_insider_trading(ticker="SHOP")
+# get_peers: confirmed live 2026-08-04 that obb.equity.compare.peers
+# genuinely has no tmx provider — a real gap, not a missed implementation.
 
 
 @pytest.mark.asyncio
 async def test_get_peers_not_implemented(provider):
     with pytest.raises(NotImplementedError):
         await provider.get_peers(ticker="SHOP")
-
-
-@pytest.mark.asyncio
-async def test_get_earnings_calendar_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        await provider.get_earnings_calendar(ticker="SHOP")
-
-
-@pytest.mark.asyncio
-async def test_get_news_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        await provider.get_news(ticker="SHOP", days=7)
 
 
 @pytest.mark.asyncio
