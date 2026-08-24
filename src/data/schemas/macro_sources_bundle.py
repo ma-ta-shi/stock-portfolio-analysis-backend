@@ -22,11 +22,16 @@ and closed here:
   central bank stance is rolled into the RATE block as an optional one-
   liner" (prompt line 13). The prompt reads `{cb_stance_note}`, a single
   optional string, not the list.
-Deliberately NOT added despite prompt references, pending a real data
-source (confirmed live 2026-08-07: both FRED's OECD-mirrored Canada CPI
-[CPALTT01CAM657N, stale since 2024-02] and Canada GDP [CANRGDPR, stale
-since 2011] series are dead infrastructure, not usable):
-`ca_cpi_trend`/`ca_cpi_3m_delta`/`ca_cpi_yoy`, `ca_gdp_qoq`/`ca_gdp_4q_trend`.
+Resolved 2026-08-15 (ClickUp 86bbahum6): `ca_cpi_trend`/`ca_cpi_3m_delta`/
+`ca_cpi_yoy`, `ca_gdp_qoq`/`ca_gdp_4q_trend` were deliberately NOT added at
+first pass, pending a real data source (confirmed live 2026-08-07: both
+FRED's OECD-mirrored Canada CPI [CPALTT01CAM657N, stale since 2024-02] and
+Canada GDP [CANRGDPR, stale since 2011] series are dead infrastructure,
+not usable). A working source was found — Statistics Canada's own Web
+Data Service (table 18100004 for CPI, table 36100105 for GDP), reachable
+through the same StatsCanadaProvider integration already used for the
+other statcan_* fields below. All 5 fields are now populated from that
+source instead; the dead FRED calls are removed, not just unused.
 """
 
 from typing import Literal
@@ -153,6 +158,20 @@ class MacroSourcesBundle(ContractModel):
     statcan_retail_sales_yoy: float | None  # Retail sales YoY %
     statcan_cpi_by_province: dict[str, float] | None
     statcan_age_days: NonNegativeInt | None
+
+    # --- Statistics Canada CPI/GDP trend fields (86bbahum6) ---
+    # Same "independently-optional, no age/value pairing enforced" pattern
+    # as the rest of this block — see class docstring. No new cross-field
+    # validator: ca_cpi_trend/ca_gdp_4q_trend are single-source pure
+    # derivations (one classifier function, one input each), exactly the
+    # same shape as cpi_trend/rate_trend above, which are deliberately
+    # left unvalidated for the same reason (the classifier's own
+    # if-None-return-None branch already guarantees the invariant).
+    ca_cpi_yoy: float | None
+    ca_cpi_3m_delta: float | None
+    ca_cpi_trend: Literal["rising", "stable", "falling"] | None
+    ca_gdp_qoq: float | None  # annualized
+    ca_gdp_4q_trend: Literal["rising", "stable", "falling"] | None
 
     @model_validator(mode="after")
     def _check_sector_commodity_nulls(self) -> "MacroSourcesBundle":
