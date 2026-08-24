@@ -5,6 +5,23 @@ from typing import TypedDict
 import pandas as pd
 
 
+class NormalizedQuote(TypedDict):
+    """Canonical get_quote() shape, needed by precompute/fundamentals.py's
+    price_info parameter (86bbb17pw). Confirmed live 2026-08-10: both FMP's
+    /quote and yfinance's fast_info already include 52-week high/low
+    directly (yearHigh/yearLow, year_high/year_low) — no derivation from
+    get_price_history() needed, unlike this ticket's original assumption.
+    openbb_tmx has no get_quote() method at all (router.py's CA_CHAINS
+    already routes get_quote to yfinance only), so only fmp.py/yfinance.py
+    need this mapping."""
+
+    current_price: float
+    market_cap: float | None
+    currency: str
+    high_52w: float | None
+    low_52w: float | None
+
+
 class NormalizedDividendRecord(TypedDict):
     """Canonical get_dividend_history() record shape, matching
     DataBundle.dividend_history's own documented comment
@@ -78,7 +95,16 @@ class StockDataProvider(ABC):
     @abstractmethod
     async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame: ...
     @abstractmethod
-    async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame: ...
+    async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
+        """Individual adapters (fmp.py, yfinance.py, edgartools.py, openbb_tmx.py)
+        return a bare pd.DataFrame, matching this signature exactly.
+        Router.get_financials() is a deliberate, documented exception —
+        it returns tuple[pd.DataFrame, str | None] instead, exposing which
+        provider answered so callers can dispatch to the right adapter's
+        normalize_financials() (86bbb001k). Found during a later sweep and
+        flagged here rather than "fixed" back to match this signature —
+        this divergence is intentional, not an oversight."""
+        ...
     @abstractmethod
     async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo: ...
     @abstractmethod

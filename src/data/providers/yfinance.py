@@ -10,6 +10,7 @@ from data.providers.base import (
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
     NormalizedFinancials,
+    NormalizedQuote,
 )
 import time
 
@@ -167,16 +168,37 @@ class YFinanceDataProvider(StockDataProvider):
             quarters=quarters,
             annual=annual,
             balance_sheet=balance_sheet,
-            currency=info.get("currency", ""),
+            # .get("currency") or "" — same real bug pattern found and fixed
+            # elsewhere this sweep: .get(key, "") only guards a missing key,
+            # not an explicit None value.
+            currency=info.get("currency") or "",
         )
 
     async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo:
         """Maps yfinance's .info onto NormalizedCompanyInfo (86bbb001k).
         currency/exchange/industry/country/market_cap were previously never
         extracted at all despite .info having them — real bug, not just a
-        rename."""
+        rename.
+
+        Real gap caught in a final integration-level review: for a genuinely
+        invalid ticker, yfinance's .info doesn't raise or come back empty —
+        confirmed live it returns a near-empty dict with one unrelated key
+        ({'trailingPegRatio': None}), no real data at all. Without a guard,
+        every field below would default to "" and this method would return
+        a full 7-key NormalizedCompanyInfo that LOOKS successful. That
+        breaks router.py's fallback chain: _is_empty()'s len(dict) == 0
+        check can never see a fully-blank-but-7-key dict as empty, so a
+        real FMP failure correctly falling back to yfinance would silently
+        "succeed" with a useless, all-blank result instead of the chain
+        correctly reporting total failure. fmp.py/openbb_tmx.py don't have
+        this problem — they already guard with `if not data: return {}`
+        before building anything, since their APIs cleanly signal "no
+        results" up front. name is the one field a real ticker should
+        always have, so it's the guard."""
         stock = yf.Ticker(ticker)
         info = stock.info
+        if not info.get("longName"):
+            return {}
         # .get(key) or "" (not .get(key, "")) — yfinance's .info can hold an
         # explicit None for these keys, not just omit them; .get(key, "")
         # only covers the omitted case and would silently store None in a
@@ -257,28 +279,32 @@ class YFinanceDataProvider(StockDataProvider):
         return ratings_data
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
+        """Real, confirmed bug fixed here (found in a later sweep, same
+        class as get_dividend_history()'s pre-fix bug): declared
+        -> list[dict] (matching StockDataProvider's ABC signature) but
+        every code path actually returned a pd.DataFrame — the "no data"
+        branch, the "no recognizable date column" branch, and the main
+        filtered-results path. Also used print() instead of structlog
+        (CLAUDE.md violation). Currently unreachable via router.py (US
+        routes get_insider_trading to edgartools only, per CLAUDE.md's
+        hard "never FMP" rule; CA routes to openbb_tmx), but a real bug in
+        the adapter regardless — directly callable on its own."""
         stock = yf.Ticker(ticker)
-        # Fetch raw insider transaction data (returns a Pandas DataFrame)
         df_insider = stock.insider_transactions
-        # Guard clause: Handle instances where Yahoo Finance has no transaction record
         if df_insider is None or df_insider.empty:
-            print(f"No insider trading data found for {ticker.upper()}.")
-            return pd.DataFrame()  # Return empty DataFrame to prevent breaking downstream pipelines
-        # Ensure the date column is parsed as datetime objects for mathematical comparison
-        # Note: yfinance typically puts the transaction date in the 'Start Date' column
+            logger.info("yfinance_no_insider_trading", ticker=ticker)
+            return []
         if "Start Date" in df_insider.columns:
             date_col = "Start Date"
         elif "Date" in df_insider.columns:
             date_col = "Date"
         else:
-            # If no obvious date column exists, return the raw data safely
-            return df_insider
+            logger.warning("yfinance_insider_trading_no_date_column", ticker=ticker)
+            return df_insider.to_dict("records")
         df_insider[date_col] = pd.to_datetime(df_insider[date_col])
-        # Calculate the boundary cutoff date based on the 'days' parameter
         cutoff_date = datetime.now() - timedelta(days=days)
-        # Filter for rows where the transaction occurred after or on the cutoff date
         filtered_df = df_insider[df_insider[date_col] >= cutoff_date]
-        return filtered_df
+        return filtered_df.to_dict("records")
 
     async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
         """
@@ -329,40 +355,48 @@ class YFinanceDataProvider(StockDataProvider):
             return []
 
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
-        """
-        Retrieves the upcoming earnings dates and EPS consensus estimates.
-        :param ticker: Stock ticker symbol (e.g., 'AAPL', 'AMD')
-        :return: A dictionary containing scheduled reporting metrics.
+        """Retrieves the upcoming earnings dates and EPS consensus estimates.
+
+        Real, confirmed bug fixed here (found in a later sweep, same class
+        as get_dividend_history()'s pre-fix bug): declared -> list[dict] but
+        every code path actually returned a single dict, never a list —
+        including the "no data" branch, which returned a dict with a
+        human-readable "Status" message instead of the empty list the type
+        contract promises. yfinance.calendar only ever exposes one upcoming
+        earnings event per ticker (unlike FMP's get_earnings_calendar,
+        which returns many companies' events in a date window), so the fix
+        here is to wrap that single record in a list, not to build a
+        multi-event lookup the underlying data doesn't support. Currently
+        unreachable via router.py (neither US_CHAINS nor CA_CHAINS route
+        get_earnings_calendar to yfinance), but a real bug in the adapter
+        regardless — directly callable on its own.
+
+        No shared record shape exists yet between this and FMP's raw,
+        unmapped earnings-calendar rows — deliberately not inventing one
+        here, same reasoning as get_price_history() staying unnormalized
+        in 86bbb001k: no real consumer exists yet to ground it against.
         """
         stock = yf.Ticker(ticker)
-        # Fetch calendar data (typically returns a dictionary or empty DataFrame)
         cal = stock.calendar
-        # Guard clause: Handle stocks that do not have an upcoming date scheduled
         if cal is None or (isinstance(cal, pd.DataFrame) and cal.empty) or not cal:
-            return {
-                "Symbol": ticker.upper(),
-                "Status": f"No upcoming earnings calendar data found for {ticker.upper()}.",
-            }
-        # Extract components safely (handling list-based or scalar values)
+            return []
         earnings_date = cal.get("Earnings Date", ["N/A"])
-        # yfinance often packages dates as a list of timestamps if the time is unconfirmed
         if isinstance(earnings_date, list) and len(earnings_date) > 0:
-            # Format dates to clean string format (YYYY-MM-DD)
             formatted_dates = [
                 d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d) for d in earnings_date
             ]
         else:
             formatted_dates = [str(earnings_date)]
-        # Build a structured output dictionary
-        calendar_data = {
-            "Symbol": ticker.upper(),
-            "Upcoming Earnings Dates": formatted_dates,
-            "EPS Estimate": cal.get("Earnings Average", "N/A"),
-            "EPS High Estimate": cal.get("Earnings High", "N/A"),
-            "EPS Low Estimate": cal.get("Earnings Low", "N/A"),
-            "Revenue Estimate": cal.get("Revenue Average", "N/A"),
-        }
-        return calendar_data
+        return [
+            {
+                "Symbol": ticker.upper(),
+                "Upcoming Earnings Dates": formatted_dates,
+                "EPS Estimate": cal.get("Earnings Average", "N/A"),
+                "EPS High Estimate": cal.get("Earnings High", "N/A"),
+                "EPS Low Estimate": cal.get("Earnings Low", "N/A"),
+                "Revenue Estimate": cal.get("Revenue Average", "N/A"),
+            }
+        ]
 
     async def get_dividend_history(
         self, ticker: str, from_date: str, to_date: str
@@ -405,12 +439,27 @@ class YFinanceDataProvider(StockDataProvider):
             for row in filtered.to_dict("records")
         ]
 
-    async def get_quote(self, ticker: str) -> dict:
-        """Not on StockDataProvider. Mirrors FMPDataProvider.get_quote's shape
-        (symbol/price at minimum) so the US-equity composite router can fall
-        back here transparently. Yahoo's fast_info raises KeyError rather than
-        returning empty for an invalid/delisted ticker, so that's the one
-        failure mode this needs to catch explicitly."""
+    async def get_quote(self, ticker: str) -> NormalizedQuote:
+        """Not on StockDataProvider. Maps onto NormalizedQuote (86bbb17pw),
+        matching FMPDataProvider.get_quote's now-normalized shape so the
+        US-equity composite router can fall back here transparently — both
+        return the same fields now, so no provider-specific shape-mirroring
+        is needed the way the old raw-FMP-shaped version required. Yahoo's
+        fast_info raises KeyError rather than returning empty for an
+        invalid/delisted ticker, so that's the one failure mode this needs
+        to catch explicitly. Confirmed live 2026-08-10: fast_info already
+        has year_high/year_low directly, same as FMP's yearHigh/yearLow —
+        no derivation from get_price_history() needed.
+
+        The camelCase keys below (lastPrice/marketCap/yearHigh/yearLow) are
+        NOT what dir(fast_info) shows — its real attributes are snake_case
+        (last_price/market_cap/year_high/year_low), and fast_info.get()
+        with the snake_case name actually returns None. This looks like a
+        bug on sight. It isn't: FastInfo.get() supports a separate set of
+        legacy camelCase aliases as a backward-compat layer, confirmed live
+        to resolve to the exact same values as the real attributes for all
+        four keys used here. Don't switch these to snake_case without
+        re-verifying live first."""
         stock = yf.Ticker(ticker)
         try:
             fi = stock.fast_info
@@ -419,14 +468,20 @@ class YFinanceDataProvider(StockDataProvider):
             return {}
         if price is None:
             return {}
-        return {
-            "symbol": ticker.upper(),
-            "price": price,
-            "previousClose": fi.get("previousClose"),
-            "dayLow": fi.get("dayLow"),
-            "dayHigh": fi.get("dayHigh"),
-            "volume": fi.get("lastVolume"),
-        }
+        return NormalizedQuote(
+            current_price=price,
+            market_cap=fi.get("marketCap"),
+            # .get("currency") or "" (not .get("currency", "")) — confirmed
+            # live that FastInfo.get(key, default) only falls back to
+            # `default` for a genuinely unrecognized key, not when a
+            # recognized key's value is None (e.g. fi.get("marketCap", "X")
+            # on ^GSPC returns real None, not "X") — same bug pattern as
+            # get_company_info()'s earlier .get(key, "") fix, caught here
+            # by testing a ticker (^GSPC) where market_cap is genuinely None.
+            currency=fi.get("currency") or "",
+            high_52w=fi.get("yearHigh"),
+            low_52w=fi.get("yearLow"),
+        )
 
 
 class YFinanceNewsProvider(NewsProvider):

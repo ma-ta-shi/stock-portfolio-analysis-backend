@@ -18,6 +18,10 @@ class FakeTicker:
         quarterly_cash_flow: pd.DataFrame | None = None,
         cashflow: pd.DataFrame | None = None,
         dividends: pd.Series | None = None,
+        fast_info: dict | None = None,
+        raises_on_fast_info: bool = False,
+        insider_transactions: pd.DataFrame | None = None,
+        calendar: dict | None = None,
     ) -> None:
         self.info = info or {}
         self.quarterly_financials = _empty_if_none(quarterly_financials)
@@ -27,6 +31,16 @@ class FakeTicker:
         self.quarterly_cash_flow = _empty_if_none(quarterly_cash_flow)
         self.cashflow = _empty_if_none(cashflow)
         self.dividends = dividends if dividends is not None else pd.Series(dtype=float)
+        self._fast_info = fast_info or {}
+        self._raises_on_fast_info = raises_on_fast_info
+        self.insider_transactions = _empty_if_none(insider_transactions)
+        self.calendar = calendar if calendar is not None else {}
+
+    @property
+    def fast_info(self) -> dict:
+        if self._raises_on_fast_info:
+            raise KeyError("quoteType not found")  # real yfinance failure mode
+        return self._fast_info
 
 
 def _empty_if_none(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -70,13 +84,32 @@ async def test_get_company_info_maps_to_normalized_shape(provider, monkeypatch):
     }
 
 
-async def test_get_company_info_missing_fields_default_gracefully(provider, monkeypatch):
-    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={}))
+async def test_get_company_info_no_real_data_returns_empty_dict(provider, monkeypatch):
+    """Real gap caught in a final integration-level review: a genuinely
+    invalid ticker's .info isn't literally {} — confirmed live it returns
+    a near-empty dict with one unrelated key ({'trailingPegRatio': None}).
+    Without the `if not info.get("longName")` guard, this would have built
+    a full 7-key NormalizedCompanyInfo with everything blank, which
+    router.py's _is_empty() (len(dict) == 0) can never detect as empty —
+    breaking the fallback chain's ability to recognize total failure."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={"trailingPegRatio": None}))
 
-    result = await provider.get_company_info("ZZZZ")
+    result = await provider.get_company_info("ZZZZINVALID")
 
-    assert result["name"] == ""
+    assert result == {}
+
+
+async def test_get_company_info_missing_secondary_fields_default_gracefully(provider, monkeypatch):
+    """A real ticker with `longName` present but some other fields missing
+    still returns a partial NormalizedCompanyInfo, not {} — the guard is
+    specifically "is there any real data at all," not "is every field set."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={"longName": "Some Co"}))
+
+    result = await provider.get_company_info("SOME")
+
+    assert result["name"] == "Some Co"
     assert result["market_cap"] is None
+    assert result["sector"] == ""
 
 
 # --- normalize_financials ---
@@ -260,5 +293,140 @@ async def test_get_dividend_history_no_dividends_returns_empty_list(provider, mo
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(dividends=pd.Series(dtype=float)))
 
     result = await provider.get_dividend_history("ZZZZ", "2025-01-01", "2026-12-31")
+
+    assert result == []
+
+
+# --- get_quote ---
+
+
+async def test_get_quote_maps_to_normalized_shape(provider, monkeypatch):
+    fast_info = {
+        "lastPrice": 306.23,
+        "marketCap": 4_469_175_901_736.45,
+        "currency": "USD",
+        "yearHigh": 344.57,
+        "yearLow": 223.78,
+    }
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(fast_info=fast_info))
+
+    result = await provider.get_quote("AAPL")
+
+    assert result == {
+        "current_price": 306.23,
+        "market_cap": 4_469_175_901_736.45,
+        "currency": "USD",
+        "high_52w": 344.57,
+        "low_52w": 223.78,
+    }
+
+
+async def test_get_quote_invalid_ticker_returns_empty_dict(provider, monkeypatch):
+    """Real failure mode: yfinance's fast_info raises KeyError for an
+    invalid/delisted ticker rather than returning empty."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(raises_on_fast_info=True))
+
+    result = await provider.get_quote("ZZZZ")
+
+    assert result == {}
+
+
+async def test_get_quote_missing_price_returns_empty_dict(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(fast_info={}))
+
+    result = await provider.get_quote("ZZZZ")
+
+    assert result == {}
+
+
+async def test_get_quote_null_currency_defaults_to_empty_string_not_none(provider, monkeypatch):
+    """Real bug caught on review: confirmed live that FastInfo.get(key,
+    default) only falls back to `default` for a genuinely unrecognized key,
+    not when a recognized key's own value is None (e.g. ^GSPC has a real
+    fast_info.market_cap of None, and .get("marketCap", "X") still returns
+    None, not "X"). currency=fi.get("currency", "") would have silently
+    stored None in a field typed str whenever currency is genuinely
+    unavailable — same bug pattern already fixed once for get_company_info()."""
+    fast_info = {"lastPrice": 100.0, "currency": None}
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(fast_info=fast_info))
+
+    result = await provider.get_quote("SOME.TICKER")
+
+    assert result["currency"] == ""
+
+
+# --- get_insider_trading ---
+
+
+async def test_get_insider_trading_returns_list_of_dicts_within_window(provider, monkeypatch):
+    """Real, confirmed bug fixed here: declared -> list[dict] but every
+    code path actually returned a pd.DataFrame."""
+    now = pd.Timestamp.now()
+    df = pd.DataFrame(
+        {
+            "Start Date": [now - pd.Timedelta(days=5), now - pd.Timedelta(days=400)],
+            "Insider": ["Jane Doe", "Old Insider"],
+            "Shares": [100, 50],
+        }
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    result = await provider.get_insider_trading("AAPL", days=90)
+
+    assert isinstance(result, list)
+    assert all(isinstance(row, dict) for row in result)
+    assert len(result) == 1
+    assert result[0]["Insider"] == "Jane Doe"
+
+
+async def test_get_insider_trading_no_data_returns_empty_list(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=pd.DataFrame()))
+
+    result = await provider.get_insider_trading("ZZZZ")
+
+    assert result == []
+
+
+async def test_get_insider_trading_no_date_column_still_returns_list_of_dicts(provider, monkeypatch):
+    df = pd.DataFrame({"Insider": ["Jane Doe"], "Shares": [100]})
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    result = await provider.get_insider_trading("AAPL")
+
+    assert isinstance(result, list)
+    assert result == [{"Insider": "Jane Doe", "Shares": 100}]
+
+
+# --- get_earnings_calendar ---
+
+
+async def test_get_earnings_calendar_returns_list_of_dicts(provider, monkeypatch):
+    """Real, confirmed bug fixed here: declared -> list[dict] but every
+    code path actually returned a single dict, never a list."""
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(
+            calendar={
+                "Earnings Date": [pd.Timestamp("2026-11-05")],
+                "Earnings Average": 1.5,
+                "Earnings High": 1.7,
+                "Earnings Low": 1.3,
+                "Revenue Average": 90_000_000_000,
+            }
+        ),
+    )
+
+    result = await provider.get_earnings_calendar("AAPL")
+
+    assert isinstance(result, list)
+    assert len(result) == 1
+    assert result[0]["Upcoming Earnings Dates"] == ["2026-11-05"]
+    assert result[0]["EPS Estimate"] == 1.5
+
+
+async def test_get_earnings_calendar_no_data_returns_empty_list(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(calendar={}))
+
+    result = await provider.get_earnings_calendar("ZZZZ")
 
     assert result == []
