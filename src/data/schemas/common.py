@@ -43,10 +43,17 @@ class FilingDigest(ContractModel):
 
 class TranscriptExcerpt(ContractModel):
     """One earnings-call excerpt. <=400 tokens total per quarter, 2 most
-    recent quarters kept."""
+    recent quarters kept.
+
+    `type` includes "mgmt" (added 2026-08-07, contract-vs-consumer audit)
+    alongside the original "guidance"/"qa" — the live Stock Researcher
+    Agent Prompt.md's payload template has three distinct excerpt slots
+    per quarter (`{transcript_mgmt_excerpt}`, `{transcript_guidance_excerpt}`,
+    `{transcript_qa_excerpt}`), not two; "mgmt" covers prepared management
+    commentary distinct from forward-looking guidance."""
 
     quarter: str
-    type: Literal["guidance", "qa"]
+    type: Literal["mgmt", "guidance", "qa"]
     content: str
     token_count: int
 
