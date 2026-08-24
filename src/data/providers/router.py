@@ -77,7 +77,16 @@ def is_canadian(stock: StockLike | None = None, *, ticker: str | None = None) ->
 
 def _is_empty(value: Any) -> bool:
     """Generalized from us_equity.py — the proven "is this missing" check,
-    dict/list/DataFrame-aware."""
+    dict/list/DataFrame-aware.
+
+    dict/list emptiness is by length, not by content — {"forward_eps":
+    None} is NOT empty (len 1), even though its only value is None. Real
+    bug caught building NormalizedAnalystEstimates (86bbdu04a): an
+    adapter that always returns a fixed-key dict, populated or not, makes
+    any fallback chain behind it unreachable, since this function will
+    never see that dict as empty. Every Normalized*-returning adapter
+    method must return a bare {} when it found nothing — not a dict with
+    the right keys and None values — or chain fallback silently breaks."""
     if value is None:
         return True
     if isinstance(value, pd.DataFrame):
@@ -98,6 +107,7 @@ US_CHAINS: dict[str, list[str]] = {
     "get_insider_trading": ["edgartools"],  # never FMP — CLAUDE.md hard rule
     "get_analyst_estimates": ["fmp"],
     "get_analyst_ratings": ["fmp"],
+    "get_earnings_surprises": ["fmp", "yfinance"],  # FMP has revenue+EPS; yfinance is EPS-only
     "get_earnings_calendar": ["fmp", "finnhub"],
     "get_peers": ["finnhub"],
     "get_news": ["finnhub"],
@@ -117,8 +127,15 @@ CA_CHAINS: dict[str, list[str]] = {
     "get_company_info": ["openbb_tmx"],
     "get_financials": ["yfinance"],
     "get_insider_trading": ["openbb_tmx"],
-    "get_analyst_estimates": ["openbb_tmx"],
+    # openbb_tmx's TMX consensus has no forward-EPS field at all —
+    # get_analyst_estimates() returns {} unconditionally, no API call
+    # (86bbdu04a). Stays first anyway since that costs nothing, so a
+    # future TMX field would be picked up automatically; yfinance is the
+    # fallback that actually has this field for CA tickers (confirmed
+    # live, e.g. RY.TO).
+    "get_analyst_estimates": ["openbb_tmx", "yfinance"],
     "get_analyst_ratings": ["yfinance"],
+    "get_earnings_surprises": ["yfinance"],  # openbb_tmx has no actual-vs-estimate earnings data
     "get_earnings_calendar": ["openbb_tmx"],
     "get_peers": ["peers_json"],  # static file, not a live provider — Gap 1
     "get_news": ["openbb_tmx"],
@@ -249,6 +266,10 @@ class Router(StockDataProvider, NewsProvider):
     async def get_analyst_ratings(self, ticker: str) -> dict:
         result, _ = await self._try_chain("get_analyst_ratings", ticker)
         return result if not _is_empty(result) else {}
+
+    async def get_earnings_surprises(self, ticker: str) -> list[dict]:
+        result, _ = await self._try_chain("get_earnings_surprises", ticker)
+        return result if not _is_empty(result) else []
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         result, _ = await self._try_chain("get_insider_trading", ticker, days)

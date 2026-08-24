@@ -255,26 +255,51 @@ async def test_get_company_info_paywalled_ticker_returns_empty_dict(provider):
     assert info == {}
 
 
-# --- get_analyst_estimates ---
+# --- get_analyst_estimates (86bbdu04a: rewritten from the old raw
+# {"symbol": ..., "estimates": [...]} shape to NormalizedAnalystEstimates) ---
 
 
-async def test_get_analyst_estimates_sends_required_period_param(provider):
-    session = _wire(provider, FakeResponse(200, json_data=[{"epsAvg": 13.38}]))
+async def test_get_analyst_estimates_returns_nearest_future_fiscal_year_eps(provider):
+    """Real gap found planning this ticket: FMP's period=annual rows come
+    back sorted descending by fiscal-year-end date (furthest-future
+    first), confirmed live — estimates[0] is the furthest year, not the
+    nearest. Must filter to future rows and take the soonest."""
+    session = _wire(
+        provider,
+        FakeResponse(
+            200,
+            json_data=[
+                {"date": "2099-09-27", "epsAvg": 20.0},  # furthest future
+                {"date": "2027-09-27", "epsAvg": 9.5},  # nearest future
+                {"date": "2020-09-27", "epsAvg": 4.0},  # past
+            ],
+        ),
+    )
 
     result = await provider.get_analyst_estimates("AAPL")
 
     _, params = session.calls[0]
     assert params["period"] == "annual"
-    assert result["symbol"] == "AAPL"
-    assert result["estimates"] == [{"epsAvg": 13.38}]
+    assert result == {"forward_eps": 9.5}
 
 
-async def test_get_analyst_estimates_no_data_returns_empty_list(provider):
+async def test_get_analyst_estimates_no_future_rows_returns_empty_dict(provider):
+    """Bare {}, not {"forward_eps": None} — matches get_company_info's/
+    get_quote's own "empty dict signals no data" convention, needed for
+    Router._is_empty() to correctly recognize this as empty."""
+    _wire(provider, FakeResponse(200, json_data=[{"date": "2020-09-27", "epsAvg": 4.0}]))
+
+    result = await provider.get_analyst_estimates("AAPL")
+
+    assert result == {}
+
+
+async def test_get_analyst_estimates_no_data_returns_empty_dict(provider):
     _wire(provider, FakeResponse(200, json_data=[]))
 
     result = await provider.get_analyst_estimates("BRK.B")
 
-    assert result == {"symbol": "BRK.B", "estimates": []}
+    assert result == {}
 
 
 # --- get_analyst_ratings ---
@@ -286,6 +311,88 @@ async def test_get_analyst_ratings_returns_snapshot(provider):
     result = await provider.get_analyst_ratings("AAPL")
 
     assert result["rating"] == "B"
+
+
+# --- get_earnings_surprises (new, 86bbdu04a) ---
+
+
+async def test_get_earnings_surprises_filters_realized_rows_and_caps_at_four(provider):
+    """FMP's /earnings mixes forward calendar rows (epsActual is None,
+    confirmed live) with real historical actual-vs-estimate rows — filter
+    to realized only, and cap at 4 (matches yfinance's own hard limit for
+    the same field)."""
+    rows = [{"date": "2099-01-01", "epsActual": None, "epsEstimated": 2.0}]
+    rows += [
+        {
+            "date": f"202{5 - i}-01-01",  # newest first, matching real FMP order
+            "epsActual": 2.0 + i,
+            "epsEstimated": 2.0,
+            "revenueActual": 1000.0 + i,
+            "revenueEstimated": 1000.0,
+        }
+        for i in range(6)
+    ]
+    _wire(provider, FakeResponse(200, json_data=rows))
+
+    result = await provider.get_earnings_surprises("AAPL")
+
+    assert len(result) == 4
+    assert result[0]["period_end"] == "2025-01-01"
+    assert all(r["eps_actual"] is not None for r in result)
+
+
+async def test_get_earnings_surprises_computes_surprise_pct(provider):
+    _wire(
+        provider,
+        FakeResponse(
+            200,
+            json_data=[
+                {
+                    "date": "2026-07-30",
+                    "epsActual": 2.02,
+                    "epsEstimated": 1.89,
+                    "revenueActual": 109417000000,
+                    "revenueEstimated": 109038900000,
+                }
+            ],
+        ),
+    )
+
+    result = await provider.get_earnings_surprises("AAPL")
+
+    assert result == [
+        {
+            "period_end": "2026-07-30",
+            "eps_actual": 2.02,
+            "eps_estimated": 1.89,
+            "eps_surprise_pct": pytest.approx((2.02 - 1.89) / 1.89 * 100),
+            "revenue_actual": 109417000000,
+            "revenue_estimated": 109038900000,
+        }
+    ]
+
+
+async def test_get_earnings_surprises_zero_estimate_returns_none_surprise_pct(provider):
+    """abs(epsEstimated) would divide by zero — treated as undefined,
+    matching how a missing epsEstimated is already handled."""
+    _wire(
+        provider,
+        FakeResponse(
+            200, json_data=[{"date": "2024-01-01", "epsActual": 0.5, "epsEstimated": 0.0}]
+        ),
+    )
+
+    result = await provider.get_earnings_surprises("AAPL")
+
+    assert result[0]["eps_surprise_pct"] is None
+
+
+async def test_get_earnings_surprises_no_data_returns_empty_list(provider):
+    _wire(provider, FakeResponse(200, json_data=[]))
+
+    result = await provider.get_earnings_surprises("AAPL")
+
+    assert result == []
 
 
 # --- get_earnings_calendar ---

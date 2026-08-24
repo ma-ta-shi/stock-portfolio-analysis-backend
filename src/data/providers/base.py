@@ -65,6 +65,33 @@ class NormalizedCompanyInfo(TypedDict):
     # all 10 consumer prompts renders {primary_exchange}, never {exchange}
 
 
+class NormalizedAnalystEstimates(TypedDict):
+    """Canonical get_analyst_estimates() shape (86bbdu04a). One field,
+    deliberately — the only real consumer, confirmed against the live
+    Fundamental Analyst prompt (not just the ticket), is
+    compute_valuation_metrics()'s forward_pe (current_price / forward_eps).
+    A fiscal-year-end/period field was considered and cut: FMP's
+    /analyst-estimates rows do carry one, but nothing downstream reads it
+    — same "don't build past the real consumer" reasoning behind deferring
+    get_analyst_ratings() normalization (86bbdu04a scope decision), applied
+    to this type's own fields too, not just the sibling method.
+
+    Real bug caught via live integration check: every adapter (fmp.py/
+    openbb_tmx.py/yfinance.py) must return a bare {} when forward_eps
+    can't be found — never {"forward_eps": None}. router.py's _is_empty()
+    treats any non-empty dict as a success regardless of its values, so a
+    1-key dict with a None value would make a fallback chain behind this
+    method never actually fall through — the CA chain silently never
+    tried yfinance behind openbb_tmx until this was caught. Same
+    dict-is-a-dict-at-runtime consideration as NormalizedCompanyInfo
+    above, but load-bearing here specifically because this type has only
+    one field, so a null value can't be distinguished from a "no data"
+    signal by shape alone the way a partially-populated multi-field dict
+    still could be."""
+
+    forward_eps: float | None
+
+
 @dataclass
 class NormalizedFinancials:
     """Canonical get_financials() shape (86bbb001k), produced by
@@ -108,9 +135,20 @@ class StockDataProvider(ABC):
     @abstractmethod
     async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo: ...
     @abstractmethod
-    async def get_analyst_estimates(self, ticker: str) -> dict: ...
+    async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates: ...
     @abstractmethod
     async def get_analyst_ratings(self, ticker: str) -> dict: ...
+    @abstractmethod
+    async def get_earnings_surprises(self, ticker: str) -> list[dict]:
+        """Historical actual-vs-estimate earnings, newest first, each:
+        {period_end: str, eps_actual: float | None, eps_estimated: float | None,
+        eps_surprise_pct: float | None, revenue_actual: float | None,
+        revenue_estimated: float | None}. No revenue_surprise_pct — neither
+        real source (FMP, yfinance) precomputes one, and fundamentals.py's
+        documented gap (86bbdu04a) doesn't need it. revenue_actual/
+        revenue_estimated stay None on any source that can't provide them
+        (yfinance)."""
+        ...
     @abstractmethod
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]: ...
     @abstractmethod

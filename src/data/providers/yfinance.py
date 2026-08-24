@@ -7,6 +7,7 @@ from data.providers.base import (
     StockDataProvider,
     NewsProvider,
     MacroDataProvider,
+    NormalizedAnalystEstimates,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
     NormalizedFinancials,
@@ -72,6 +73,13 @@ def _extract_row(df: pd.DataFrame, row_label: str, column) -> float | None:
     if isinstance(value, pd.Series):
         value = value.iloc[0]
     return None if pd.isna(value) else float(value)
+
+
+def _safe_float(value) -> float | None:
+    """Same numpy-leak guard as _extract_row above, for values read
+    directly off a DataFrame row (e.g. get_earnings_surprises) rather
+    than via .loc — pandas cells are numpy.float64, not plain float."""
+    return None if value is None or pd.isna(value) else float(value)
 
 
 def correct_alignment(df: pd.DataFrame) -> pd.DataFrame:
@@ -213,37 +221,50 @@ class YFinanceDataProvider(StockDataProvider):
             primary_exchange=info.get("exchange") or "",
         )
 
-    async def get_analyst_estimates(self, ticker: str) -> dict:
+    async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
+        """Maps onto NormalizedAnalystEstimates (86bbdu04a). yfinance
+        doesn't expose forward EPS via analyst_price_targets or
+        recommendations (checked) — it's a plain .info field instead,
+        confirmed live for both AAPL and RY.TO. Bare {} on a missing
+        value — see NormalizedAnalystEstimates's docstring in base.py
+        for why."""
         stock = yf.Ticker(ticker)
-        # Fetch Price Targets safely
-        targets = stock.analyst_price_targets
-        # Fetch Recommendation Trends (DataFrame)
-        recs_df = stock.recommendations
-        # Extract the most recent month's rating breakdown if available
-        latest_consensus = {}
-        if recs_df is not None and not recs_df.empty:
-            # The first row (index 0) typically represents the current month ('0m')
-            latest_row = recs_df.iloc[0]
-            latest_consensus = {
-                "Period": latest_row.get("period", "Current"),
-                "Strong Buy": int(latest_row.get("strongBuy", 0)),
-                "Buy": int(latest_row.get("buy", 0)),
-                "Hold": int(latest_row.get("hold", 0)),
-                "Sell": int(latest_row.get("sell", 0)),
-                "Strong Sell": int(latest_row.get("strongSell", 0)),
+        forward_eps = stock.info.get("forwardEps")
+        return {"forward_eps": forward_eps} if forward_eps is not None else {}
+
+    async def get_earnings_surprises(self, ticker: str) -> list[dict]:
+        """Ticker.earnings_history — confirmed live to work for both US and
+        CA tickers (4 rows each, yfinance's own hard cap), unlike most
+        analyst-data fields on this provider. No revenue-surprise fields
+        (unlike FMP) — revenue_actual/revenue_estimated stay None. Period
+        comes from the DataFrame's "quarter" index, not a column.
+
+        Real gap caught via live integration check: earnings_history's
+        cells are numpy.float64, not plain float (DataFrame-sourced,
+        unlike .info's plain-dict values elsewhere in this file) — same
+        numpy-leak class _extract_row() above already guards against for
+        financials. Cast explicitly; numpy.float64 isn't always
+        JSON-serializable downstream and this project has no other
+        established tolerance for it leaking past the provider layer."""
+        stock = yf.Ticker(ticker)
+        eh = stock.earnings_history
+        if eh is None or eh.empty:
+            return []
+        return [
+            {
+                "period_end": period.date().isoformat(),
+                "eps_actual": _safe_float(row.get("epsActual")),
+                "eps_estimated": _safe_float(row.get("epsEstimate")),
+                "eps_surprise_pct": (
+                    _safe_float(row.get("surprisePercent")) * 100
+                    if row.get("surprisePercent") is not None
+                    else None
+                ),
+                "revenue_actual": None,
+                "revenue_estimated": None,
             }
-        # Consolidate the data structure
-        estimates = {
-            "Symbol": ticker.upper(),
-            "Price Targets": {
-                "Low": targets.get("low", "N/A"),
-                "High": targets.get("high", "N/A"),
-                "Mean": targets.get("mean", "N/A"),
-                "Median": targets.get("median", "N/A"),
-            },
-            "Latest Consensus Counts": latest_consensus or "No recommendation data available",
-        }
-        return estimates
+            for period, row in eh.iterrows()
+        ]
 
     async def get_analyst_ratings(self, ticker: str) -> dict:
         stock = yf.Ticker(ticker)
