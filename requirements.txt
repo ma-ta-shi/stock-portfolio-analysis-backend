@@ -11,8 +11,9 @@ fredapi==0.5.2
 h11==0.16.0
 httpx==0.28.1
 idna==3.11
-pandas==2.2.3
+pandas==3.0.5
 pandas-datareader==0.11.1
+pandas-ta==0.4.71b0
 pydantic==2.12.5
 pydantic_core==2.41.5
 pytest==8.3.4
