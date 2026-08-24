@@ -175,6 +175,179 @@ async def test_get_financials_none_financials_returns_empty_dataframe(provider, 
     assert any(log["event"] == "edgar_financials_missing" for log in logs)
 
 
+async def test_get_financials_single_missing_statement_returns_empty_dataframe(
+    provider, monkeypatch
+):
+    """Real gap found via 86bbb001k: the Financials container can exist
+    while one specific statement isn't XBRL-tagged (e.g. a filer missing a
+    cash flow statement) — to_dataframe() returns None in that case, which
+    used to propagate straight through get_financials(), violating its own
+    -> pd.DataFrame contract."""
+    fake = FakeCompany(annual=FakeFinancials(income_df=_income_df(FULL_INCOME_CONCEPTS)))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    df = await provider.get_financials("AAPL", "cashflow", "annual")
+
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
+
+
+# --- normalize_financials (86bbb001k) ---
+
+
+def _concept_df(rows: list[tuple[str, str, bool, float]], period_col: str) -> pd.DataFrame:
+    """rows: (concept, label, dimension, value). Mirrors edgartools'
+    real to_dataframe() shape — a flat table with concept/label/dimension
+    columns plus one column per period, not index-based like yfinance."""
+    return pd.DataFrame(
+        {
+            "concept": [r[0] for r in rows],
+            "label": [r[1] for r in rows],
+            "dimension": [r[2] for r in rows],
+            period_col: [r[3] for r in rows],
+        }
+    )
+
+
+async def test_normalize_financials_uses_consolidated_row_not_segment_breakdown(
+    provider, monkeypatch
+):
+    """Real, confirmed finding: edgartools repeats a concept once for the
+    consolidated total and again per segment/product breakdown — dimension
+    == False is the consolidated row. A naive first-match-by-concept
+    lookup with rows ordered breakdown-first would silently pick a segment
+    slice instead of total revenue."""
+    income = _concept_df(
+        [
+            ("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "iPhone", True, 500.0),
+            (
+                "us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax",
+                "Net sales",
+                False,
+                1000.0,
+            ),
+        ],
+        "2026-06-27 (FY)",
+    )
+    fake = FakeCompany(annual=FakeFinancials(income_df=income))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.annual[0]["revenue"] == 1000.0
+
+
+async def test_normalize_financials_period_end_strips_quarter_annotation(provider, monkeypatch):
+    """Real inconsistency caught on review: edgartools' column labels carry
+    a "(Q3)"/"(FY)" annotation that yfinance.py's normalize_financials()
+    doesn't produce (it emits a clean ISO date) — both feed the same
+    NormalizedFinancials.quarters[]/annual[] period_end field, so edgartools
+    must strip it too rather than leaking the annotation through."""
+    income = _concept_df(
+        [("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "Net sales", False, 300.0)],
+        "2026-06-27 (Q3)",
+    )
+    fake = FakeCompany(quarterly=FakeFinancials(income_df=income))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.quarters[0]["period_end"] == "2026-06-27"
+
+
+async def test_normalize_financials_quarterly_excludes_ytd_columns(provider, monkeypatch):
+    """Real, confirmed finding: get_quarterly_financials()'s income statement
+    exposes both a true single-quarter column ("(Q3)") and a
+    cumulative-since-fiscal-year-start column ("(YTD)") for the same period
+    end — a standard 10-Q convention. quarters[] must use the Q-only
+    column, not silently report the cumulative figure as single-quarter."""
+    income = _concept_df(
+        [("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "Net sales", False, 300.0)],
+        "2026-06-27 (Q3)",
+    )
+    income["2026-06-27 (YTD)"] = [900.0]
+    fake = FakeCompany(quarterly=FakeFinancials(income_df=income))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert len(result.quarters) == 1
+    assert result.quarters[0]["revenue"] == 300.0  # the Q-only figure, not 900 (YTD)
+
+
+async def test_normalize_financials_quarterly_cashflow_fields_are_none(provider, monkeypatch):
+    """Real, disclosed gap: edgartools' quarterly cashflow statement has no
+    true per-quarter column at all (every column is "(YTD)") — quarters[]
+    leaves cashflow-derived fields None rather than reporting a cumulative
+    YTD figure as if it were single-quarter."""
+    income = _concept_df(
+        [("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "Net sales", False, 300.0)],
+        "2026-06-27 (Q3)",
+    )
+    cashflow = _concept_df(
+        [("us-gaap_PaymentsOfDividends", "Dividends paid", False, -60.0)],
+        "2026-06-27 (YTD)",
+    )
+    fake = FakeCompany(quarterly=FakeFinancials(income_df=income, cashflow_df=cashflow))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.quarters[0]["dividends_paid"] is None
+    assert result.quarters[0]["operating_cash_flow"] is None
+
+
+async def test_normalize_financials_annual_populates_cashflow_fields(provider, monkeypatch):
+    """Annual columns are uniformly "(FY)" — no YTD-vs-quarter ambiguity —
+    so cashflow-derived fields ARE populated at the annual grain."""
+    income = _concept_df(
+        [("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "Net sales", False, 1000.0)],
+        "2025-09-27 (FY)",
+    )
+    cashflow = _concept_df(
+        [("us-gaap_PaymentsOfDividends", "Dividends paid", False, -60.0)],
+        "2025-09-27 (FY)",
+    )
+    fake = FakeCompany(annual=FakeFinancials(income_df=income, cashflow_df=cashflow))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.annual[0]["dividends_paid"] == -60.0
+
+
+async def test_normalize_financials_total_debt_sums_current_and_noncurrent(provider, monkeypatch):
+    """total_debt has no single XBRL concept — derived by summing current +
+    non-current term debt, confirmed live against AAPL's real balance sheet."""
+    balance = _concept_df(
+        [
+            ("us-gaap_Assets", "Total assets", False, 5000.0),
+            ("us-gaap_LongTermDebtCurrent", "Term debt, current", False, 100.0),
+            ("us-gaap_LongTermDebtNoncurrent", "Term debt, non-current", False, 700.0),
+        ],
+        "2026-06-27",
+    )
+    fake = FakeCompany(quarterly=FakeFinancials(balance_df=balance))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.balance_sheet["total_debt"] == 800.0
+    assert result.balance_sheet["total_assets"] == 5000.0
+
+
+async def test_normalize_financials_none_financials_returns_empty_periods(provider, monkeypatch):
+    fake = FakeCompany(annual=None, quarterly=None)
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("NODATA")
+
+    assert result.quarters == []
+    assert result.annual == []
+    assert result.balance_sheet == {}
+    assert result.currency == "USD"
+
+
 # --- get_insider_trading ---
 
 

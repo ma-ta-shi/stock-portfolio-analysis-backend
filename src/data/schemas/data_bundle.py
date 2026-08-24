@@ -57,7 +57,9 @@ class DataBundle(ContractModel):
 
     # --- Stock Researcher (Pass 1) ---
     company_info: (
-        dict  # name, sector (GICS), industry (GICS), market_cap, currency, country, exchange
+        dict  # name, sector (GICS), industry (GICS), market_cap, currency, country,
+        # primary_exchange — matches providers.base.NormalizedCompanyInfo (86bbb001k);
+        # was previously documented as "exchange", which no payload template ever used
     )
     research_sources: ResearchSourcesBundle
 
