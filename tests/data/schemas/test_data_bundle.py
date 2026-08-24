@@ -102,6 +102,11 @@ def _empty_macro_sources() -> MacroSourcesBundle:
         statcan_retail_sales_yoy=None,
         statcan_cpi_by_province=None,
         statcan_age_days=None,
+        ca_cpi_yoy=None,
+        ca_cpi_3m_delta=None,
+        ca_cpi_trend=None,
+        ca_gdp_qoq=None,
+        ca_gdp_4q_trend=None,
     )
 
 
@@ -127,7 +132,6 @@ def _bundle(**overrides) -> DataBundle:
         market_context={},
         liquidity_flags={},
         earnings_proximity={},
-        relative_performance={},
         price_position={},
         is_current=True,
         days_old=0,

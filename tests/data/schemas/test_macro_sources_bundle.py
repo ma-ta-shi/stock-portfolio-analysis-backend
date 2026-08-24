@@ -69,6 +69,12 @@ def _bundle(**overrides) -> MacroSourcesBundle:
         statcan_retail_sales_yoy=None,
         statcan_cpi_by_province=None,
         statcan_age_days=None,
+        # StatCan CPI/GDP trend fields (86bbahum6)
+        ca_cpi_yoy=None,
+        ca_cpi_3m_delta=None,
+        ca_cpi_trend=None,
+        ca_gdp_qoq=None,
+        ca_gdp_4q_trend=None,
     )
     return MacroSourcesBundle(**{**defaults, **overrides})
 
@@ -259,6 +265,33 @@ def test_statcan_fields_all_none_is_valid():
     bundle = _bundle()
     assert bundle.statcan_unemployment_ca is None
     assert bundle.statcan_cpi_by_province is None
+
+
+# ---------- StatCan CPI/GDP trend fields (86bbahum6) ----------
+
+
+def test_ca_cpi_gdp_fields_accept_real_values():
+    bundle = _bundle(
+        canada_cpi=169.0,
+        ca_cpi_yoy=10.0,
+        ca_cpi_3m_delta=0.5,
+        ca_cpi_trend="rising",
+        ca_gdp_qoq=2.1,
+        ca_gdp_4q_trend="falling",
+    )
+    assert bundle.ca_cpi_yoy == 10.0
+    assert bundle.ca_cpi_trend == "rising"
+    assert bundle.ca_gdp_qoq == 2.1
+    assert bundle.ca_gdp_4q_trend == "falling"
+
+
+def test_ca_cpi_gdp_fields_all_none_is_valid():
+    bundle = _bundle()
+    assert bundle.ca_cpi_yoy is None
+    assert bundle.ca_cpi_3m_delta is None
+    assert bundle.ca_cpi_trend is None
+    assert bundle.ca_gdp_qoq is None
+    assert bundle.ca_gdp_4q_trend is None
 
 
 def test_statcan_cpi_by_province_accepts_real_dict():
