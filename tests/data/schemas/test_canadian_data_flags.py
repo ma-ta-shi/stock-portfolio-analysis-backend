@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -102,3 +104,23 @@ def test_requires_all_fields_no_implicit_defaults():
     explicitly populated by whatever builds this (DataPipeline.prepare())."""
     with pytest.raises(ValidationError):
         CanadianDataFlags(sentiment_source="finnhub")
+
+
+# ---------- model_dump() round-trip (ClickUp 86bawp88h) ----------
+
+
+def test_round_trips_through_model_dump():
+    flags = _flags()
+    assert CanadianDataFlags.model_validate(flags.model_dump()) == flags
+
+
+def test_round_trips_with_none_transcript_source():
+    flags = _flags(has_transcript=False, transcript_source=None)
+    assert CanadianDataFlags.model_validate(flags.model_dump()) == flags
+
+
+def test_json_mode_dump_is_json_serializable_and_round_trips():
+    flags = _flags()
+    dumped = flags.model_dump(mode="json")
+    json.dumps(dumped)
+    assert CanadianDataFlags.model_validate(dumped) == flags

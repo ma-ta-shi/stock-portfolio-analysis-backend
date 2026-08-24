@@ -229,8 +229,9 @@ async def test_get_financials_applies_correct_alignment_on_yfinance_fallback():
         finnhub=FakeProvider(),
         yfinance=FakeProvider(get_financials=lambda *a, **k: _misaligned_df()),
     )
-    df = await router.get_financials("AAPL", "income", "annual")
+    df, source = await router.get_financials("AAPL", "income", "annual")
     assert (pd.Timestamp.now() - df.columns[0]).days / 30 < 18
+    assert source == "yfinance"
 
 
 async def test_get_financials_does_not_touch_edgartools_sourced_result():
@@ -242,8 +243,9 @@ async def test_get_financials_does_not_touch_edgartools_sourced_result():
         edgartools=FakeProvider(get_financials=_ok(edgar_df)),
         finnhub=FakeProvider(),
     )
-    df = await router.get_financials("AAPL", "income", "annual")
+    df, source = await router.get_financials("AAPL", "income", "annual")
     assert df.columns[0] == fixed_col  # untouched — only yfinance results get corrected
+    assert source == "edgartools"
 
 
 async def test_get_financials_returns_empty_dataframe_when_chain_exhausted():
@@ -254,8 +256,39 @@ async def test_get_financials_returns_empty_dataframe_when_chain_exhausted():
         finnhub=FakeProvider(),
         yfinance=FakeProvider(get_financials=_ok(pd.DataFrame())),
     )
-    df = await router.get_financials("AAPL", "income", "annual")
+    df, source = await router.get_financials("AAPL", "income", "annual")
     assert df.empty
+
+
+# --- get_financials: source exposure (86bbb001k) — covers what the generic
+# chain-loop tests above no longer can, since get_financials returns
+# (DataFrame, source) rather than a bare DataFrame ---
+
+
+async def test_get_financials_ca_chain_single_link_source():
+    router = Router(
+        ticker="SHOP.TO",
+        fmp=FakeProvider(),
+        edgartools=FakeProvider(),
+        finnhub=FakeProvider(),
+        yfinance=FakeProvider(get_financials=_ok(pd.DataFrame({pd.Timestamp.now(): [1]}))),
+    )
+    df, source = await router.get_financials("SHOP.TO", "income", "annual")
+    assert not df.empty
+    assert source == "yfinance"
+
+
+async def test_get_financials_ca_chain_exhausted_returns_none_source():
+    router = Router(
+        ticker="SHOP.TO",
+        fmp=FakeProvider(),
+        edgartools=FakeProvider(),
+        finnhub=FakeProvider(),
+        yfinance=FakeProvider(get_financials=_ok(pd.DataFrame())),
+    )
+    df, source = await router.get_financials("SHOP.TO", "income", "annual")
+    assert df.empty
+    assert source is None
 
 
 # --- CA get_peers: static data/peers.json, not a live provider ---
@@ -407,6 +440,7 @@ _METHOD_ARGS: dict[str, tuple] = {
     "get_company_info": ("AAPL",),
     "get_analyst_estimates": ("AAPL",),
     "get_analyst_ratings": ("AAPL",),
+    "get_earnings_surprises": ("AAPL",),
     "get_insider_trading": ("AAPL", 90),
     "get_earnings_calendar": ("AAPL",),
     "get_peers": ("AAPL", 5),
@@ -423,6 +457,7 @@ _METHOD_EMPTY_TYPE: dict[str, type] = {
     "get_company_info": dict,
     "get_analyst_estimates": dict,
     "get_analyst_ratings": dict,
+    "get_earnings_surprises": list,
     "get_insider_trading": list,
     "get_earnings_calendar": list,
     "get_peers": list,
@@ -438,8 +473,9 @@ _METHOD_SAMPLE_VALUE: dict[str, object] = {
     "get_dividend_history": [{"date": "2024-01-01", "amount": 0.5}],
     "get_quote": {"symbol": "AAPL", "price": 100},
     "get_company_info": {"symbol": "AAPL"},
-    "get_analyst_estimates": {"estimates": [1]},
+    "get_analyst_estimates": {"forward_eps": 1.0},
     "get_analyst_ratings": {"consensus": "buy"},
+    "get_earnings_surprises": [{"period_end": "2026-07-30", "eps_actual": 2.02}],
     "get_insider_trading": [{"insider_name": "Jane"}],
     "get_earnings_calendar": [{"date": "2024-01-01"}],
     "get_peers": ["MSFT"],
@@ -471,10 +507,15 @@ def _values_equal(a, b) -> bool:
 
 # get_peers is special-cased on the CA branch (static file, not a live
 # provider chain) — covered by its own dedicated tests above instead.
-_CA_CHAIN_METHODS = [m for m in CA_CHAINS if m != "get_peers"]
+# get_financials returns (DataFrame, source) since 86bbb001k, not a bare
+# DataFrame — the generic loop's isinstance(result, _METHOD_EMPTY_TYPE[method])
+# check doesn't fit its richer contract; covered by its own dedicated tests
+# instead (see "get_financials: source exposure" below).
+_CA_CHAIN_METHODS = [m for m in CA_CHAINS if m not in ("get_peers", "get_financials")]
+_US_CHAIN_METHODS = [m for m in US_CHAINS if m != "get_financials"]
 
 
-@pytest.mark.parametrize("method", sorted(US_CHAINS))
+@pytest.mark.parametrize("method", sorted(_US_CHAIN_METHODS))
 async def test_us_method_exhausted_chain_returns_canonical_empty(method):
     router = _make_router(is_ca=False)
     result = await getattr(router, method)(*_METHOD_ARGS[method])
@@ -482,7 +523,7 @@ async def test_us_method_exhausted_chain_returns_canonical_empty(method):
     assert _is_empty(result)
 
 
-@pytest.mark.parametrize("method", sorted(m for m in US_CHAINS if US_CHAINS[m]))
+@pytest.mark.parametrize("method", sorted(m for m in _US_CHAIN_METHODS if US_CHAINS[m]))
 async def test_us_method_first_provider_in_chain_succeeds(method):
     first_key = US_CHAINS[method][0]
     value = _METHOD_SAMPLE_VALUE[method]
@@ -508,7 +549,7 @@ async def test_ca_method_first_provider_in_chain_succeeds(method):
     assert _values_equal(result, value)
 
 
-@pytest.mark.parametrize("method", sorted(m for m in US_CHAINS if len(US_CHAINS[m]) > 1))
+@pytest.mark.parametrize("method", sorted(m for m in _US_CHAIN_METHODS if len(US_CHAINS[m]) > 1))
 async def test_us_method_falls_back_past_empty_first_provider(method):
     chain = US_CHAINS[method]
     value = _METHOD_SAMPLE_VALUE[method]
