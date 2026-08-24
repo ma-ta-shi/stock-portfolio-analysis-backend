@@ -80,7 +80,6 @@ class DataBundle(ContractModel):
     market_context: dict
     liquidity_flags: dict
     earnings_proximity: dict
-    relative_performance: dict
     price_position: dict
     is_current: bool
     days_old: NonNegativeInt

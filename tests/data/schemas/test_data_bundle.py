@@ -132,7 +132,6 @@ def _bundle(**overrides) -> DataBundle:
         market_context={},
         liquidity_flags={},
         earnings_proximity={},
-        relative_performance={},
         price_position={},
         is_current=True,
         days_old=0,
