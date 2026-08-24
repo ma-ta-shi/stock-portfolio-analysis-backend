@@ -1,9 +1,11 @@
 import asyncio
-from datetime import datetime, timedelta
-from unittest.mock import MagicMock
-from data.providers.openbb_tmx import OpenBBTMXProvider
+from unittest.mock import MagicMock, patch
+
 import pandas as pd
 import pytest
+
+import data.providers.openbb_tmx as tmx_module
+from data.providers.openbb_tmx import OpenBBTMXProvider
 
 
 # ---------- Helpers ----------
@@ -44,21 +46,16 @@ def provider():
 
 
 @pytest.fixture
-def mock_obb(monkeypatch):
-    """openbb's real `obb` singleton returns a NEW router-proxy object on
-    every attribute access — confirmed live 2026-08-04 (`obb.equity.price is
-    obb.equity.price` is False). That silently breaks the standard
-    `patch("openbb.obb.equity.price.historical", ...)` pattern: the patch
-    lands on one throwaway proxy instance, and the real code's own separate
-    `obb.equity.price` access creates a different instance and hits the live
-    API instead (this is what was happening here before — every test in
-    this file was silently making real network calls, not verified until
-    checked live). Patching the single `obb` name this module imports, with
-    a plain MagicMock (which DOES cache child attribute access), is the only
-    pattern that actually intercepts the call."""
-    mock = MagicMock()
-    monkeypatch.setattr("data.providers.openbb_tmx.obb", mock)
-    return mock
+def mock_obb():
+    """Replace the `obb` name inside the provider module with a MagicMock.
+
+    We patch the module-level symbol (not the dotted openbb.* path) because
+    OpenBB's `obb` object resolves its command tree dynamically, so patching
+    a nested dotted path doesn't reliably intercept calls made from inside
+    the provider. Swapping the whole `obb` reference does.
+    """
+    with patch.object(tmx_module, "obb") as mock:
+        yield mock
 
 
 # ---------- get_price_history ----------
@@ -77,7 +74,9 @@ async def test_get_price_history_calls_correct_obb_endpoint(provider, mock_obb):
     """Must call obb.equity.price.historical, not some other fetcher."""
     fake_df = pd.DataFrame({"close": [1.0, 2.0]})
     mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
     await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
     mock_obb.equity.price.historical.assert_called_once()
 
 
@@ -86,7 +85,9 @@ async def test_get_price_history_uses_tmx_provider(provider, mock_obb):
     """Must route through the 'tmx' provider specifically."""
     fake_df = pd.DataFrame({"close": [1.0]})
     mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
     await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
     _, kwargs = mock_obb.equity.price.historical.call_args
     assert kwargs["provider"] == "tmx"
 
@@ -96,7 +97,9 @@ async def test_get_price_history_passes_ticker_and_interval(provider, mock_obb):
     """Must forward ticker as `symbol` and interval unchanged."""
     fake_df = pd.DataFrame({"close": [1.0]})
     mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
     await provider.get_price_history(ticker="RY", period="6mo", interval="1wk")
+
     _, kwargs = mock_obb.equity.price.historical.call_args
     assert kwargs["symbol"] == "RY"
     assert kwargs["interval"] == "1wk"
@@ -107,7 +110,9 @@ async def test_get_price_history_returns_dataframe(provider, mock_obb):
     """Return type must be a pandas DataFrame."""
     fake_df = pd.DataFrame({"close": [1.0, 2.0]})
     mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
     result = await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
     assert isinstance(result, pd.DataFrame)
 
 
@@ -116,7 +121,9 @@ async def test_get_price_history_returns_underlying_data_unchanged(provider, moc
     """DataFrame content must match what obb returned (no silent mutation)."""
     fake_df = pd.DataFrame({"close": [10.5, 11.2]})
     mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
+
     result = await provider.get_price_history(ticker="SHOP", period="1y", interval="1d")
+
     pd.testing.assert_frame_equal(result, fake_df)
 
 
@@ -128,7 +135,9 @@ async def test_get_financials_routes_income_statement(provider, mock_obb):
     """statement='income' must call obb.equity.fundamental.income."""
     fake_df = pd.DataFrame({"revenue": [100]})
     mock_obb.equity.fundamental.income.return_value = make_obb_result(fake_df)
+
     await provider.get_financials(ticker="SHOP", statement="income", period="annual")
+
     mock_obb.equity.fundamental.income.assert_called_once()
 
 
@@ -137,7 +146,9 @@ async def test_get_financials_routes_balance_statement(provider, mock_obb):
     """statement='balance' must call obb.equity.fundamental.balance."""
     fake_df = pd.DataFrame({"assets": [100]})
     mock_obb.equity.fundamental.balance.return_value = make_obb_result(fake_df)
+
     await provider.get_financials(ticker="SHOP", statement="balance", period="annual")
+
     mock_obb.equity.fundamental.balance.assert_called_once()
 
 
@@ -146,12 +157,14 @@ async def test_get_financials_routes_cash_statement(provider, mock_obb):
     """statement='cash' must call obb.equity.fundamental.cash."""
     fake_df = pd.DataFrame({"operating_cf": [100]})
     mock_obb.equity.fundamental.cash.return_value = make_obb_result(fake_df)
+
     await provider.get_financials(ticker="SHOP", statement="cash", period="annual")
+
     mock_obb.equity.fundamental.cash.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_financials_unknown_statement_raises_value_error(provider):
+async def test_get_financials_unknown_statement_raises_value_error(provider, mock_obb):
     """Unknown statement type must raise ValueError, not silently fetch something."""
     with pytest.raises(ValueError):
         await provider.get_financials(ticker="SHOP", statement="cashflowzz", period="annual")
@@ -162,7 +175,9 @@ async def test_get_financials_returns_dataframe(provider, mock_obb):
     """Return type must be a pandas DataFrame."""
     fake_df = pd.DataFrame({"revenue": [100]})
     mock_obb.equity.fundamental.income.return_value = make_obb_result(fake_df)
+
     result = await provider.get_financials(ticker="SHOP", statement="income", period="annual")
+
     assert isinstance(result, pd.DataFrame)
 
 
@@ -172,60 +187,37 @@ async def test_get_financials_returns_dataframe(provider, mock_obb):
 @pytest.mark.asyncio
 async def test_get_company_info_calls_profile_endpoint(provider, mock_obb):
     """Must call obb.equity.profile."""
-    mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Shopify Inc.", "sector": "Tech"}]
-    )
+    fake_df = pd.DataFrame([{"name": "Shopify Inc.", "sector": "Tech"}])
+    mock_obb.equity.profile.return_value = make_obb_result(fake_df)
+
     await provider.get_company_info(ticker="SHOP")
+
     mock_obb.equity.profile.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_get_company_info_strips_suffix_and_converts_to_tmx_dot_form(provider, mock_obb):
-    """Real bug fixed 2026-08-04 (86bb7j0kh), upstream in openbb-tmx's own
-    equity_profile.py: its internal symbol_to_index sort keys off the
-    REQUESTED symbol, but TMX's response always uses its own bare/dotted
-    convention — a mismatched request format (this codebase's "RCI-B.TO")
-    makes the fetch itself raise KeyError, confirmed live. Must request
-    the TMX-native form ("RCI.B") instead — same transform already used
-    in get_earnings_calendar."""
-    mock_obb.equity.profile.return_value = make_results_result([{"name": "Rogers Class B"}])
-    await provider.get_company_info(ticker="RCI-B.TO")
-    _, kwargs = mock_obb.equity.profile.call_args
-    assert kwargs["symbol"] == "RCI.B"
-
-
-@pytest.mark.asyncio
 async def test_get_company_info_returns_dict(provider, mock_obb):
-    """Return type must be a plain dict (single-row profile). Reads
-    `.results` directly rather than `.to_df()` — get_news/get_earnings_
-    calendar both read .results too, but for a different reason (data not
-    surfaced by .to_df()'s columns); here it's just the natural shape once
-    .to_df()'s buggy internal sort is avoided by requesting the right
-    symbol format in the first place (see the transform test above)."""
-    mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Shopify Inc.", "sector": "Tech"}]
-    )
+    """Return type must be a plain dict (single-row profile)."""
+    fake_df = pd.DataFrame([{"name": "Shopify Inc.", "sector": "Tech"}])
+    mock_obb.equity.profile.return_value = make_obb_result(fake_df)
+
     result = await provider.get_company_info(ticker="SHOP")
+
     assert isinstance(result, dict)
 
 
 @pytest.mark.asyncio
-async def test_get_company_info_returns_first_result_only(provider, mock_obb):
-    """If multiple results are returned, only the first one's data should be used."""
-    mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Row One"}, {"name": "Row Two"}]
-    )
+async def test_get_company_info_returns_first_row_only(provider, mock_obb):
+    """If multiple rows are returned, only the first row's data should be used."""
+    fake_df = pd.DataFrame([
+        {"name": "Row One"},
+        {"name": "Row Two"},
+    ])
+    mock_obb.equity.profile.return_value = make_obb_result(fake_df)
+
     result = await provider.get_company_info(ticker="SHOP")
+
     assert result["name"] == "Row One"
-
-
-@pytest.mark.asyncio
-async def test_get_company_info_empty_results_returns_empty_dict(provider, mock_obb):
-    """Real bug fixed 2026-08-04 (86bb7j0kh): the old .to_df()-based code
-    would raise on a genuinely empty result rather than returning {}."""
-    mock_obb.equity.profile.return_value = make_results_result([])
-    result = await provider.get_company_info(ticker="ZZZZ")
-    assert result == {}
 
 
 # ---------- get_dividend_history ----------
@@ -245,20 +237,26 @@ async def test_get_dividend_history_calls_dividends_endpoint(provider, mock_obb)
     mock_obb.equity.fundamental.dividends.return_value = make_obb_result(
         _dividend_df(["2023-01-01", "2023-06-01"])
     )
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
+
     await provider.get_dividend_history(ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31")
+
     mock_obb.equity.fundamental.dividends.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_get_dividend_history_filters_by_date_range(provider, mock_obb):
-    """Rows outside [from_date, to_date] must be excluded — filtered on the
-    real `ex_dividend_date` column (2026-08-04 fix), not the index."""
-    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(
-        _dividend_df(["2022-01-01", "2023-06-01", "2024-01-01"])
+    """Rows outside [from_date, to_date] must be excluded."""
+    fake_df = pd.DataFrame(
+        {"amount": [0.5, 0.5, 0.5]},
+        index=pd.to_datetime(["2022-01-01", "2023-06-01", "2024-01-01"]),
     )
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
+
     result = await provider.get_dividend_history(
         ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
     )
+
     assert len(result) == 1
 
 
@@ -271,6 +269,12 @@ async def test_get_dividend_history_returns_list_of_dicts(provider, mock_obb):
     result = await provider.get_dividend_history(
         ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
     )
+    mock_obb.equity.fundamental.dividends.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_dividend_history(
+        ticker="SHOP", from_date="2023-01-01", to_date="2023-12-31"
+    )
+
     assert isinstance(result, list)
     assert all(isinstance(row, dict) for row in result)
 

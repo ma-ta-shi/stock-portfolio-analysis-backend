@@ -37,8 +37,7 @@ from data.providers.edgartools import EdgarToolsDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fmp import FMPDataProvider
 from data.providers.openbb_tmx import OpenBBTMXProvider
-from data.providers.yfinance import YFinanceDataProvider, correct_alignment
-from data.providers.yfinance import NewsProvider as YFinanceNewsProvider
+from data.providers.yfinance import YFinanceDataProvider, YFinanceNewsProvider, correct_alignment
 
 logger = structlog.get_logger(__name__)
 
