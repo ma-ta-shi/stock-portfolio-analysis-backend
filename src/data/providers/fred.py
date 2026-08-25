@@ -10,8 +10,10 @@ from data.providers.base import MacroDataProvider
 logger = structlog.get_logger(__name__)
 
 # Documented series set (financial-data-api-research.md §6) — covers US macro plus
-# Canadian CPI/unemployment mirrored through OECD series. Default for get_macro_data()
-# when the caller doesn't need a custom subset.
+# Canadian unemployment mirrored through an OECD series. Default for get_macro_data()
+# when the caller doesn't need a custom subset. Canadian CPI is no longer part of
+# this set — CPALTT01CAM657N is confirmed dead (wrong shape, stale since 2024-02);
+# canada_cpi is StatsCanada-sourced now (see data/providers/stats_canada.py).
 DEFAULT_SERIES_IDS = [
     "FEDFUNDS",
     "CPIAUCSL",
@@ -20,7 +22,6 @@ DEFAULT_SERIES_IDS = [
     "UNRATE",
     "VIXCLS",
     "DGS10",
-    "CPALTT01CAM657N",
     "LRUNTTTTCAM156S",
 ]
 

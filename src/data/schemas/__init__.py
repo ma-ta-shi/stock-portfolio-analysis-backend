@@ -15,6 +15,9 @@ from data.schemas.common import (
     TranscriptExcerpt,
 )
 from data.schemas.context import AnalysisContext
+from data.schemas.data_bundle import DataBundle, get_benchmark
+from data.schemas.macro_sources_bundle import MacroSourcesBundle
+from data.schemas.research_sources_bundle import ManagementSignals, ResearchSourcesBundle
 
 __all__ = [
     "ContractModel",
@@ -26,4 +29,9 @@ __all__ = [
     "StockRef",
     "AnalysisContext",
     "CanadianDataFlags",
+    "MacroSourcesBundle",
+    "ManagementSignals",
+    "ResearchSourcesBundle",
+    "DataBundle",
+    "get_benchmark",
 ]

@@ -5,7 +5,14 @@ import aiohttp
 import pandas as pd
 import structlog
 
-from data.providers.base import NewsProvider, StockDataProvider
+from data.providers.base import (
+    NewsProvider,
+    NormalizedAnalystEstimates,
+    NormalizedCompanyInfo,
+    NormalizedDividendRecord,
+    NormalizedQuote,
+    StockDataProvider,
+)
 
 from dotenv import load_dotenv
 
@@ -21,6 +28,7 @@ BASE_URL = "https://financialmodelingprep.com/stable"
 
 _PERIOD_RE = re.compile(r"^(\d+)(d|mo|y)$")
 _PERIOD_UNIT_DAYS = {"d": 1, "mo": 30, "y": 365}
+_EARNINGS_SURPRISE_LOOKBACK = 4  # matches yfinance's own hard 4-row limit for the same field
 
 
 def _period_to_from_date(period: str) -> str:
@@ -150,20 +158,82 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values("date").set_index("date")
 
-    async def get_company_info(self, ticker: str) -> dict:
+    async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo:
+        """Maps FMP's raw /profile response onto NormalizedCompanyInfo
+        (86bbb001k) — real FMP field names confirmed via openbb_fmp's own
+        /profile wrapper (openbb_fmp/models/equity_profile.py's alias dict)
+        and cross-checked against a live-observed field in
+        tests/live/test_provider_completeness.py. All 6 canonical fields
+        are present directly, no derivation needed."""
         data = await self._request("profile", {"symbol": ticker})
-        return data[0] if data else {}
+        if not data:
+            return {}
+        raw = data[0]
+        # .get(key) or "" (not .get(key, "")) — FMP can return an explicit
+        # null for these fields, not just omit the key; .get(key, "") only
+        # covers the omitted case and would silently store None in a str field.
+        return NormalizedCompanyInfo(
+            name=raw.get("companyName") or "",
+            sector=raw.get("sector") or "",
+            industry=raw.get("industry") or "",
+            market_cap=raw.get("marketCap"),
+            currency=raw.get("currency") or "",
+            country=raw.get("country") or "",
+            primary_exchange=raw.get("exchange") or "",
+        )
 
-    async def get_analyst_estimates(self, ticker: str) -> dict:
+    async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
+        """Maps FMP's raw /analyst-estimates response onto
+        NormalizedAnalystEstimates (86bbdu04a). `period=annual` rows come
+        back sorted descending by fiscal-year-end date (confirmed live:
+        furthest-future year first) — estimates[0] is NOT the nearest
+        forecast, it's the furthest one. Filter to future rows and take
+        the soonest fiscal-year-end.
+
+        Bare {} on no data, not {"forward_eps": None} — see
+        NormalizedAnalystEstimates's docstring in base.py for why."""
         # `period` is a required param — FMP 400s without it.
         data = await self._request("analyst-estimates", {"symbol": ticker, "period": "annual"})
-        return {"symbol": ticker.upper(), "estimates": data or []}
+        if not data:
+            return {}
+        today = pd.Timestamp.now().normalize()
+        future_rows = [row for row in data if row.get("date") and pd.Timestamp(row["date"]) > today]
+        if not future_rows:
+            return {}
+        # date only picks the row here, it isn't returned
+        nearest = min(future_rows, key=lambda row: row["date"])
+        forward_eps = nearest.get("epsAvg")
+        return {"forward_eps": forward_eps} if forward_eps is not None else {}
 
     async def get_analyst_ratings(self, ticker: str) -> dict:
         # Renamed from /rating. A current-period snapshot (letter grade + DCF/ROE/
         # ROA/D-E/P-E/P-B sub-scores) — not a historical trend.
         data = await self._request("ratings-snapshot", {"symbol": ticker})
         return data[0] if data else {}
+
+    async def get_earnings_surprises(self, ticker: str) -> list[dict]:
+        """FMP's /earnings (not /earnings-surprises, confirmed live 404, nor
+        /earnings-surprises-bulk, confirmed live paywalled) is symbol-filtered
+        and includes both forward calendar rows (epsActual is None) and real
+        historical actual-vs-estimate rows — filter to the realized ones."""
+        data = await self._request("earnings", {"symbol": ticker})
+        realized = [row for row in (data or []) if row.get("epsActual") is not None]
+        return [
+            {
+                "period_end": row.get("date"),
+                "eps_actual": row.get("epsActual"),
+                "eps_estimated": row.get("epsEstimated"),
+                "eps_surprise_pct": (
+                    (row["epsActual"] - row["epsEstimated"]) / abs(row["epsEstimated"]) * 100
+                    if row.get("epsEstimated")
+                    else None
+                ),
+                "revenue_actual": row.get("revenueActual"),
+                "revenue_estimated": row.get("revenueEstimated"),
+            }
+            # realized is already newest-first, confirmed live
+            for row in realized[:_EARNINGS_SURPRISE_LOOKBACK]
+        ]
 
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
         """FMP's /earnings-calendar is bulk-only (no symbol filter, renamed from
@@ -176,22 +246,65 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         ticker_upper = ticker.upper()
         return [row for row in data if row.get("symbol", "").upper() == ticker_upper]
 
-    async def get_dividend_history(self, ticker: str, from_date: str, to_date: str) -> list[dict]:
-        # Renamed from historical-price-full/stock_dividend/{symbol}. Filtered
-        # client-side too, in case the API's own from/to filtering is inconsistent.
+    async def get_dividend_history(
+        self, ticker: str, from_date: str, to_date: str
+    ) -> list[NormalizedDividendRecord]:
+        """Maps FMP's raw /dividends response onto NormalizedDividendRecord
+        (86bbb001k) — real FMP field names confirmed live 2026-08-07 against
+        AAPL: date, dividend, paymentDate. Renamed from
+        historical-price-full/stock_dividend/{symbol}. Filtered client-side
+        too, in case the API's own from/to filtering is inconsistent."""
         data = await self._request(
             "dividends", {"symbol": ticker, "from": from_date, "to": to_date}
         )
         if not data:
             return []
-        return [row for row in data if from_date <= row.get("date", "") <= to_date]
+        # Real bug caught in a later sweep: .get(key, default) only guards a
+        # missing key, not an explicit null in the API response. Worse than
+        # the silent-None-in-str-field pattern found elsewhere — the old
+        # filter line would have crashed with a TypeError (comparing None
+        # to a string with <=) instead of just producing bad data.
+        return [
+            NormalizedDividendRecord(
+                ex_date=row.get("date") or "",
+                payment_date=row.get("paymentDate"),
+                amount_per_share=row.get("dividend") or 0.0,
+            )
+            for row in data
+            if from_date <= (row.get("date") or "") <= to_date
+        ]
 
-    async def get_quote(self, ticker: str) -> dict:
+    async def get_quote(self, ticker: str) -> NormalizedQuote:
         """Not on StockDataProvider — used internally for the Portfolio Optimizer's
-        bulk price refresh. No bulk quote on the free tier (comma-separated `symbol`
-        returns HTTP 402), so callers must loop this one ticker at a time."""
+        bulk price refresh, and (86bbb17pw) as the price_info source for
+        fundamentals.py. No bulk quote on the free tier (comma-separated `symbol`
+        returns HTTP 402), so callers must loop this one ticker at a time.
+
+        Maps onto NormalizedQuote — real FMP raw field names confirmed live
+        2026-08-10 against AAPL: price, marketCap, yearHigh, yearLow. FMP's
+        /quote has no currency field at all — real, disclosed gap; FMP is
+        US-only in this codebase's routing (CLAUDE.md), so hardcoding "USD"
+        here is the same safe, established pattern as openbb_tmx hardcoding
+        "CAD" in get_company_info() (86bbb001k)."""
         data = await self._request("quote", {"symbol": ticker})
-        return data[0] if data else {}
+        if not data:
+            return {}
+        raw = data[0]
+        price = raw.get("price")
+        # Real bug caught on review: .get("price", 0.0) only guards a missing
+        # key, not an explicit null — and would have silently fabricated a
+        # $0.00 quote instead of signaling "no real price," inconsistent
+        # with yfinance.get_quote()'s own "no valid price -> empty dict"
+        # behavior below.
+        if price is None:
+            return {}
+        return NormalizedQuote(
+            current_price=price,
+            market_cap=raw.get("marketCap"),
+            currency="USD",
+            high_52w=raw.get("yearHigh"),
+            low_52w=raw.get("yearLow"),
+        )
 
     async def get_ratios_ttm(self, ticker: str) -> dict:
         """Not on StockDataProvider. Cross-check only — edgartools.py stays primary

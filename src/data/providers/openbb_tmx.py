@@ -15,6 +15,13 @@ already listed "calendar, news" as openbb-tmx coverage; the code just never
 matched. Only get_peers is a genuine gap (obb.equity.compare.peers has no
 tmx provider) — that one stays NotImplementedError.
 
+Updated 86bbdu04a: get_analyst_estimates specifically no longer calls
+obb.equity.estimates.consensus at all — that endpoint (still real and
+working) has no forward-EPS field of any kind, which is the only thing
+this method's normalized contract needs, so there's nothing there worth
+fetching. The real consensus call moved to get_analyst_ratings instead,
+which still needs it for price-target/rating-breakdown fields.
+
 Known gap, documented not fixed (86bb7j0kh): get_price_history has ZERO
 real TSXV (.V) coverage — live-tested 6 real TSXV tickers (including ones
 previously believed covered from unrelated SEC-cross-listing research),
@@ -31,17 +38,25 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 from openbb import obb
-from data.providers.base import StockDataProvider, NewsProvider
+from data.providers.base import (
+    StockDataProvider,
+    NewsProvider,
+    NormalizedAnalystEstimates,
+    NormalizedCompanyInfo,
+    NormalizedDividendRecord,
+)
 
 
 class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     """OpenBB (TMX extension) provider for Canadian equities.
 
     Covers price history, fundamentals, company info, dividends, analyst
-    estimates, insider trading, earnings calendar, and news via the
-    `openbb-tmx` data provider. Only peers is NOT supported by TMX
-    (no tmx provider on obb.equity.compare.peers) — use the router's
-    static peers_json fallback for that instead.
+    ratings, insider trading, earnings calendar, and news via the
+    `openbb-tmx` data provider. Two real gaps: peers (no tmx provider on
+    obb.equity.compare.peers — use the router's static peers_json fallback)
+    and analyst *estimates* specifically (TMX's consensus endpoint has no
+    forward-EPS field — get_analyst_estimates() always returns {} without
+    calling the API; get_analyst_ratings() owns the real consensus call).
     """
 
     PROVIDER = "tmx"
@@ -87,20 +102,59 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         requesting the exact format TMX itself returns: strip the .TO/.V
         suffix and swap hyphens for periods, same transform already used
         in get_earnings_calendar — confirmed live for both a plain ticker
-        (RY) and a multi-class/trust-unit one (RCI.B, CAR.UN)."""
+        (RY) and a multi-class/trust-unit one (RCI.B, CAR.UN).
+
+        Maps onto NormalizedCompanyInfo (86bbb001k). Two real, confirmed
+        gaps (live-verified against RY 2026-08-07, not guessed): OpenBB's
+        standard EquityInfo model has no market_cap or currency field at
+        all (TMX's own provider extension only adds email/issue_type/
+        shares_outstanding/shares_escrow/shares_total/dividend_frequency —
+        still neither), and hq_country/inc_country are both None even for
+        a plain, unambiguous TSX primary listing like RY — not just an
+        edge case. currency is safe to hardcode "CAD" (this codebase's own
+        _is_canadian_stock() already treats TSX/TSXV-listed == CAD as a
+        given); market_cap and country are left as their empty/None
+        sentinels — real, disclosed data gaps, not derived from a second
+        API call. industry uses industry_category ("Banking") over the
+        finer industry_group ("Diversified Banks") — closer to the
+        single-level granularity FMP/yfinance's own `industry` field
+        represents."""
         bare_symbol = ticker.removesuffix(".TO").removesuffix(".V").replace("-", ".")
         result = await asyncio.to_thread(
             obb.equity.profile, symbol=bare_symbol, provider=self.PROVIDER
         )
         if not result.results:
             return {}
-        return result.results[0].model_dump()
+        raw = result.results[0].model_dump()
+        return NormalizedCompanyInfo(
+            name=raw.get("name") or "",
+            sector=raw.get("sector") or "",
+            industry=raw.get("industry_category") or "",
+            market_cap=None,
+            currency="CAD",
+            country=raw.get("hq_country") or raw.get("inc_country") or "",
+            primary_exchange=raw.get("stock_exchange") or "",
+        )
 
-    async def get_analyst_estimates(self, ticker: str) -> dict:
-        """Live-verified 2026-08-04 (86bb7j0kh): one row per ticker —
-        target_high/low/mean/consensus, buy/sell/hold_ratings,
-        consensus_action. Covers both estimates and ratings in one call
-        (get_analyst_ratings below reuses this rather than duplicating it).
+    async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
+        """TMX's consensus endpoint (obb.equity.estimates.consensus) has
+        no forward-EPS field of any kind — confirmed live 2026-08-04
+        (86bb7j0kh) and re-confirmed reviewing 86bbdu04a. Nothing to fetch,
+        so this doesn't call the API at all — get_analyst_ratings() below
+        is the one that still needs the real call, for its price-target/
+        rating fields. Bare {} on no data — see NormalizedAnalystEstimates's
+        docstring in base.py for why."""
+        return {}
+
+    async def get_analyst_ratings(self, ticker: str) -> dict:
+        """Real consensus fetch, previously delegated-to via
+        get_analyst_estimates() (TMX has one consensus snapshot with both
+        target-price and rating-breakdown fields, not two separate
+        endpoints like FMP's split) — moved here directly (86bbdu04a),
+        since get_analyst_estimates() no longer has any use for the raw
+        row itself. No real caller consumes this yet (research_sources.py
+        is still a stub), so the shape stays the raw OpenBB row, not
+        narrowed to a guessed ratings-only shape.
 
         Must check `result.results` before calling `.to_df()` — confirmed
         live (MKO.V, zero analyst coverage) that `.to_df()` itself raises
@@ -114,17 +168,8 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         df = result.to_df()
         return df.iloc[0].to_dict() if not df.empty else {}
 
-    async def get_analyst_ratings(self, ticker: str) -> dict:
-        """Deliberately returns the identical superset dict as
-        get_analyst_estimates, not a narrower ratings-only shape — TMX has
-        one consensus snapshot with both target-price and rating-breakdown
-        fields, not two separate endpoints like FMP's analyst-estimates/
-        ratings-snapshot split. No real caller consumes this yet
-        (research_sources.py is still a stub), so this wasn't narrowed to
-        guess at a shape nothing needs — revisit if a future caller
-        specifically wants a ratings-only dict without target-price
-        fields mixed in."""
-        return await self.get_analyst_estimates(ticker)
+    async def get_earnings_surprises(self, ticker: str) -> list[dict]:
+        raise NotImplementedError("Earnings-surprise history is not available via openbb-tmx.")
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         """Live-verified 2026-08-04 (86bb7j0kh): real data, but a quarterly
@@ -172,13 +217,21 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         bare_symbol = ticker.removesuffix(".TO").removesuffix(".V").replace("-", ".")
         return df[df["symbol"] == bare_symbol].to_dict("records")
 
-    async def get_dividend_history(self, ticker: str, from_date: str, to_date: str) -> list[dict]:
+    async def get_dividend_history(
+        self, ticker: str, from_date: str, to_date: str
+    ) -> list[NormalizedDividendRecord]:
         """Fixed 2026-08-04 (86bb7j0kh) — real bug, confirmed live: `.to_df()`
         does NOT set a DatetimeIndex here despite index="date" being the
         default. TMX's dividend model's date field is named
         `ex_dividend_date`, not `date`, so the index falls back to a plain
         RangeIndex and the old `df.index >= from_date` comparison raised
-        TypeError for every CA ticker. Filter on the real column instead."""
+        TypeError for every CA ticker. Filter on the real column instead.
+
+        Maps onto NormalizedDividendRecord (86bbb001k) — confirmed live
+        2026-08-07 that .to_df() already exposes clean, standardized
+        columns (ex_dividend_date, amount, payment_date), unlike
+        get_company_info()'s raw GraphQL keys — just a rename, no derived/
+        missing fields here."""
         result = await asyncio.to_thread(
             obb.equity.fundamental.dividends,
             symbol=ticker,
@@ -191,7 +244,14 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             return []
         dates = pd.to_datetime(df["ex_dividend_date"])
         mask = (dates >= from_date) & (dates <= to_date)
-        return df.loc[mask].to_dict("records")
+        return [
+            NormalizedDividendRecord(
+                ex_date=str(row["ex_dividend_date"]),
+                payment_date=str(row["payment_date"]) if pd.notna(row.get("payment_date")) else None,
+                amount_per_share=float(row["amount"]),
+            )
+            for row in df.loc[mask].to_dict("records")
+        ]
 
     # ---------- NewsProvider ----------
 
