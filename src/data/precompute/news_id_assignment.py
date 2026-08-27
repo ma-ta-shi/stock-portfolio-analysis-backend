@@ -14,7 +14,10 @@ non-contiguous subset like {N12, N13, N15} is expected and valid.
 Called from DataPipeline.prepare() right after the news fetch, before any
 agent-specific window filtering. Output shape matches the news_items entry
 in data-pipeline.md §4 (ResearchSourcesBundle): list[dict] with id, date,
-headline, source, quality_tier.
+headline, source, quality_tier - plus text (ClickUp 86ban0wf4), a
+passthrough of the raw article's body/summary needed by sentiment.py's LLM
+scoring call, not part of the original data-pipeline.md spec but additive
+and safe (no existing field renamed or removed).
 """
 
 from datetime import UTC, datetime
@@ -139,6 +142,16 @@ def assign_news_ids(articles: list[dict]) -> list[dict]:
             "headline": article.get("headline", ""),
             "source": article.get("source", ""),
             "quality_tier": classify_quality_tier(article.get("source", "")),
+            # text: passthrough for sentiment.py's LLM scoring call, which needs more
+            # than a bare headline to score well. Added here (not re-derived
+            # downstream) because this function sorts and drops unparseable-date
+            # articles - its output is neither the same length nor order as the
+            # input, so a caller can't zip back to the original raw article by
+            # position afterward. Finnhub's field name only, not CA-tolerant
+            # (openbb_tmx.get_news() raises NotImplementedError today, so a CA
+            # article shape can't reach this code yet - ClickUp 86ban0wf4).
+            # No "url" field - considered, cut: nothing anywhere actually reads it.
+            "text": article.get("summary", ""),
         }
         for i, (published_at, article) in enumerate(dated_articles, start=1)
     ]

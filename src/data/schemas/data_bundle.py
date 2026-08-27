@@ -7,6 +7,7 @@ doesn't give them a fully specified shape yet.
 """
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import NonNegativeInt, model_validator
 
@@ -88,7 +89,14 @@ class DataBundle(ContractModel):
     preflight_warnings: list[str]
 
     # --- Sentiment Analyst (Pass 1) ---
-    news_with_sentiment: list[dict] | None  # Finnhub: US stocks only
+    news_with_sentiment: list[dict] | None  # precompute/sentiment.py (86ban0wf4); populated
+    # for both markets now — no longer Finnhub/US-only, see sentiment_source below
+    sentiment_source: Literal["local_llm"] | None  # 86ban0wf4: market-agnostic companion to
+    # CanadianDataFlags.sentiment_source, which structurally can't cover US stocks (that field
+    # stays None there by DataBundle's own validator). None only when news_with_sentiment is
+    # None/empty — no articles were scored. Single-value literal, not CanadianDataFlags' 3-value
+    # enum, because "finnhub"/"keyword" are confirmed-dead paths for both markets as of this
+    # ticket — flag to whoever owns CanadianDataFlags's schema if those should be removed too.
     analyst_consensus: dict
     analyst_recommendation_trends: list[dict] | None  # Finnhub: US only
     insider_activity: dict
@@ -143,14 +151,33 @@ class DataBundle(ContractModel):
         not just a note — a CA stock can never have real values here. One-
         directional only: a US stock legitimately CAN still be None (a
         Finnhub call can fail for any ticker), so that direction isn't
-        constrained."""
+        constrained.
+
+        news_with_sentiment's clause removed (ClickUp 86ban0wf4): its "US-
+        only" premise no longer holds — precompute/sentiment.py now scores
+        both markets via a local LLM, not Finnhub (which never had CA
+        sentiment and, confirmed this ticket, doesn't have US sentiment
+        either). analyst_recommendation_trends is untouched — a genuinely
+        separate, still-accurate Finnhub-only constraint."""
         if _is_canadian_stock(self.stock):
-            if self.news_with_sentiment is not None:
-                raise ValueError(
-                    "news_with_sentiment must be None for a CA stock (Finnhub US-only)"
-                )
             if self.analyst_recommendation_trends is not None:
                 raise ValueError(
                     "analyst_recommendation_trends must be None for a CA stock (Finnhub US-only)"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _check_sentiment_source_matches_news_with_sentiment(self) -> "DataBundle":
+        """86ban0wf4: sentiment_source and news_with_sentiment are both
+        produced by the same precompute/sentiment.py call and must agree
+        on whether any scoring happened — same cross-field-invariant
+        reasoning as _check_benchmark_ticker_matches_stock above."""
+        has_articles = bool(self.news_with_sentiment)
+        has_source = self.sentiment_source is not None
+        if has_articles != has_source:
+            raise ValueError(
+                "sentiment_source must be set iff news_with_sentiment is non-empty "
+                f"(news_with_sentiment={'set' if has_articles else 'empty/None'}, "
+                f"sentiment_source={self.sentiment_source!r})"
+            )
         return self

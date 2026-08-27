@@ -137,6 +137,7 @@ def _bundle(**overrides) -> DataBundle:
         days_old=0,
         preflight_warnings=[],
         news_with_sentiment=None,
+        sentiment_source=None,
         analyst_consensus={},
         analyst_recommendation_trends=None,
         insider_activity={},
@@ -253,14 +254,19 @@ def test_rejects_garbage_benchmark_ticker():
 # (real gap caught on review — previously unenforced) ----------
 
 
-def test_rejects_ca_stock_with_real_news_with_sentiment():
-    with pytest.raises(ValidationError):
-        _bundle(
-            stock=_ca_stock(),
-            canadian_data_flags=_ca_flags(),
-            benchmark_ticker="^GSPTSE",
-            news_with_sentiment=[{"headline": "test"}],
-        )
+def test_ca_stock_with_real_news_with_sentiment_is_valid():
+    """Inverted from a reject-test (ClickUp 86ban0wf4): news_with_sentiment
+    is no longer Finnhub/US-only — precompute/sentiment.py now scores both
+    markets via a local LLM. See _check_us_only_sentiment_fields_are_none_
+    for_ca_stocks's updated docstring in data_bundle.py."""
+    bundle = _bundle(
+        stock=_ca_stock(),
+        canadian_data_flags=_ca_flags(),
+        benchmark_ticker="^GSPTSE",
+        news_with_sentiment=[{"headline": "test"}],
+        sentiment_source="local_llm",
+    )
+    assert bundle.news_with_sentiment == [{"headline": "test"}]
 
 
 def test_rejects_ca_stock_with_real_analyst_recommendation_trends():
@@ -285,8 +291,33 @@ def test_us_stock_with_real_sentiment_fields_is_valid():
     bundle = _bundle(
         news_with_sentiment=[{"headline": "test"}],
         analyst_recommendation_trends=[{"period": "0m"}],
+        sentiment_source="local_llm",
     )
     assert bundle.news_with_sentiment == [{"headline": "test"}]
+
+
+# ---------- sentiment_source <-> news_with_sentiment consistency (86ban0wf4) ----------
+
+
+def test_rejects_sentiment_source_set_with_no_news_with_sentiment():
+    with pytest.raises(ValidationError):
+        _bundle(news_with_sentiment=None, sentiment_source="local_llm")
+
+
+def test_rejects_news_with_sentiment_set_with_no_sentiment_source():
+    with pytest.raises(ValidationError):
+        _bundle(news_with_sentiment=[{"headline": "test"}], sentiment_source=None)
+
+
+def test_rejects_sentiment_source_set_with_empty_news_with_sentiment_list():
+    """Empty list, not just None, counts as "nothing was scored"."""
+    with pytest.raises(ValidationError):
+        _bundle(news_with_sentiment=[], sentiment_source="local_llm")
+
+
+def test_both_none_is_valid():
+    bundle = _bundle(news_with_sentiment=None, sentiment_source=None)
+    assert bundle.sentiment_source is None
 
 
 # ---------- base behavior ----------
