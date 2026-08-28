@@ -95,6 +95,21 @@ def test_output_carries_headline_source_and_quality_tier():
     assert result[0]["quality_tier"] == "primary"
 
 
+def test_output_carries_text_for_sentiment_scoring():
+    """ClickUp 86ban0wf4: sentiment.py needs the article body text as LLM
+    scoring input, passed through here since this function's sort+drop
+    breaks positional correlation back to the raw article list. No "url"
+    field - considered and cut, nothing anywhere reads it."""
+    result = assign_news_ids([_article(summary="Full article body here.")])
+    assert result[0]["text"] == "Full article body here."
+    assert "url" not in result[0]
+
+
+def test_missing_summary_defaults_text_to_empty_string_not_raise():
+    result = assign_news_ids([_article()])
+    assert result[0]["text"] == ""
+
+
 def test_empty_article_list_returns_empty_list():
     assert assign_news_ids([]) == []
 
