@@ -9,6 +9,7 @@ from data.providers.base import NewsProvider, StockDataProvider
 from data.providers.router import (
     CA_CHAINS,
     US_CHAINS,
+    _DEFAULT_PEERS_PATH,
     Router,
     _is_empty,
     is_canadian,
@@ -292,6 +293,36 @@ async def test_get_financials_ca_chain_exhausted_returns_none_source():
 
 
 # --- CA get_peers: static data/peers.json, not a live provider ---
+
+
+def test_shipped_peers_json_is_well_formed():
+    """The committed data/peers.json — not a tmp fixture. Every value must
+    be a non-empty list of uppercase ticker strings, and no ticker may list
+    itself as its own peer (it would collide in compute_peer_comparison)."""
+    data = json.loads(_DEFAULT_PEERS_PATH.read_text(encoding="utf-8"))
+    assert isinstance(data, dict) and data
+    for anchor_ticker, peer_list in data.items():
+        assert isinstance(peer_list, list) and peer_list, anchor_ticker
+        assert all(isinstance(p, str) and p == p.upper() for p in peer_list), anchor_ticker
+        assert anchor_ticker.upper() not in {p.upper() for p in peer_list}, anchor_ticker
+        assert len(peer_list) == len(set(peer_list)), f"{anchor_ticker} has duplicate peers"
+
+
+def test_shipped_peers_json_gives_every_entry_at_least_two_peers():
+    """< 2 peers trips the Fundamental/Researcher "limited peer data"
+    penalty, which is the whole reason this file exists (audit S6). Any
+    entry worth adding must clear that bar."""
+    data = json.loads(_DEFAULT_PEERS_PATH.read_text(encoding="utf-8"))
+    thin = {t: p for t, p in data.items() if len(p) < 2}
+    assert not thin, f"entries with <2 peers defeat the purpose: {thin}"
+
+
+async def test_ca_get_peers_reads_the_real_shipped_file():
+    """End to end through Router against the committed file, no fixture."""
+    router = Router(ticker="RY.TO", openbb_tmx=FakeProvider(), yfinance_news=FakeProvider())
+    assert await router.get_peers("RY.TO", limit=3) == ["TD.TO", "BNS.TO", "BMO.TO"]
+    # a cross-listed name intentionally carries US peers (audit 86bbr4azz logic)
+    assert await router.get_peers("SHOP.TO", limit=3) == ["XYZ", "WIX", "GDDY"]
 
 
 async def test_ca_get_peers_reads_static_file(tmp_path):
