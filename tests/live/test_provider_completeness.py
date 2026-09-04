@@ -46,12 +46,28 @@ pytestmark = pytest.mark.live
 # is which per ticker.
 _INHERENTLY_SPARSE_METHODS = {"get_earnings_calendar", "get_dividend_history"}
 
+# Narrower than _INHERENTLY_SPARSE_METHODS: a specific (ticker, method) pair
+# confirmed live to hit a real openbb-tmx upstream data-quality defect, not
+# a coverage gap — SU.TO's filings history has (as of 2026-09) a row with a
+# null `description`, which fails Pydantic validation for the WHOLE batch
+# inside openbb-tmx's own TmxCompanyFilingsData model, in BOTH get_filings'
+# narrow and wide fetch windows (86bbpggr5 — confirmed both tiers raise the
+# same OpenBBError). OpenBBTMXProvider.get_filings() degrades this to a
+# clean [] rather than crashing (see its own docstring/tests), which is the
+# right behavior — but that means SU.TO can never pass the blanket
+# non-empty assertion below for this one method, through no fault of the
+# fallback logic. Excluded here by exact pair, not by loosening the
+# assertion for every ticker (RY.TO/SHOP.TO/CVE.TO still get the real
+# check). Revisit if openbb-tmx fixes the upstream row.
+_KNOWN_EMPTY_TICKER_METHOD_PAIRS = {("SU.TO", "get_filings")}
+
 _LIST_DICT_METHODS = {
     "get_insider_trading",
     "get_earnings_calendar",
     "get_dividend_history",
     "get_news",
     "get_analyst_recommendation_trends",
+    "get_filings",
 }
 # get_peers returns list[str] per the ABC (StockDataProvider.get_peers),
 # not list[dict] — confirmed live 2026-08-04 (Finnhub returns real ticker
@@ -73,6 +89,7 @@ _ARG_BUILDERS = {
     "get_dividend_history": lambda ticker: (ticker, "2024-01-01", "2026-08-04"),
     "get_news": lambda ticker: (ticker, 30),
     "get_analyst_recommendation_trends": lambda ticker: (ticker,),
+    "get_filings": lambda ticker: (ticker,),
 }
 
 # peers_json isn't a live provider (router-only static file, already
@@ -156,6 +173,8 @@ async def test_ca_crosslisted_baseline_sweep(ticker, method, provider_key):
     result = await _call(provider, method, ticker)
     _assert_correct_type(method, result)
     if method in _INHERENTLY_SPARSE_METHODS:
+        return
+    if (ticker, method) in _KNOWN_EMPTY_TICKER_METHOD_PAIRS:
         return
     assert not _is_empty(result), (
         f"{provider_key}.{method}({ticker}) returned empty — expected real "
