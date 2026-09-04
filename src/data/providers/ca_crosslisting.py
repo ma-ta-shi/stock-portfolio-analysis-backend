@@ -195,16 +195,20 @@ async def _find_40f_exhibit_text(
     return None
 
 
-async def _get_10k_item(cik: int, attr: str) -> str | None:
-    """`attr` is an edgar.company_reports.ten_k.TenK property name
-    ("management_discussion" or "business") — edgartools parses these
-    natively for 10-K filers, no exhibit-hunting needed. amendments=False is
-    required: a 10-K/A only carries the amended sections (usually just Part
-    III exec-comp items), not the full filing — confirmed live this drops
-    Item 7 (MD&A) entirely if the amendment is fetched by mistake."""
+async def _get_native_filing_item(cik: int, form: str, attr: str) -> str | None:
+    """`attr` is a property name on edgartools' native parsed-filing object
+    — edgar.company_reports.ten_k.TenK for `form="10-K"`
+    ("management_discussion"/"business"), or edgar.company_reports.
+    twenty_f.TwentyF for `form="20-F"` (same two attribute names, confirmed
+    live). Both are parsed natively by edgartools — no exhibit-hunting
+    needed, unlike 40-F (see _find_40f_exhibit_text). amendments=False is
+    required: an amendment only carries the amended sections (usually just
+    Part III exec-comp items for a 10-K), not the full filing — confirmed
+    live this drops Item 7 (MD&A) entirely if the amendment is fetched by
+    mistake."""
     company = await asyncio.to_thread(Company, cik)
     filings = await asyncio.to_thread(
-        lambda: company.get_filings(form="10-K", amendments=False).head(1)
+        lambda: company.get_filings(form=form, amendments=False).head(1)
     )
     if not filings:
         return None
@@ -218,12 +222,28 @@ async def _get_10k_item(cik: int, attr: str) -> str | None:
 # "not mapped" apart from "mapped but this section's extraction failed."
 
 
+# Form types edgartools parses natively via .obj().management_discussion /
+# .business (confirmed live for both) — everything else (40-F) needs the
+# exhibit-search path instead. 20-F confirmed live 2026-08-03 against 3 real
+# filers (Canada Goose, Celestica, Lithium Americas) found by the ClickUp
+# 86bb7h6zt resolver run — turned out simpler than expected: no exhibit
+# markers needed at all, same native-parse shape as 10-K.
+_NATIVELY_PARSED_FORMS = ("10-K", "20-F")
+
+# Foreign-private-issuer forms — file 6-K for interim filings, unlike a 10-K
+# filer (8-K instead, out of scope here). A different partition than
+# _NATIVELY_PARSED_FORMS above (which is about extraction *method*, not FPI
+# status) — 40-F is FPI but NOT natively parsed; don't conflate the two.
+_FOREIGN_PRIVATE_ISSUER_FORMS = ("40-F", "20-F")
+
+
 async def get_crosslisted_mda(ca_ticker: str) -> str | None:
     """MD&A-equivalent narrative: a 40-F's "Financial Review" exhibit, or
-    a 10-K's Item 7, depending on the entity's actual SEC filer status —
-    see data/ca_us_crosslisting.json's `form_type` field. Filer status
-    isn't fixed (CP's 2021 merger changed it from 40-F to 10-K), so this
-    always reads the mapping rather than assuming 40-F for every entry.
+    the native Item 7/Item 5 for a 10-K/20-F filer, depending on the
+    entity's actual SEC filer status — see data/ca_us_crosslisting.json's
+    `form_type` field. Filer status isn't fixed (CP's 2021 merger changed
+    it from 40-F to 10-K), so this always reads the mapping rather than
+    assuming 40-F for every entry.
 
     Returns raw text only, no filing date — the underlying filing object
     does carry `.filing_date` (see get_crosslisted_interim_exhibits, which
@@ -234,8 +254,10 @@ async def get_crosslisted_mda(ca_ticker: str) -> str | None:
     if entry is None:
         logger.info("crosslisting_not_mapped", ca_ticker=ca_ticker)
         return None
-    if entry["form_type"] == "10-K":
-        return await _get_10k_item(entry["cik"], "management_discussion")
+    if entry["form_type"] in _NATIVELY_PARSED_FORMS:
+        return await _get_native_filing_item(
+            entry["cik"], entry["form_type"], "management_discussion"
+        )
     return await _find_40f_exhibit_text(
         entry["cik"], _MDA_DESCRIPTION_MARKERS, _MDA_CONTENT_MARKERS
     )
@@ -243,14 +265,15 @@ async def get_crosslisted_mda(ca_ticker: str) -> str | None:
 
 async def get_crosslisted_business_overview(ca_ticker: str) -> str | None:
     """Business-section equivalent: a 40-F's "Annual Information Form"
-    exhibit, or a 10-K's Item 1 (Business). See get_crosslisted_mda's
-    docstring re: no filing date in the return value yet."""
+    exhibit, or the native Business item for a 10-K/20-F filer. See
+    get_crosslisted_mda's docstring re: no filing date in the return value
+    yet."""
     entry = _load_crosslisting_map().get(ca_ticker)
     if entry is None:
         logger.info("crosslisting_not_mapped", ca_ticker=ca_ticker)
         return None
-    if entry["form_type"] == "10-K":
-        return await _get_10k_item(entry["cik"], "business")
+    if entry["form_type"] in _NATIVELY_PARSED_FORMS:
+        return await _get_native_filing_item(entry["cik"], entry["form_type"], "business")
     return await _find_40f_exhibit_text(
         entry["cik"], _BUSINESS_TITLE_MARKERS, _BUSINESS_TITLE_MARKERS
     )
@@ -258,11 +281,12 @@ async def get_crosslisted_business_overview(ca_ticker: str) -> str | None:
 
 async def get_crosslisted_interim_exhibits(ca_ticker: str, limit: int = 3) -> list[dict]:
     """Recent 6-K interim exhibits (press releases, some earnings-related)
-    — supplementary, near-monthly cadence, not a verbatim transcript.
-    Only 40-F filers use 6-K; a 10-K filer like CP uses 8-K instead,
-    which this function doesn't cover — out of scope for this ticket."""
+    — supplementary, near-monthly cadence, not a verbatim transcript. Both
+    40-F and 20-F filers are foreign private issuers and use 6-K for
+    interim filings; a 10-K filer like CP uses 8-K instead, which this
+    function doesn't cover — out of scope for this ticket."""
     entry = _load_crosslisting_map().get(ca_ticker)
-    if entry is None or entry["form_type"] != "40-F":
+    if entry is None or entry["form_type"] not in _FOREIGN_PRIVATE_ISSUER_FORMS:
         return []
     company = await asyncio.to_thread(Company, entry["cik"])
     filings = await asyncio.to_thread(lambda: company.get_filings(form="6-K").head(limit))

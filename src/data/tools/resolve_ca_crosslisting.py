@@ -32,6 +32,23 @@ Design, confirmed against live SEC data (2026-07-30):
   its 2021 merger with Kansas City Southern changed its SEC filer
   classification to a US domestic filer. Check for 40-F, 20-F, AND 10-K,
   and record which one so edgartools.py knows which extraction path to use.
+
+Ticker sourcing (ClickUp 86bb7h6zt, revised 2026-08-03), TSX main board only
+— TSXV deliberately deferred (56% mining/resources/energy-named companies,
+live-verified; realistic cross-listing rate far below what a pre-filtered
+sample suggested, and a poor fit for this platform's TFSA/RRSP retail-
+investor focus; same tradeoff shape as the OTC-securities gap already
+deprioritized). Neither available source is reliable alone for TSX:
+- TMX's own official company-directory API (tsx.com/json/company-directory)
+  is dramatically more complete than any third-party mirror (2,266 raw TSX
+  listings, live-verified) but has real gaps — confirmed live missing
+  BBD.B/CCL.B/RCI.B (shows only Class A) and the real BEP.UN unit listing
+  (shows an unrelated preferred series under that root instead).
+- yfinance's screener is much thinner (~359 raw) but happens to have exactly
+  the tickers TMX's directory search is missing.
+Union both, TMX's name wins on overlap (authoritative, untruncated — unlike
+yfinance's `name` field, which truncates at 32 characters server-side; see
+_names_plausibly_match's truncation-tolerance for why that matters).
 """
 
 import asyncio
@@ -76,25 +93,69 @@ RELEVANT_FORMS = ("40-F", "20-F", "10-K")
 # use terms don't document a hard rate limit to target instead.
 _REQUEST_DELAY_SECONDS = 0.25
 
-# The watchlist's Canadian subset (frontend/src/hooks/use-ticker-search.ts).
-# Update this list when the watchlist changes, then re-run this tool.
-WATCHLIST_CA_TICKERS: list[tuple[str, str]] = [
-    ("RY.TO", "Royal Bank of Canada"),
-    ("TD.TO", "Toronto-Dominion Bank"),
-    ("BMO.TO", "Bank of Montreal"),
-    ("BNS.TO", "Bank of Nova Scotia"),
-    ("CM.TO", "CIBC"),
-    ("WSP.TO", "WSP Global Inc."),
-    ("CNR.TO", "Canadian National Railway"),
-    ("CP.TO", "Canadian Pacific Kansas City"),
-    ("ATD.TO", "Alimentation Couche-Tard"),
-    ("SU.TO", "Suncor Energy"),
-    ("ENB.TO", "Enbridge Inc."),
-    ("BCE.TO", "BCE Inc."),
-    ("SHOP.TO", "Shopify Inc."),
-    ("MFC.TO", "Manulife Financial"),
-    ("TRI.TO", "Thomson Reuters"),
-]
+# Noise categories confirmed live against the real TMX TSX directory
+# (2,266 raw listings) — not real operating companies, exclude regardless
+# of source. Deliberately does NOT suffix-exclude -A/-B/-C/-X/-U: confirmed
+# live these are often genuine share classes (ATCO's -X, Fairfax India's -U,
+# Caribbean Utilities' -U), not noise — any real noise among them (a few
+# ETF products) is already caught by the name-based filter below.
+#
+# \bFUND\b added after the first live run: 185 of that run's 712 flagged
+# entries (26%) were mutual-fund/alternative-fund products named "...Fund"
+# rather than "...ETF" (Arrow/AGF/Evolve/CI/Capstone/Purpose-branded funds,
+# confirmed live, zero false positives spot-checked against genuine
+# operating companies) — the original ETF-only pattern missed all of them.
+_NAME_EXCLUDE_RE = re.compile(
+    r"\bETF\b|\bFUND\b|CDR|SPLIT CORP|REAL ESTATE INVESTMENT TRUST",
+    re.IGNORECASE,
+)
+# Trust units (-UN), preferred shares incl. sub-series like -PR-M (-PR),
+# debentures (-DB), another preferred variant (-PF) — all confirmed live on
+# TSX. Matches the hyphenated form both sources are normalized to below.
+_SUFFIX_EXCLUDE_RE = re.compile(r"-(UN|PR|DB|PF)(-|\.TO$)")
+
+
+async def _fetch_tmx_tsx_tickers() -> dict[str, str]:
+    """TMX's own official company-directory API — the exchange's
+    authoritative TSX listing. See module docstring for the confirmed gaps
+    that make _fetch_yfinance_tsx_tickers() a necessary supplement, not
+    redundant."""
+    from openbb_tmx.utils.helpers import get_tmx_tickers
+
+    raw = await get_tmx_tickers("tsx", use_cache=True)
+    return {f"{sym.replace('.', '-')}.TO": name for sym, name in raw.items()}
+
+
+async def _fetch_yfinance_tsx_tickers() -> dict[str, str]:
+    """Backstop for TMX's directory-search gaps — confirmed live it has
+    BBD-B.TO/CCL-B.TO/RCI-B.TO/BEP-UN.TO, which TMX's own directory search
+    is missing. limit=5000 is required: openbb's yfinance screener has a
+    silent default result cap well below its actual coverage — confirmed
+    live omitting this returns under half the real count."""
+    from openbb import obb
+
+    result = await asyncio.to_thread(
+        obb.equity.screener, provider="yfinance", country="ca", limit=5000
+    )
+    df = result.to_df()
+    to_only = df[df["symbol"].str.endswith(".TO")]
+    return dict(zip(to_only["symbol"], to_only["name"], strict=True))
+
+
+async def build_tsx_candidates() -> list[tuple[str, str]]:
+    """Union TMX's directory (breadth) with yfinance's screener (backstop),
+    filtered to genuine operating companies. TMX's name wins on ticker
+    overlap. Live-verified: 2,266 raw TSX -> 877 after filtering (single
+    dedup pass, not a summed estimate), plus a handful of yfinance-only
+    additions TMX's directory search misses."""
+    tmx, yf = await asyncio.gather(_fetch_tmx_tsx_tickers(), _fetch_yfinance_tsx_tickers())
+    merged = {**yf, **tmx}  # tmx overwrites yf on overlapping keys -> TMX name wins
+    return sorted(
+        (ticker, name)
+        for ticker, name in merged.items()
+        if not _SUFFIX_EXCLUDE_RE.search(ticker) and not _NAME_EXCLUDE_RE.search(name)
+    )
+
 
 _NAME_NOISE_WORDS = {
     "INC",
@@ -121,16 +182,18 @@ _NAME_NOISE_WORDS = {
 }
 
 
-def _name_tokens(name: str) -> set[str]:
+def _name_tokens(name: str) -> list[str]:
     """Uppercase, strip punctuation, drop common corporate-suffix/generic-
     descriptor noise words — good enough to tell "Royal Bank of Canada" apart
     from "Core Natural Resources, Inc." without needing a real entity-
     resolution library. Generic words like GLOBAL/HOLDINGS are stripped
     because they're too weak a signal on their own — confirmed live this
     caused "WSP Global Inc." to false-match "S&P Global Inc." on the single
-    shared word GLOBAL."""
+    shared word GLOBAL. Returns an ordered list, not a set — order matters
+    for the truncation tolerance in _names_plausibly_match, which only ever
+    treats the LAST token specially."""
     cleaned = re.sub(r"[^\w\s]", " ", name.upper())
-    return {tok for tok in cleaned.split() if tok not in _NAME_NOISE_WORDS}
+    return [tok for tok in cleaned.split() if tok not in _NAME_NOISE_WORDS]
 
 
 def _names_plausibly_match(expected: str, candidate: str) -> bool:
@@ -145,12 +208,29 @@ def _names_plausibly_match(expected: str, candidate: str) -> bool:
     Commerce", zero token overlap despite being the same company) from an
     actually-wrong match (CNR vs "Core Natural Resources", also zero
     overlap). Both score the same here on purpose: when this returns False,
-    the caller must not silently reject either — flag for a human glance."""
+    the caller must not silently reject either — flag for a human glance.
+
+    The LAST expected token is also allowed to match as a prefix (min 3
+    chars) of a candidate token, not just exact equality — confirmed live
+    yfinance's `name` field truncates at 32 characters server-side, which
+    broke exact-token matching for genuinely correct matches (e.g.
+    "CANADIAN PACIFIC KANSAS CITY LI" vs the real "...LTD/CN"). Truncation
+    only ever cuts the tail, so this is safe without reopening the
+    WSP-Global/S&P-Global false-positive risk above (that failure was a
+    *middle* generic word, already stripped as noise, not a tail truncation
+    of a real distinguishing token)."""
     expected_tokens = _name_tokens(expected)
-    candidate_tokens = _name_tokens(candidate)
+    candidate_tokens = set(_name_tokens(candidate))
     if not expected_tokens or not candidate_tokens:
         return False
-    return expected_tokens <= candidate_tokens
+    for i, tok in enumerate(expected_tokens):
+        if tok in candidate_tokens:
+            continue
+        is_last = i == len(expected_tokens) - 1
+        if is_last and len(tok) >= 3 and any(c.startswith(tok) for c in candidate_tokens):
+            continue
+        return False
+    return True
 
 
 @dataclass
@@ -301,6 +381,15 @@ async def resolve_ticker(
     )
 
 
+# Bounded concurrency for resolve_ticker() calls. At TSX-scale (~880
+# candidates, vs. the original 13-15) fully sequential resolution is
+# impractically slow. SEC's documented fair-use guidance is ~10 req/s, and
+# edgartools itself self-paces toward that figure; 5-8 concurrent slots,
+# each still internally paced at _REQUEST_DELAY_SECONDS between its own two
+# sequential sub-calls, stays comfortably under that ceiling.
+_MAX_CONCURRENT_RESOLUTIONS = 6
+
+
 async def build_mapping(
     session: aiohttp.ClientSession,
     watchlist: list[tuple[str, str]],
@@ -312,13 +401,16 @@ async def build_mapping(
     the same heuristic would just flag them again forever, burying genuinely
     new review items under repeat noise."""
     index = await fetch_sec_ticker_index(session)
-    resolved: list[ResolvedEntry] = []
-    flagged: list[FlaggedEntry] = []
-    for ca_ticker, expected_name in watchlist:
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_RESOLUTIONS)
+
+    async def _resolve_one(
+        ca_ticker: str, expected_name: str
+    ) -> ResolvedEntry | FlaggedEntry | None:
         if ca_ticker in already_confirmed:
             logger.info("crosslisting_skip_manually_confirmed", ca_ticker=ca_ticker)
-            continue
-        result = await resolve_ticker(session, index, ca_ticker, expected_name)
+            return None
+        async with semaphore:
+            result = await resolve_ticker(session, index, ca_ticker, expected_name)
         if isinstance(result, ResolvedEntry):
             logger.info(
                 "crosslisting_resolved",
@@ -327,10 +419,15 @@ async def build_mapping(
                 form_type=result.form_type,
                 match_method=result.match_method,
             )
-            resolved.append(result)
         else:
             logger.warning("crosslisting_flagged", ca_ticker=ca_ticker, reason=result.reason)
-            flagged.append(result)
+        return result
+
+    results = await asyncio.gather(
+        *(_resolve_one(ca_ticker, name) for ca_ticker, name in watchlist)
+    )
+    resolved = [r for r in results if isinstance(r, ResolvedEntry)]
+    flagged = [r for r in results if isinstance(r, FlaggedEntry)]
     return resolved, flagged
 
 
@@ -365,6 +462,12 @@ def write_review_file(flagged: list[FlaggedEntry], path: Path) -> None:
         "existing `canadian_data_limited` fallback until resolved here. Nothing is "
         "broken; this is a coverage improvement opportunity, not an error.",
         "",
+        "**Scope note (ClickUp 86bb7h6zt):** this covers TSX main board only. "
+        "TSXV is deliberately deferred, not an oversight — it's 56% mining/"
+        "resources/energy-named companies (junior explorers) with a realistic "
+        "cross-listing rate too low to justify the added complexity for this "
+        "platform's TFSA/RRSP retail-investor focus. Revisit if that changes.",
+        "",
     ]
     if not flagged:
         lines.append("Nothing flagged — every watchlist ticker resolved cleanly.")
@@ -396,8 +499,11 @@ async def main() -> None:
     data_dir = mapping_path.parent
     already_confirmed = _load_manually_confirmed_tickers(mapping_path)
 
+    candidates = await build_tsx_candidates()
+    logger.info("crosslisting_candidates_built", count=len(candidates))
+
     async with aiohttp.ClientSession(headers={"User-Agent": _user_agent()}) as session:
-        resolved, flagged = await build_mapping(session, WATCHLIST_CA_TICKERS, already_confirmed)
+        resolved, flagged = await build_mapping(session, candidates, already_confirmed)
 
     write_mapping_file(resolved, mapping_path)
     write_review_file(flagged, data_dir / "ca_us_crosslisting_review.md")
