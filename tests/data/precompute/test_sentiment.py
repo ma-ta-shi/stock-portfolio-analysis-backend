@@ -91,6 +91,10 @@ async def test_score_article_sends_expected_payload_shape():
     assert call["json"]["stream"] is False
     assert "format" in call["json"]
     assert "Company X reports earnings" in call["json"]["messages"][0]["content"]
+    # Ollama silently truncates to its own small default context window if this
+    # isn't set explicitly, and a truncated call doesn't error - it makes gpt-oss
+    # fabricate a confident, wrong answer instead (docs/technical/ollama-num-ctx-finding.md).
+    assert call["json"]["options"]["num_ctx"] == 8192
 
 
 @pytest.mark.asyncio
