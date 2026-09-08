@@ -105,14 +105,18 @@ US_CHAINS: dict[str, list[str]] = {
     "get_company_info": ["fmp", "yfinance"],
     "get_financials": ["edgartools", "yfinance"],
     "get_insider_trading": ["edgartools"],  # never FMP — CLAUDE.md hard rule
-    "get_analyst_estimates": ["fmp"],
+    # FMP's free tier 402s /analyst-estimates for every non-large-cap
+    # (86bbpgrbz recon: DDD -> {}). yfinance .info has forwardEps for those
+    # names. Mirrors the CA chain, which already has this fallback. Both
+    # adapters return the same NormalizedAnalystEstimates shape.
+    "get_analyst_estimates": ["fmp", "yfinance"],
     # FMP's /ratings-snapshot is a letter-grade quality score with no
     # buy/hold/sell, target, or analyst count — its adapter impl is now a
     # {} stub (86bbpgrxh). yfinance .info + .recommendations has the full
     # set for every tested US ticker including thin-coverage small-caps.
     "get_analyst_ratings": ["yfinance"],
     "get_earnings_surprises": ["fmp", "yfinance"],  # FMP has revenue+EPS; yfinance is EPS-only
-    "get_earnings_calendar": ["fmp", "finnhub"],
+    "get_earnings_calendar": ["fmp", "finnhub"],  # FMP large-cap only; finnhub covers the rest
     "get_peers": ["finnhub"],
     "get_news": ["finnhub"],
     "get_analyst_recommendation_trends": ["finnhub"],
@@ -145,7 +149,13 @@ CA_CHAINS: dict[str, list[str]] = {
     # it leads; yfinance .info is the fallback (confirmed live for .TO).
     "get_analyst_ratings": ["openbb_tmx", "yfinance"],
     "get_earnings_surprises": ["yfinance"],  # openbb_tmx has no actual-vs-estimate earnings data
-    "get_earnings_calendar": ["openbb_tmx"],
+    # openbb_tmx returns [] for every CA ticker today (its bulk feed +
+    # client-side symbol filter matches nothing — not fixed here; 86bbpgrbz
+    # item 1 always deferred it). It stays first in case that filter is ever
+    # fixed; if it is, confirm the TMX row carries a `date` key, since
+    # technicals._earnings_proximity reads exactly that. yfinance is the
+    # fallback that actually returns a date for CA names (86bbpgrbz recon).
+    "get_earnings_calendar": ["openbb_tmx", "yfinance"],
     "get_peers": ["peers_json"],  # static file, not a live provider — Gap 1
     "get_news": ["openbb_tmx"],
     "get_analyst_recommendation_trends": ["yfinance_news"],

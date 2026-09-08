@@ -216,14 +216,21 @@ class FinnhubDataProvider(NewsProvider):
         self, ticker: str | None = None, days_ahead: int = 90
     ) -> list[dict]:
         """Not on the ABC — FMP already covers this; confirmed available
-        here too as a fallback. Bulk endpoint (no symbol filter), same
-        shape-of-problem as FMP's — filtered client-side when a ticker is
-        given."""
+        here too as a fallback, and the only working source in this
+        method's US chain for mid/small caps (FMP's free tier omits them
+        from its bulk feed — 86bbpgrjv recon: FMP `[]` for DDD/CROX).
+
+        Must pass `symbol` (86bbpgrjv): without it Finnhub returns a bulk
+        feed capped at ~1500 rows and the requested ticker is simply not in
+        it, so the old client-side filter matched nothing for every ticker
+        tried. With `symbol` + `from`/`to` it returns that ticker's next
+        event(s) directly. The client-side filter stays as a cheap guard."""
         from_date = pd.Timestamp.now().normalize().date()
         to_date = from_date + timedelta(days=days_ahead)
-        data = await self._request(
-            "calendar/earnings", {"from": from_date.isoformat(), "to": to_date.isoformat()}
-        )
+        params = {"from": from_date.isoformat(), "to": to_date.isoformat()}
+        if ticker is not None:
+            params["symbol"] = ticker
+        data = await self._request("calendar/earnings", params)
         rows = (data or {}).get("earningsCalendar", [])
         if ticker is None:
             return rows

@@ -407,28 +407,58 @@ async def test_get_insider_trading_no_date_column_still_returns_list_of_dicts(
 # --- get_earnings_calendar ---
 
 
-async def test_get_earnings_calendar_returns_list_of_dicts(provider, monkeypatch):
-    """Real, confirmed bug fixed here: declared -> list[dict] but every
-    code path actually returned a single dict, never a list."""
+async def test_get_earnings_calendar_maps_to_date_symbol_rows(provider, monkeypatch):
+    """86bbpgrbz item 1: one {date, symbol} row per date — `date` is the
+    ISO string technicals._earnings_proximity reads."""
     _patch_ticker(
         monkeypatch,
         lambda ticker: FakeTicker(
             calendar={
                 "Earnings Date": [pd.Timestamp("2026-11-05")],
-                "Earnings Average": 1.5,
-                "Earnings High": 1.7,
-                "Earnings Low": 1.3,
-                "Revenue Average": 90_000_000_000,
+                "Earnings Average": 1.5,  # yfinance carries this; we no longer emit it
             }
+        ),
+    )
+
+    result = await provider.get_earnings_calendar("RY.TO")
+
+    assert result == [{"date": "2026-11-05", "symbol": "RY.TO"}]
+
+
+async def test_get_earnings_calendar_emits_one_row_per_date(provider, monkeypatch):
+    """yfinance sometimes gives a two-date range it isn't sure between —
+    emit both; the consumer picks the earlier."""
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(
+            calendar={"Earnings Date": [pd.Timestamp("2026-11-05"), pd.Timestamp("2026-11-07")]}
         ),
     )
 
     result = await provider.get_earnings_calendar("AAPL")
 
-    assert isinstance(result, list)
-    assert len(result) == 1
-    assert result[0]["Upcoming Earnings Dates"] == ["2026-11-05"]
-    assert result[0]["EPS Estimate"] == 1.5
+    assert result == [
+        {"date": "2026-11-05", "symbol": "AAPL"},
+        {"date": "2026-11-07", "symbol": "AAPL"},
+    ]
+
+
+async def test_get_earnings_calendar_skips_unusable_date_values(provider, monkeypatch):
+    """NaT (yfinance's "unknown date"), None, and a non-list Earnings Date
+    all degrade to a clean result rather than a "NaT" string row or a crash."""
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(calendar={"Earnings Date": [pd.NaT, pd.Timestamp("2026-11-05")]}),
+    )
+    assert await provider.get_earnings_calendar("AAPL") == [
+        {"date": "2026-11-05", "symbol": "AAPL"}
+    ]
+
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(calendar={"Earnings Date": "2026-11-05"}),  # scalar, not a list
+    )
+    assert await provider.get_earnings_calendar("AAPL") == []
 
 
 async def test_get_earnings_calendar_no_data_returns_empty_list(provider, monkeypatch):

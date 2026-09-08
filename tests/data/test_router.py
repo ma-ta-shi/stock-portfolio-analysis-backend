@@ -206,6 +206,7 @@ async def test_chain_exhausted_returns_canonical_empty():
     router = Router(
         ticker="AAPL",
         fmp=FakeProvider(get_analyst_estimates=_ok({})),
+        yfinance=FakeProvider(get_analyst_estimates=_ok({})),  # US chain is [fmp, yfinance]
         edgartools=FakeProvider(),
         finnhub=FakeProvider(),
     )

@@ -481,48 +481,40 @@ class YFinanceDataProvider(StockDataProvider):
             return []
 
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
-        """Retrieves the upcoming earnings dates and EPS consensus estimates.
+        """Upcoming earnings date(s) for a ticker, one row per date.
 
-        Real, confirmed bug fixed here (found in a later sweep, same class
-        as get_dividend_history()'s pre-fix bug): declared -> list[dict] but
-        every code path actually returned a single dict, never a list —
-        including the "no data" branch, which returned a dict with a
-        human-readable "Status" message instead of the empty list the type
-        contract promises. yfinance.calendar only ever exposes one upcoming
-        earnings event per ticker (unlike FMP's get_earnings_calendar,
-        which returns many companies' events in a date window), so the fix
-        here is to wrap that single record in a list, not to build a
-        multi-event lookup the underlying data doesn't support. Currently
-        unreachable via router.py (neither US_CHAINS nor CA_CHAINS route
-        get_earnings_calendar to yfinance), but a real bug in the adapter
-        regardless — directly callable on its own.
+        Reshaped 2026-09-08 (86bbpgrbz item 1) now that a consumer exists:
+        `precompute/technicals.py._earnings_proximity` reads `row["date"]`
+        and takes the earliest future one. Rows are `{"date": "YYYY-MM-DD",
+        "symbol": ...}` — matching the `date`/`symbol` keys FMP's and
+        Finnhub's raw rows already carry, so the Router's output shape is
+        consistent whichever provider serves it. Deliberately not a full
+        `Normalized*` type: one consumer, one field. The prior shape
+        (`{"Upcoming Earnings Dates": [...], "EPS Estimate", ...}`) had no
+        `date` key, so wiring this adapter into CA_CHAINS without the
+        reshape would have been a silent no-op.
 
-        No shared record shape exists yet between this and FMP's raw,
-        unmapped earnings-calendar rows — deliberately not inventing one
-        here, same reasoning as get_price_history() staying unnormalized
-        in 86bbb001k: no real consumer exists yet to ground it against.
-        """
+        `stock.calendar` sometimes lists two dates (a range yfinance isn't
+        sure between) — emit both; the consumer picks the earlier. The date
+        can also lag ~1-2 weeks behind after a company reports (yfinance
+        still shows the just-passed date); the consumer filters those out
+        and degrades to "unknown", which every downstream reader already
+        handles. Recon 2026-09-08: openbb-tmx returns `[]` for
+        RY.TO/ENB.TO/SHOP.TO; yfinance has the date for all three."""
         stock = yf.Ticker(ticker)
         cal = stock.calendar
-        if cal is None or (isinstance(cal, pd.DataFrame) and cal.empty) or not cal:
+        # isinstance first: `not cal` on a (legacy) non-empty DataFrame raises.
+        if not isinstance(cal, dict) or not cal:
             return []
-        earnings_date = cal.get("Earnings Date", ["N/A"])
-        if isinstance(earnings_date, list) and len(earnings_date) > 0:
-            formatted_dates = [
-                d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d) for d in earnings_date
-            ]
-        else:
-            formatted_dates = [str(earnings_date)]
-        return [
-            {
-                "Symbol": ticker.upper(),
-                "Upcoming Earnings Dates": formatted_dates,
-                "EPS Estimate": cal.get("Earnings Average", "N/A"),
-                "EPS High Estimate": cal.get("Earnings High", "N/A"),
-                "EPS Low Estimate": cal.get("Earnings Low", "N/A"),
-                "Revenue Estimate": cal.get("Revenue Average", "N/A"),
-            }
-        ]
+        raw_dates = cal.get("Earnings Date")
+        if not isinstance(raw_dates, list):
+            return []
+        rows = []
+        for value in raw_dates:
+            # skip NaT / None / a stray non-date string
+            if pd.notna(value) and hasattr(value, "strftime"):
+                rows.append({"date": value.strftime("%Y-%m-%d"), "symbol": ticker.upper()})
+        return rows
 
     async def get_dividend_history(
         self, ticker: str, from_date: str, to_date: str
