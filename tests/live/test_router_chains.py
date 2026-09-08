@@ -171,12 +171,12 @@ async def test_ca_price_history_survives_openbb_tmx_exception_and_falls_back():
     assert source == "yfinance"
 
 
-async def test_ca_earnings_calendar_falls_back_to_yfinance_with_a_date():
-    """openbb_tmx returns [] for every CA ticker (its filter matches
-    nothing); yfinance has the date. The reshaped yfinance adapter emits a
-    `date` key so technicals._earnings_proximity can read it — without the
-    reshape this fallback would resolve non-empty but be a silent no-op
-    downstream (86bbpgrbz item 1)."""
+async def test_ca_earnings_calendar_served_by_yfinance_with_a_date():
+    """CA earnings calendar is yfinance-only (openbb_tmx's TMX feed is a
+    ~2-day-forward window, dropped 86bbpgrbz item 1). The reshaped adapter
+    emits a `date` key so technicals._earnings_proximity can read it —
+    without the reshape this chain would resolve non-empty but be a silent
+    no-op downstream."""
     ca_ticker = t.CA_CROSSLISTED[1]  # SHOP.TO — reliably has a forward date on yfinance
     async with Router(ticker=ca_ticker) as router:
         result, source = await router._try_chain("get_earnings_calendar", ca_ticker)

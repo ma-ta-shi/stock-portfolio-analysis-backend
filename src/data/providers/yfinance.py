@@ -499,8 +499,9 @@ class YFinanceDataProvider(StockDataProvider):
         can also lag ~1-2 weeks behind after a company reports (yfinance
         still shows the just-passed date); the consumer filters those out
         and degrades to "unknown", which every downstream reader already
-        handles. Recon 2026-09-08: openbb-tmx returns `[]` for
-        RY.TO/ENB.TO/SHOP.TO; yfinance has the date for all three."""
+        handles. Recon 2026-09-08: openbb-tmx's TMX earnings feed is only
+        ~2 days forward (near-useless for a per-ticker lookup), so the CA
+        chain is yfinance-only; yfinance had the date for RY.TO/ENB.TO/SHOP.TO."""
         stock = yf.Ticker(ticker)
         cal = stock.calendar
         # isinstance first: `not cal` on a (legacy) non-empty DataFrame raises.

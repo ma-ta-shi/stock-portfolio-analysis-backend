@@ -149,13 +149,13 @@ CA_CHAINS: dict[str, list[str]] = {
     # it leads; yfinance .info is the fallback (confirmed live for .TO).
     "get_analyst_ratings": ["openbb_tmx", "yfinance"],
     "get_earnings_surprises": ["yfinance"],  # openbb_tmx has no actual-vs-estimate earnings data
-    # openbb_tmx returns [] for every CA ticker today (its bulk feed +
-    # client-side symbol filter matches nothing — not fixed here; 86bbpgrbz
-    # item 1 always deferred it). It stays first in case that filter is ever
-    # fixed; if it is, confirm the TMX row carries a `date` key, since
-    # technicals._earnings_proximity reads exactly that. yfinance is the
-    # fallback that actually returns a date for CA names (86bbpgrbz recon).
-    "get_earnings_calendar": ["openbb_tmx", "yfinance"],
+    # openbb_tmx deliberately dropped (86bbpgrbz item 1): obb.equity.calendar.
+    # earnings (tmx) is a ~2-day-forward feed of whoever reports next — it
+    # ignores the symbol arg and a quarterly reporter like RY is in the
+    # window ~2 days a quarter. Structurally can't answer "when does this
+    # ticker next report", and adds nothing yfinance lacks even then
+    # (_earnings_proximity reads only `date`). Diagnosed live 2026-09-08.
+    "get_earnings_calendar": ["yfinance"],
     "get_peers": ["peers_json"],  # static file, not a live provider — Gap 1
     "get_news": ["openbb_tmx"],
     "get_analyst_recommendation_trends": ["yfinance_news"],
