@@ -95,6 +95,16 @@ VGRO_BARE_COLLISION = "VGRO"
 # Confirmed live 2026-08-04: 1 analyst opinion (see module docstring).
 LOW_ANALYST_COVERAGE = "MKO.V"
 
+# US small-cap that FMP's free tier omits from its per-symbol feeds (402 /
+# not-in-bulk on /analyst-estimates and /earnings-calendar — data inventory
+# audit, re-confirmed live 2026-09-08). Forces the yfinance / finnhub
+# fallbacks for those methods (86bbpgrbz item 2, 86bbpgrjv). Also the
+# "US short-interest actually populated" case for get_short_interest and a
+# "yfinance get_analyst_ratings still returns a target + distribution on
+# 2-analyst coverage" case (86bbpgrxh): 2 analyst opinions,
+# recommendationMean None, recommendationKey "none", shortPercentOfFloat ~0.27.
+US_FMP_GAP = "DDD"
+
 # Dividend edge cases — RY.TO is a long consistent payer; AMZN confirmed
 # live 2026-08-04 to have zero dividend (GOOG/META were wrong picks, both
 # now pay real dividends as of 2024).

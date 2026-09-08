@@ -592,11 +592,51 @@ async def test_get_analyst_ratings_calls_consensus_endpoint(provider, mock_obb):
 
 
 @pytest.mark.asyncio
-async def test_get_analyst_ratings_returns_first_row_as_dict(provider, mock_obb):
-    fake_df = pd.DataFrame([{"symbol": "RY", "target_consensus": 277.24}])
+async def test_get_analyst_ratings_maps_consensus_row_to_normalized_shape(provider, mock_obb):
+    """Field names confirmed live 2026-09-08: target_consensus,
+    total_analysts, buy/hold/sell_ratings, consensus_action ("StrongBuy"
+    CamelCase → canonical_rating → "strong_buy")."""
+    fake_df = pd.DataFrame(
+        [
+            {
+                "symbol": "SHOP",
+                "target_consensus": 238.15,
+                "target_high": 300.0,
+                "total_analysts": 31,
+                "buy_ratings": 27,
+                "hold_ratings": 4,
+                "sell_ratings": 0,
+                "consensus_action": "StrongBuy",
+            }
+        ]
+    )
+    mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
+    result = await provider.get_analyst_ratings(ticker="SHOP.TO")
+    assert result == {
+        "consensus_rating": "strong_buy",
+        "num_analysts": 31,
+        "target_mean": 238.15,
+        "buy_count": 27,
+        "hold_count": 4,
+        "sell_count": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_analyst_ratings_target_only_row_still_maps(provider, mock_obb):
+    """A row with only the OpenBB-standard target fields (no counts, no
+    rating) still yields target_mean; yfinance fills the rest downstream."""
+    fake_df = pd.DataFrame([{"symbol": "RY", "target_consensus": 307.76}])
     mock_obb.equity.estimates.consensus.return_value = make_obb_result(fake_df)
     result = await provider.get_analyst_ratings(ticker="RY.TO")
-    assert result == {"symbol": "RY", "target_consensus": 277.24}
+    assert result == {
+        "consensus_rating": None,
+        "num_analysts": None,
+        "target_mean": 307.76,
+        "buy_count": None,
+        "hold_count": None,
+        "sell_count": None,
+    }
 
 
 @pytest.mark.asyncio

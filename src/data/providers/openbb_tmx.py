@@ -44,8 +44,10 @@ from data.providers.base import (
     StockDataProvider,
     NewsProvider,
     NormalizedAnalystEstimates,
+    NormalizedAnalystRatings,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
+    canonical_rating,
 )
 
 logger = structlog.get_logger(__name__)
@@ -150,27 +152,52 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         docstring in base.py for why."""
         return {}
 
-    async def get_analyst_ratings(self, ticker: str) -> dict:
-        """Real consensus fetch, previously delegated-to via
-        get_analyst_estimates() (TMX has one consensus snapshot with both
-        target-price and rating-breakdown fields, not two separate
-        endpoints like FMP's split) — moved here directly (86bbdu04a),
-        since get_analyst_estimates() no longer has any use for the raw
-        row itself. No real caller consumes this yet (research_sources.py
-        is still a stub), so the shape stays the raw OpenBB row, not
-        narrowed to a guessed ratings-only shape.
+    async def get_analyst_ratings(self, ticker: str) -> NormalizedAnalystRatings:
+        """Maps TMX's consensus row onto NormalizedAnalystRatings
+        (86bbpgrxh — was the raw OpenBB row). TMX has one consensus
+        snapshot with both target-price and rating-breakdown fields, so
+        this is the richer CA source; router.py puts it ahead of yfinance
+        on the CA chain. Field names confirmed live 2026-09-08:
+        target_consensus, total_analysts, buy_ratings / hold_ratings /
+        sell_ratings, consensus_action (CamelCase — "Buy" / "StrongBuy" /
+        "Neutral" seen live; canonical_rating handles the mapping).
 
-        Must check `result.results` before calling `.to_df()` — confirmed
-        live (MKO.V, zero analyst coverage) that `.to_df()` itself raises
-        OpenBBError("Results not found") on a genuinely empty result rather
-        than returning an empty DataFrame; `df.empty` is never reached."""
+        Must check `result.results` before `.to_df()` — confirmed live
+        (MKO.V, zero coverage) that `.to_df()` itself raises
+        OpenBBError("Results not found") on an empty result rather than
+        returning an empty DataFrame. Bare {} on no data — see
+        NormalizedAnalystEstimates's docstring in base.py for why."""
         result = await asyncio.to_thread(
             obb.equity.estimates.consensus, symbol=ticker, provider=self.PROVIDER
         )
         if not result.results:
             return {}
         df = result.to_df()
-        return df.iloc[0].to_dict() if not df.empty else {}
+        if df.empty:
+            return {}
+        row = df.iloc[0].to_dict()
+
+        def _num(key):
+            value = row.get(key)
+            return None if value is None or pd.isna(value) else value
+
+        target_mean = _num("target_consensus")
+        num_analysts = _num("total_analysts")
+        buy_count = _num("buy_ratings")
+        hold_count = _num("hold_ratings")
+        sell_count = _num("sell_ratings")
+        rating = canonical_rating(row.get("consensus_action"))
+
+        if all(v is None for v in (target_mean, num_analysts, buy_count, rating)):
+            return {}
+        return NormalizedAnalystRatings(
+            consensus_rating=rating,
+            num_analysts=int(num_analysts) if num_analysts is not None else None,
+            target_mean=float(target_mean) if target_mean is not None else None,
+            buy_count=int(buy_count) if buy_count is not None else None,
+            hold_count=int(hold_count) if hold_count is not None else None,
+            sell_count=int(sell_count) if sell_count is not None else None,
+        )
 
     async def get_earnings_surprises(self, ticker: str) -> list[dict]:
         raise NotImplementedError("Earnings-surprise history is not available via openbb-tmx.")

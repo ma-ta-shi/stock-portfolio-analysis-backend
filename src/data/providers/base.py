@@ -92,6 +92,98 @@ class NormalizedAnalystEstimates(TypedDict):
     forward_eps: float | None
 
 
+class NormalizedAnalystRatings(TypedDict):
+    """Canonical get_analyst_ratings() shape (86bbpgrxh). Trimmed to the
+    fields a real consumer renders: the Fundamental Analyst prompt
+    (Rating / Target / Count) and the Sentiment Analyst prompt
+    (buy/hold/sell distribution + its own map_consensus_rating merge).
+
+    Cut from the ticket's proposed 8 fields, each with no consumer:
+    target_high / target_low, strong_buy / strong_sell as separate
+    buckets (Sentiment renders 3 buckets — fold strong_buy into buy,
+    strong_sell into sell), FMP's letter grade / DCF-ROE sub-scores.
+    price_target_vs_current_pct is derived downstream (needs the current
+    price), not a provider field. rating_distribution_drift needs a
+    history and comes from get_analyst_recommendation_trends, not here.
+
+    consensus_rating is mapped from a published rating field only (via
+    canonical_rating), never re-derived from the counts in the adapter —
+    the Sentiment prompt does that itself and duplicating it per-adapter
+    is the drift risk. A source with only a distribution → None.
+
+    Bare {} on no data — never {"consensus_rating": None, ...}. Same
+    _is_empty() trap as NormalizedAnalystEstimates: router.py treats any
+    non-empty dict as a hit, so a keyed-None dict silently kills the CA
+    fallback chain behind this method."""
+
+    consensus_rating: str | None  # "strong_buy" | "buy" | "hold" | "sell" | "strong_sell"
+    num_analysts: int | None
+    target_mean: float | None
+    buy_count: int | None
+    hold_count: int | None
+    sell_count: int | None
+
+
+class NormalizedShortInterest(TypedDict):
+    """Canonical get_short_interest() shape (86bbpgrxh). Not on any ABC —
+    a router-chain-dispatched method like get_quote / get_ratios_ttm.
+    yfinance .info is the only source; consumed by the Sentiment Analyst
+    (short_interest_pct / days_to_cover rendered directly; the "30-day
+    trend" payload line comes from shares_short vs shares_short_prior_month;
+    cross-validator CV4 forces "insufficient_data" when the block is absent).
+
+    Live recon 2026-09-08, 15+ US/CA tickers (see get_short_interest in
+    yfinance.py for the mechanics):
+    - short_interest_pct is populated for BOTH markets. US: shortPercentOfFloat
+      (a fraction) × 100. CA: shortPercentOfFloat is always None for .TO/.V,
+      so it is derived as sharesShort / floatShares × 100 — validated to
+      two decimals against tickers where yfinance's own field also exists.
+    - days_to_cover (shortRatio): present both markets, no derivation.
+    - shares_short / shares_short_prior_month + as_of_date / prior_month_date:
+      the prior count is a genuine ~30-day-earlier exchange snapshot
+      (window measured at 30-31 days = one settlement cycle), so a real
+      30-day trend is derivable from a single pull. prior_month_date is
+      carried so the consumer can confirm the window rather than assume it.
+    - All fields None for ETFs (SPY / ARKK / XIU.TO) → bare {}.
+
+    Bare {} on no data — same _is_empty() note as above."""
+
+    short_interest_pct: float | None  # % of float; CA value is derived (see above)
+    days_to_cover: float | None
+    shares_short: int | None
+    shares_short_prior_month: int | None
+    as_of_date: str | None  # ISO "YYYY-MM-DD" — current snapshot
+    prior_month_date: str | None  # ISO — snapshot shares_short_prior_month is from (~30d back)
+
+
+# Only labels the two real callers actually emit — no speculative synonyms.
+# yfinance recommendationKey: strong_buy / buy / hold / underperform / sell / none.
+# openbb-tmx consensus_action (live-confirmed 2026-09-08): StrongBuy / Buy / Neutral;
+# Sell / StrongSell inferred by symmetry (no net-sell CA name exists to confirm).
+_RATING_SYNONYMS: dict[str, str] = {
+    "strongbuy": "strong_buy",
+    "buy": "buy",
+    "hold": "hold",
+    "neutral": "hold",
+    "underperform": "sell",
+    "sell": "sell",
+    "strongsell": "strong_sell",
+}
+
+
+def canonical_rating(raw: str | None) -> str | None:
+    """Map a provider's analyst-consensus label onto the canonical set
+    "strong_buy" | "buy" | "hold" | "sell" | "strong_sell" (86bbpgrxh) —
+    see _RATING_SYNONYMS for the accepted inputs. Anything unrecognised or
+    absent (including yfinance's "none", and any TMX sell-side word that
+    turns out not to be "Sell"/"StrongSell") returns None, so an
+    unexpected value fails safe rather than becoming junk data."""
+    if not raw:
+        return None
+    key = "".join(ch for ch in raw.lower() if ch.isalnum())
+    return _RATING_SYNONYMS.get(key)
+
+
 @dataclass
 class NormalizedFinancials:
     """Canonical get_financials() shape (86bbb001k), produced by
@@ -132,12 +224,20 @@ class StockDataProvider(ABC):
         flagged here rather than "fixed" back to match this signature —
         this divergence is intentional, not an oversight."""
         ...
+
     @abstractmethod
     async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo: ...
     @abstractmethod
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates: ...
     @abstractmethod
-    async def get_analyst_ratings(self, ticker: str) -> dict: ...
+    async def get_analyst_ratings(self, ticker: str) -> NormalizedAnalystRatings:
+        """Each adapter maps its own raw consensus response onto
+        NormalizedAnalystRatings and returns a bare {} on no data
+        (86bbpgrxh). FMP's impl is a stub {} — its /ratings-snapshot
+        letter-grade output has no consumer and FMP is not in this
+        method's router chain (US → yfinance, CA → openbb-tmx, yfinance)."""
+        ...
+
     @abstractmethod
     async def get_earnings_surprises(self, ticker: str) -> list[dict]:
         """Historical actual-vs-estimate earnings, newest first, each:
@@ -149,6 +249,7 @@ class StockDataProvider(ABC):
         revenue_estimated stay None on any source that can't provide them
         (yfinance)."""
         ...
+
     @abstractmethod
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]: ...
     @abstractmethod
@@ -170,7 +271,7 @@ class StockDataProvider(ABC):
 
 class NewsProvider(ABC):
     """Abstract base for news data (FMP news, Finnhub news with sentiment)."""
-    
+
     @abstractmethod
     async def get_news(self, ticker: str, days: int) -> list[dict]: ...
     @abstractmethod
@@ -179,7 +280,7 @@ class NewsProvider(ABC):
 
 class MacroDataProvider(ABC):
     """Abstract base for macroeconomic data (FRED, Bank of Canada Valet)."""
-    
+
     @abstractmethod
     async def get_macro_data(self, series_ids: list[str]) -> dict[str, pd.Series]: ...
     @abstractmethod
