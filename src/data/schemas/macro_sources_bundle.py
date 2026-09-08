@@ -154,9 +154,13 @@ class MacroSourcesBundle(ContractModel):
     # --- Statistics Canada supplementary fields ---
     # All Optional — None if fetch fails or the stock isn't Canadian.
     statcan_unemployment_ca: float | None  # LFS overall unemployment rate
+    # statcan_housing_starts / statcan_retail_sales_yoy are computed and
+    # provisioned but have NO payload placeholder yet — kept (cheap, real CA
+    # demand indicators) pending a Macro prompt revision that adds a block +
+    # CoT guidance. Decision owner: prompt-revision-protocol.md §30.9-30.11.
+    # (statcan_cpi_by_province was dropped in 86bbq8rj1 — see stats_canada.py.)
     statcan_housing_starts: float | None  # Annualized housing starts (SAAR)
     statcan_retail_sales_yoy: float | None  # Retail sales YoY %
-    statcan_cpi_by_province: dict[str, float] | None
     statcan_age_days: NonNegativeInt | None
 
     # --- Statistics Canada CPI/GDP trend fields (86bbahum6) ---
@@ -172,6 +176,27 @@ class MacroSourcesBundle(ContractModel):
     ca_cpi_trend: Literal["rising", "stable", "falling"] | None
     ca_gdp_qoq: float | None  # annualized
     ca_gdp_4q_trend: Literal["rising", "stable", "falling"] | None
+
+    # --- US CPI/GDP/VIX + BoC rate delta (86bbq8rj1) ---
+    # One block, grouped by ticket rather than by section semantics —
+    # same convention as the 86bbahum6 block above. US mirrors of the
+    # ca_* CPI/GDP fields, the VIX 30-day average, the BoC rate 90-day
+    # delta + direction (paired with the Fed policy_rate_90d_delta_bp/
+    # rate_trend), and the CA unemployment 6-month delta. No new
+    # validators — single-source pure derivations, like ca_cpi_trend.
+    # us_cpi_yoy / us_core_cpi_yoy / us_gdp_qoq are read by the prompt's
+    # merge_output_macro; us_gdp_4q_trend / vix_30d_avg / the BoC pair are
+    # payload-template placeholders. us_gdp_qoq / us_gdp_4q_trend come
+    # from FRED GDPC1 (real GDP), not the nominal `gdp` series, to stay
+    # methodologically identical to ca_gdp_qoq.
+    us_cpi_yoy: float | None
+    us_core_cpi_yoy: float | None
+    us_gdp_qoq: float | None  # annualized, from real GDP
+    us_gdp_4q_trend: Literal["rising", "stable", "falling"] | None
+    vix_30d_avg: float | None
+    boc_rate_90d_delta_bp: float | None
+    boc_rate_trend: Literal["tightening", "pausing", "easing"] | None
+    ca_unemployment_6m_delta: float | None  # pp change vs 6 months ago
 
     @model_validator(mode="after")
     def _check_sector_commodity_nulls(self) -> "MacroSourcesBundle":

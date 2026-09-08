@@ -21,6 +21,12 @@ def _bundle(**overrides) -> MacroSourcesBundle:
         vix=15.2,
         cad_usd_fred=0.73,
         wti_crude=78.5,
+        # US CPI/GDP/VIX derived (86bbq8rj1)
+        us_cpi_yoy=3.2,
+        us_core_cpi_yoy=3.0,
+        us_gdp_qoq=2.4,
+        us_gdp_4q_trend="rising",
+        vix_30d_avg=16.1,
         # BoC Valet series
         boc_rate=5.0,
         cad_usd=0.73,
@@ -34,8 +40,10 @@ def _bundle(**overrides) -> MacroSourcesBundle:
         cad_usd_90d_change_pct=1.5,
         commodity_90d_change_pct=None,
         unemployment_6m_delta=0.1,
+        boc_rate_90d_delta_bp=-25.0,
         # Trend enums
         rate_trend="pausing",
+        boc_rate_trend="easing",
         cpi_trend="stable",
         cad_trend="stable",
         vix_regime="low",
@@ -65,9 +73,9 @@ def _bundle(**overrides) -> MacroSourcesBundle:
         sector_commodity_age_days_reliability=None,
         # StatCan supplementary
         statcan_unemployment_ca=None,
+        ca_unemployment_6m_delta=None,
         statcan_housing_starts=None,
         statcan_retail_sales_yoy=None,
-        statcan_cpi_by_province=None,
         statcan_age_days=None,
         # StatCan CPI/GDP trend fields (86bbahum6)
         ca_cpi_yoy=None,
@@ -264,7 +272,8 @@ def test_accepts_zero_age():
 def test_statcan_fields_all_none_is_valid():
     bundle = _bundle()
     assert bundle.statcan_unemployment_ca is None
-    assert bundle.statcan_cpi_by_province is None
+    assert bundle.ca_unemployment_6m_delta is None
+    assert bundle.statcan_housing_starts is None
 
 
 # ---------- StatCan CPI/GDP trend fields (86bbahum6) ----------
@@ -294,9 +303,37 @@ def test_ca_cpi_gdp_fields_all_none_is_valid():
     assert bundle.ca_gdp_4q_trend is None
 
 
-def test_statcan_cpi_by_province_accepts_real_dict():
-    bundle = _bundle(statcan_cpi_by_province={"ON": 3.1, "BC": 2.9})
-    assert bundle.statcan_cpi_by_province["ON"] == 3.1
+# ---------- US CPI/GDP/VIX + BoC rate delta fields (86bbq8rj1) ----------
+
+
+def test_us_and_boc_fields_accept_real_values():
+    bundle = _bundle(
+        us_cpi_yoy=3.4,
+        us_core_cpi_yoy=3.1,
+        us_gdp_qoq=1.5,
+        us_gdp_4q_trend="rising",
+        vix_30d_avg=17.8,
+        boc_rate_90d_delta_bp=-50.0,
+        boc_rate_trend="easing",
+        ca_unemployment_6m_delta=0.4,
+    )
+    assert bundle.us_gdp_qoq == 1.5
+    assert bundle.boc_rate_trend == "easing"
+    assert bundle.ca_unemployment_6m_delta == 0.4
+
+
+def test_us_and_boc_fields_all_none_is_valid():
+    for field in (
+        "us_cpi_yoy",
+        "us_core_cpi_yoy",
+        "us_gdp_qoq",
+        "us_gdp_4q_trend",
+        "vix_30d_avg",
+        "boc_rate_90d_delta_bp",
+        "boc_rate_trend",
+        "ca_unemployment_6m_delta",
+    ):
+        assert getattr(_bundle(**{field: None}), field) is None
 
 
 # ---------- base behavior ----------

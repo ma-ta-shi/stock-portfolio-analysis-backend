@@ -87,9 +87,11 @@ class BOCMacroDataProvider(MacroDataProvider):
         for series_id in series_ids:
             try:
                 # No date range in the signature — matches the MacroDataProvider ABC
-                # (base.py), which takes only series_ids. `recent=10` mirrors the
-                # documented BoC Valet access pattern (financial-data-api-research.md §7).
-                url = f"{self.BASE_URL}/observations/{series_id}/json?recent=10"
+                # (base.py), which takes only series_ids. recent=200 (~9 months of
+                # business days) so a 90-day delta on a daily series like the
+                # overnight rate V39079 has data reaching past the lookback
+                # (86bbq8rj1); was recent=10, too short for anything but "latest".
+                url = f"{self.BASE_URL}/observations/{series_id}/json?recent=200"
                 data = await self._fetch_json(url)
 
                 if "observations" in data:

@@ -36,21 +36,11 @@ _CPI_NATIONAL_VECTOR = 41690973
 # (Geography=Canada, Estimates=Real GDP volume index).
 _GDP_VOLUME_INDEX_VECTOR = 61992650
 
-# table 18100004, All-items CPI vector per province. Territories aren't
-# included — WDS only carries them at the city level (Whitehorse/Yellowknife/
-# Iqaluit), not province/territory-wide, so there's no matching vector.
-_CPI_VECTORS_BY_PROVINCE = {
-    "NL": 41691244,
-    "PE": 41691379,
-    "NS": 41691513,
-    "NB": 41691648,
-    "QC": 41691783,
-    "ON": 41691919,
-    "MB": 41692055,
-    "SK": 41692191,
-    "AB": 41692327,
-    "BC": 41692462,
-}
+# get_cpi_by_province / _CPI_VECTORS_BY_PROVINCE removed 2026-09-08 (86bbq8rj1):
+# a 10-province API fan-out feeding statcan_cpi_by_province, which no payload
+# placeholder or reliability field consumed, and which couldn't anchor
+# statcan_age_days either (getDataFromVectors gives no releaseTime for these).
+# The audit's "surface or drop" call, resolved as drop.
 
 
 def _shift_year(ref_per: str, delta_years: int) -> str:
@@ -69,9 +59,9 @@ def _shift_months(ref_per: str, delta_months: int) -> str:
 
 class StatsCanadaProvider:
     """Statistics Canada Web Data Service (WDS) — supplementary Canadian
-    macro data (unemployment, housing starts, retail sales YoY, CPI by
-    province, national CPI, real GDP index) for MacroSourcesBundle's
-    statcan_*/ca_cpi_*/ca_gdp_* fields. Runs alongside boc.py for
+    macro data (unemployment level + 6m delta, housing starts, retail
+    sales YoY, national CPI, real GDP index) for MacroSourcesBundle's
+    statcan_*/ca_*/ca_cpi_*/ca_gdp_* fields. Runs alongside boc.py for
     Canadian stocks; supplementary, not primary — Bank of Canada Valet is.
 
     Deliberately doesn't inherit MacroDataProvider — that ABC's shape
@@ -152,16 +142,41 @@ class StatsCanadaProvider:
 
     async def get_unemployment_rate(self) -> dict | None:
         """LFS overall unemployment rate for Canada. Maps to
-        MacroSourcesBundle.statcan_unemployment_ca."""
-        data = await self._fetch_vectors([_UNEMPLOYMENT_VECTOR])
-        point = self._latest_point(data[0])
-        if point is None:
+        MacroSourcesBundle.statcan_unemployment_ca (value) and
+        ca_unemployment_6m_delta (delta_6m_pp, 86bbq8rj1).
+
+        delta_6m_pp is a raw percentage-point change (rate 6 months ago
+        subtracted from now) — unemployment is already a rate, so unlike
+        get_cpi_national's delta_3m_pp this is not a change-in-the-YoY.
+        Needs the point 6 months back, so latest_n=8 (7 minimum + 1 month
+        buffer, matching get_cpi_national's convention). Lookback by exact
+        refPer match, not list position."""
+        data = await self._fetch_vectors([_UNEMPLOYMENT_VECTOR], latest_n=8)
+        row = data[0]
+        if row.get("status") != "SUCCESS":
             logger.warning("statcan_unemployment_missing")
             return None
+        points = {
+            p["refPer"]: p for p in row["object"]["vectorDataPoint"] if p.get("value") is not None
+        }
+        if not points:
+            logger.warning("statcan_unemployment_missing")
+            return None
+        latest_period = max(points)
+        latest_value = self._scaled_value(points[latest_period])
+
+        delta_6m_pp = None
+        prior = points.get(_shift_months(latest_period, -6))
+        if prior is not None:
+            delta_6m_pp = latest_value - self._scaled_value(prior)
+        else:
+            logger.warning("statcan_unemployment_no_prior_6m", latest_period=latest_period)
+
         return {
-            "value": self._scaled_value(point),
-            "reference_period": point["refPer"],
-            "released": point["releaseTime"],
+            "value": latest_value,
+            "delta_6m_pp": delta_6m_pp,
+            "reference_period": latest_period,
+            "released": points[latest_period]["releaseTime"],
         }
 
     async def get_housing_starts(self) -> dict | None:
@@ -214,45 +229,6 @@ class StatsCanadaProvider:
             "value": yoy_pct,
             "reference_period": latest_period,
             "released": latest["releaseTime"],
-        }
-
-    async def get_cpi_by_province(self) -> dict | None:
-        """All-items CPI index by province (10 provinces; territories aren't
-        included — see module docstring). Maps to
-        MacroSourcesBundle.statcan_cpi_by_province.
-
-        Matches each response row back to its province via the `vectorId`
-        the row itself reports, NOT by response position. Confirmed live
-        that getDataFromVectorsAndLatestNPeriods does not preserve request
-        order when multiple vectors share a productId (which all 10 of
-        these do, on 18100004) — it comes back sorted ascending by vectorId
-        instead. A positional zip() would silently misassign CPI values to
-        the wrong provinces the moment _CPI_VECTORS_BY_PROVINCE's insertion
-        order didn't happen to already be ascending."""
-        vector_to_province = {vid: code for code, vid in _CPI_VECTORS_BY_PROVINCE.items()}
-        data = await self._fetch_vectors(list(_CPI_VECTORS_BY_PROVINCE.values()))
-        by_province: dict[str, float] = {}
-        periods: set[str] = set()
-        for row in data:
-            vector_id = row.get("object", {}).get("vectorId")
-            province_code = vector_to_province.get(vector_id)
-            if province_code is None:
-                logger.warning("statcan_cpi_unrecognized_vector_in_response", vector_id=vector_id)
-                continue
-            point = self._latest_point(row)
-            if point is None:
-                logger.warning("statcan_cpi_missing_province", province=province_code)
-                continue
-            by_province[province_code] = self._scaled_value(point)
-            periods.add(point["refPer"])
-        if not by_province:
-            return None
-        if len(periods) > 1:
-            logger.warning("statcan_cpi_period_mismatch_across_provinces", periods=sorted(periods))
-        return {
-            "value": by_province,
-            "reference_period": max(periods),
-            "released": None,
         }
 
     @staticmethod
