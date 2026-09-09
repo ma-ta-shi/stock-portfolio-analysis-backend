@@ -113,6 +113,7 @@ US_CHAINS: dict[str, list[str]] = {
     "get_news": ["finnhub"],
     "get_analyst_recommendation_trends": ["finnhub"],
     "get_ratios_ttm": ["fmp"],  # not on the ABC — carried forward from us_equity.py
+    "get_filings": [],  # no US equivalent in this ticket's scope (86bbpggr5); empty chain
 }
 
 CA_CHAINS: dict[str, list[str]] = {
@@ -141,6 +142,7 @@ CA_CHAINS: dict[str, list[str]] = {
     "get_news": ["openbb_tmx"],
     "get_analyst_recommendation_trends": ["yfinance_news"],
     "get_ratios_ttm": [],  # no CA equivalent — empty chain resolves to {} via _try_chain
+    "get_filings": ["openbb_tmx"],  # 86bbpggr5 — TMX is the only source
 }
 
 
@@ -299,6 +301,15 @@ class Router(StockDataProvider, NewsProvider):
         from us_equity.py. No CA equivalent; empty chain on the CA branch."""
         result, _ = await self._try_chain("get_ratios_ttm", ticker)
         return result if not _is_empty(result) else {}
+
+    async def get_filings(self, ticker: str, limit: int = 20) -> list[dict]:
+        """Not on StockDataProvider — new capability (86bbpggr5), CA-only.
+        No US equivalent in scope; empty chain on the US branch. Distinct
+        from edgartools' Company.get_filings(form=...) despite the shared
+        name — different object, different signature (SEC EDGAR
+        form-filtered filings vs. TMX's own CA regulatory-filings feed)."""
+        result, _ = await self._try_chain("get_filings", ticker, limit)
+        return result if not _is_empty(result) else []
 
     # ---------- NewsProvider ----------
 

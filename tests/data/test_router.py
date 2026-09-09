@@ -416,6 +416,25 @@ async def test_get_ratios_ttm_ca_returns_empty_without_fmp():
     assert await router.get_ratios_ttm("SHOP.TO") == {}
 
 
+# --- get_filings: CA-only new capability (86bbpggr5), no US equivalent ---
+
+
+async def test_get_filings_ca_calls_openbb_tmx():
+    router = Router(
+        ticker="RY.TO",
+        openbb_tmx=FakeProvider(get_filings=_ok([{"report_type": "MD&A"}])),
+        yfinance_news=FakeProvider(),
+    )
+    assert await router.get_filings("RY.TO") == [{"report_type": "MD&A"}]
+
+
+async def test_get_filings_us_returns_empty_no_chain():
+    router = Router(
+        ticker="AAPL", fmp=FakeProvider(), edgartools=FakeProvider(), finnhub=FakeProvider()
+    )
+    assert await router.get_filings("AAPL") == []
+
+
 # --- CA get_analyst_recommendation_trends routes to the yfinance news class ---
 
 
@@ -478,6 +497,7 @@ _METHOD_ARGS: dict[str, tuple] = {
     "get_news": ("AAPL", 7),
     "get_analyst_recommendation_trends": ("AAPL",),
     "get_ratios_ttm": ("AAPL",),
+    "get_filings": ("AAPL", 20),
 }
 
 _METHOD_EMPTY_TYPE: dict[str, type] = {
@@ -495,6 +515,7 @@ _METHOD_EMPTY_TYPE: dict[str, type] = {
     "get_news": list,
     "get_analyst_recommendation_trends": list,
     "get_ratios_ttm": dict,
+    "get_filings": list,
 }
 
 # Recent timestamp column so get_financials samples are a correct_alignment no-op.
@@ -513,6 +534,7 @@ _METHOD_SAMPLE_VALUE: dict[str, object] = {
     "get_news": [{"headline": "x"}],
     "get_analyst_recommendation_trends": [{"period": "0m"}],
     "get_ratios_ttm": {"pe": 10},
+    "get_filings": [{"filing_date": "2026-08-01", "report_type": "MD&A"}],
 }
 
 _US_BRANCH_KEYS = ["fmp", "edgartools", "finnhub"]
@@ -628,3 +650,5 @@ def test_every_stockdataprovider_and_newsprovider_method_has_both_chains():
         assert method in CA_CHAINS, f"{method} missing from CA_CHAINS"
     assert "get_ratios_ttm" in US_CHAINS
     assert "get_ratios_ttm" in CA_CHAINS
+    assert "get_filings" in US_CHAINS
+    assert "get_filings" in CA_CHAINS

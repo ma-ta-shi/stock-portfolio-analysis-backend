@@ -37,7 +37,9 @@ import asyncio
 from datetime import datetime, timedelta
 
 import pandas as pd
+import structlog
 from openbb import obb
+from openbb_core.app.model.abstract.error import OpenBBError
 from data.providers.base import (
     StockDataProvider,
     NewsProvider,
@@ -45,6 +47,8 @@ from data.providers.base import (
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
 )
+
+logger = structlog.get_logger(__name__)
 
 
 class OpenBBTMXProvider(StockDataProvider, NewsProvider):
@@ -247,11 +251,128 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         return [
             NormalizedDividendRecord(
                 ex_date=str(row["ex_dividend_date"]),
-                payment_date=str(row["payment_date"]) if pd.notna(row.get("payment_date")) else None,
+                payment_date=str(row["payment_date"])
+                if pd.notna(row.get("payment_date"))
+                else None,
                 amount_per_share=float(row["amount"]),
             )
             for row in df.loc[mask].to_dict("records")
         ]
+
+    # ---------- Not on any ABC — new capability (86bbpggr5) ----------
+
+    _MATERIAL_FILING_TYPES = frozenset(
+        {
+            "Annual information form",
+            "Management information circular",
+            "MD&A",
+            "Interim financial statements/report",
+            "Audited annual financial statements",
+            "Annual report",
+            "Material change report",
+        }
+    )
+
+    _FALLBACK_LOOKBACK_DAYS = 400
+
+    async def get_filings(self, ticker: str, limit: int = 20) -> list[dict]:
+        """New capability (86bbpggr5) — not on StockDataProvider/NewsProvider,
+        same pattern as get_quote/get_ratios_ttm in router.py. No US
+        equivalent; router.py's US_CHAINS carries an explicit [] entry.
+
+        Distinct from edgartools.py's Company.get_filings(form=...,
+        amendments=...) despite the shared method name — that's an
+        edgartools object method for SEC EDGAR form-filtered filings
+        (used by ca_crosslisting.py/edgartools.py); this is TMX's own CA
+        regulatory-filings feed. No behavioral overlap.
+
+        Materiality filter: TMX's report_type vocabulary is fixed/bounded
+        (confirmed live), heavily dominated by prospectus/consent-letter/
+        AGM-administrative noise. Filtered via an explicit KEEP allowlist
+        of exact strings, not substring matching — the keep and drop
+        vocabularies share words ("Material change report" vs. "Other
+        material contract(s)"), so no single safe keyword exists.
+        "Other material contract(s)" is excluded (a disclosure-threshold
+        legal term, not analytical content; episodic). "News release" is
+        excluded (already covered by get_news(); would let PR cadence,
+        not regulatory cadence, drive latest_filing_age_days in 86ban0x1u).
+        An unseen report_type is excluded by default — a visible "no
+        material filing this window" gap, not a silent false positive.
+
+        Two-tier fetch: TMX's default (no date params) window was observed
+        live as ~16 weeks (not a documented API guarantee, just what one
+        live pull returned) — cheap, and normally sufficient since MD&A/
+        interim financials recur ~quarterly regardless of the exact window
+        size. AIF/circular/material change report are annual/event-driven
+        (confirmed: RY's AIF appeared exactly 3x across 3.75 years), so
+        only retry with an explicit ~400-day start_date if tier 1 finds
+        zero material rows — this trigger only depends on "zero material
+        rows found," not on knowing the exact tier-1 window size.
+
+        `limit` is applied client-side only — confirmed live the tmx
+        provider silently ignores an API-level limit= (swallowed into
+        **kwargs, no effect on row count).
+        """
+        bare_symbol = ticker.removesuffix(".TO").removesuffix(".V").replace("-", ".")
+
+        async def _fetch(**kwargs) -> pd.DataFrame:
+            # Confirmed live (SU.TO, a mapped watchlist ticker): a single
+            # filing row with a null `description` fails Pydantic
+            # validation for the WHOLE batch inside openbb-tmx's own model
+            # (TmxCompanyFilingsData), raising OpenBBError before a result
+            # object even comes back — this is not the already-handled
+            # "genuinely empty result" OpenBBError seen in
+            # get_analyst_ratings above, it's a data-quality defect in one
+            # row poisoning the entire response. Treated as "no usable data
+            # from this call," which flows into the two-tier retry below
+            # the same as a clean empty result would. Logged (this file
+            # otherwise has no structlog usage — every other defensive
+            # workaround here is silent) because unlike those, this one
+            # can't be distinguished from "TMX API genuinely degraded" by
+            # its symptoms alone; losing that signal entirely if this ever
+            # spreads past the one confirmed ticker isn't worth the noise
+            # avoided by staying silent.
+            try:
+                result = await asyncio.to_thread(
+                    obb.equity.fundamental.filings,
+                    symbol=bare_symbol,
+                    provider=self.PROVIDER,
+                    **kwargs,
+                )
+            except OpenBBError as e:
+                logger.warning(
+                    "get_filings_openbb_error", ticker=ticker, symbol=bare_symbol, error=str(e)
+                )
+                return pd.DataFrame()
+            if not result.results:
+                return pd.DataFrame()
+            return result.to_df()
+
+        df = await _fetch()
+        material = self._filter_material_filings(df)
+
+        if material.empty:
+            wide_start = (datetime.now() - timedelta(days=self._FALLBACK_LOOKBACK_DAYS)).strftime(
+                "%Y-%m-%d"
+            )
+            df = await _fetch(start_date=wide_start)
+            material = self._filter_material_filings(df)
+
+        if material.empty:
+            return []
+
+        sort_key = pd.to_datetime(material["filing_date"])
+        material = (
+            material.assign(_sort_key=sort_key)
+            .sort_values("_sort_key", ascending=False)
+            .drop(columns="_sort_key")
+        )
+        return material.head(limit).to_dict("records")
+
+    def _filter_material_filings(self, df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty or "report_type" not in df.columns:
+            return pd.DataFrame()
+        return df[df["report_type"].isin(self._MATERIAL_FILING_TYPES)]
 
     # ---------- NewsProvider ----------
 

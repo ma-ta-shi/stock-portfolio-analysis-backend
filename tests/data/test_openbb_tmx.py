@@ -2,8 +2,10 @@ import asyncio
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock
 from data.providers.openbb_tmx import OpenBBTMXProvider
+from openbb_core.app.model.abstract.error import OpenBBError
 import pandas as pd
 import pytest
+import structlog
 
 
 # ---------- Helpers ----------
@@ -319,6 +321,240 @@ async def test_get_dividend_history_empty_results_returns_empty_list(provider, m
         ticker="ZZZZ", from_date="2023-01-01", to_date="2023-12-31"
     )
     assert result == []
+
+
+# ---------- get_filings ----------
+
+
+def _filings_df(rows: list[dict]) -> pd.DataFrame:
+    return (
+        pd.DataFrame(rows)
+        if rows
+        else pd.DataFrame(columns=["filing_date", "report_type", "report_url", "description"])
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_filings_calls_filings_endpoint_without_limit_kwarg(provider, mock_obb):
+    """limit is dead at the API level (confirmed live, silently swallowed
+    into **kwargs) — must never be forwarded as an API kwarg."""
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(
+        _filings_df(
+            [
+                {
+                    "filing_date": "2026-08-01",
+                    "report_type": "MD&A",
+                    "report_url": "u",
+                    "description": "d",
+                }
+            ]
+        )
+    )
+    await provider.get_filings(ticker="RY.TO", limit=5)
+    _, kwargs = mock_obb.equity.fundamental.filings.call_args
+    assert kwargs["symbol"] == "RY"
+    assert kwargs["provider"] == "tmx"
+    assert "limit" not in kwargs
+
+
+@pytest.mark.asyncio
+async def test_get_filings_converts_hyphenated_class_suffix_to_tmx_dot_form(provider, mock_obb):
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(
+        _filings_df(
+            [
+                {
+                    "filing_date": "2026-08-01",
+                    "report_type": "MD&A",
+                    "report_url": "u",
+                    "description": "d",
+                }
+            ]
+        )
+    )
+    await provider.get_filings(ticker="RCI-B.TO")
+    _, kwargs = mock_obb.equity.fundamental.filings.call_args
+    assert kwargs["symbol"] == "RCI.B"
+
+
+@pytest.mark.asyncio
+async def test_get_filings_filters_out_noise_report_types(provider, mock_obb):
+    rows = [
+        {
+            "filing_date": "2026-08-01",
+            "report_type": "MD&A",
+            "report_url": "u1",
+            "description": "d1",
+        },
+        {
+            "filing_date": "2026-07-15",
+            "report_type": "Final short form prospectus",
+            "report_url": "u2",
+            "description": "d2",
+        },
+        {
+            "filing_date": "2026-07-10",
+            "report_type": "Other material contract(s)",
+            "report_url": "u3",
+            "description": "d3",
+        },
+        {
+            "filing_date": "2026-07-05",
+            "report_type": "News release",
+            "report_url": "u4",
+            "description": "d4",
+        },
+    ]
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(_filings_df(rows))
+    result = await provider.get_filings(ticker="RY.TO")
+    assert len(result) == 1
+    assert result[0]["report_type"] == "MD&A"
+
+
+@pytest.mark.asyncio
+async def test_get_filings_sorts_newest_first_and_keeps_report_url(provider, mock_obb):
+    rows = [
+        {
+            "filing_date": "2026-01-01",
+            "report_type": "Annual report",
+            "report_url": "u_old",
+            "description": "old",
+        },
+        {
+            "filing_date": "2026-08-01",
+            "report_type": "MD&A",
+            "report_url": "u_new",
+            "description": "new",
+        },
+    ]
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(_filings_df(rows))
+    result = await provider.get_filings(ticker="RY.TO")
+    assert result[0]["description"] == "new"
+    assert result[0]["report_url"] == "u_new"
+    assert result[1]["description"] == "old"
+
+
+@pytest.mark.asyncio
+async def test_get_filings_applies_client_side_limit(provider, mock_obb):
+    rows = [
+        {
+            "filing_date": f"2026-0{i}-01",
+            "report_type": "MD&A",
+            "report_url": f"u{i}",
+            "description": f"d{i}",
+        }
+        for i in range(1, 5)
+    ]
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(_filings_df(rows))
+    result = await provider.get_filings(ticker="RY.TO", limit=2)
+    assert len(result) == 2
+
+
+@pytest.mark.asyncio
+async def test_get_filings_retries_with_wide_window_when_narrow_window_has_no_material_rows(
+    provider, mock_obb
+):
+    """Two-tier fetch: tier 1 (no date params) has only noise, tier 2
+    (explicit start_date) finds a material row further back."""
+    narrow = make_obb_result(
+        _filings_df(
+            [
+                {
+                    "filing_date": "2026-08-01",
+                    "report_type": "News release",
+                    "report_url": "u1",
+                    "description": "d1",
+                }
+            ]
+        )
+    )
+    wide = make_obb_result(
+        _filings_df(
+            [
+                {
+                    "filing_date": "2025-11-01",
+                    "report_type": "Annual information form",
+                    "report_url": "u2",
+                    "description": "d2",
+                }
+            ]
+        )
+    )
+    mock_obb.equity.fundamental.filings.side_effect = [narrow, wide]
+    result = await provider.get_filings(ticker="RY.TO")
+    assert len(result) == 1
+    assert result[0]["report_type"] == "Annual information form"
+    assert mock_obb.equity.fundamental.filings.call_count == 2
+    _, first_kwargs = mock_obb.equity.fundamental.filings.call_args_list[0]
+    assert "start_date" not in first_kwargs
+    _, second_kwargs = mock_obb.equity.fundamental.filings.call_args_list[1]
+    assert "start_date" in second_kwargs
+
+
+@pytest.mark.asyncio
+async def test_get_filings_does_not_retry_when_narrow_window_has_material_rows(provider, mock_obb):
+    """Cost-avoidance check — confirms the cheap default path is not
+    followed by a wasted second call when it already found something."""
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(
+        _filings_df(
+            [
+                {
+                    "filing_date": "2026-08-01",
+                    "report_type": "MD&A",
+                    "report_url": "u",
+                    "description": "d",
+                }
+            ]
+        )
+    )
+    await provider.get_filings(ticker="RY.TO")
+    assert mock_obb.equity.fundamental.filings.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_filings_both_tiers_empty_returns_empty_list(provider, mock_obb):
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(_filings_df([]))
+    result = await provider.get_filings(ticker="ZZZZ.TO")
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_get_filings_survives_malformed_row_raising_openbb_error(provider, mock_obb):
+    """Confirmed live (SU.TO, a mapped watchlist ticker): a single filing
+    row with a null `description` fails Pydantic validation for the WHOLE
+    batch inside openbb-tmx's own model, raising OpenBBError before a
+    result object even comes back — must degrade to empty, not crash, and
+    still fall through to the tier-2 retry rather than short-circuiting."""
+    mock_obb.equity.fundamental.filings.side_effect = [
+        OpenBBError("1 validations error(s)"),
+        make_obb_result(
+            _filings_df(
+                [
+                    {
+                        "filing_date": "2026-08-01",
+                        "report_type": "MD&A",
+                        "report_url": "u",
+                        "description": "d",
+                    }
+                ]
+            )
+        ),
+    ]
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_filings(ticker="SU.TO")
+    assert result == [
+        {"filing_date": "2026-08-01", "report_type": "MD&A", "report_url": "u", "description": "d"}
+    ]
+    assert mock_obb.equity.fundamental.filings.call_count == 2
+    assert any(log["event"] == "get_filings_openbb_error" for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_get_filings_both_tiers_raising_openbb_error_returns_empty_list(provider, mock_obb):
+    mock_obb.equity.fundamental.filings.side_effect = OpenBBError("1 validations error(s)")
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_filings(ticker="SU.TO")
+    assert result == []
+    assert sum(1 for log in logs if log["event"] == "get_filings_openbb_error") == 2
 
 
 # ---------- get_analyst_estimates / get_analyst_ratings / get_earnings_surprises ----------
