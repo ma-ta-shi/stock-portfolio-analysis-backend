@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from data.precompute.technicals import _ta_result, compute_all
+from data.precompute.technicals import _rsi_zone_adjusted, _ta_result, compute_all
 
 _AS_OF = pd.Timestamp("2026-08-16").date()
 
@@ -105,6 +105,43 @@ class TestMovingAverages:
         assert ind["sma_20"] is None
         assert ind["ema_12"] is None
 
+    def test_sma_200_slope_populates_with_long_history(self):
+        """The prompt renders Slope200={sma_200_slope}; before this producer
+        existed it was always N/A even on a full history."""
+        df = _ohlcv(260, trend_total=40)
+        ind = compute_all(df, df, None, None, None, as_of=_AS_OF)["technical_indicators"]
+        assert ind["sma_200_slope"] in ("rising", "falling", "flat")
+        assert ind["sma_50_slope"] in ("rising", "falling", "flat")
+
+    def test_sma_200_slope_none_while_sma_50_slope_still_populates(self):
+        """The asymmetry this fix is about: with 60 bars the 50-day slope
+        resolves and the 200-day cannot. Both must degrade independently,
+        not crash and not silently share a value."""
+        df = _ohlcv(60, trend_total=15)
+        ind = compute_all(df, df, None, None, None, as_of=_AS_OF)["technical_indicators"]
+        assert ind["sma_50_slope"] in ("rising", "falling", "flat")
+        assert ind["sma_200_slope"] is None
+
+    def test_sma_200_slope_needs_five_bars_past_the_sma_itself(self):
+        """_slope_label needs lookback+1 non-NaN points, so sma_200 can be
+        present while sma_200_slope is still None (200 bars -> SMA, 205 ->
+        slope). Guards the boundary, not just the far ends."""
+        df = _ohlcv(202, trend_total=20)
+        ind = compute_all(df, df, None, None, None, as_of=_AS_OF)["technical_indicators"]
+        assert ind["sma_200"] is not None
+        assert ind["sma_200_slope"] is None
+
+    def test_primary_trend_alias_key_is_gone(self):
+        """Regression: `primary_trend` was a verbatim alias of `stack_order`
+        in the payload and collided with the Technical agent's own
+        `primary_trend` output field, which uses a different vocabulary.
+        The consumer (rsi_zone_adjusted) reads `stack_order` directly now."""
+        df = _ohlcv(250, trend_total=30)
+        ind = compute_all(df, df, None, None, None, as_of=_AS_OF)["technical_indicators"]
+        assert "primary_trend" not in ind
+        assert ind["stack_order"] in ("bullish", "bearish", "mixed")
+        assert ind["rsi_zone_adjusted"] in ("overbought", "oversold", "neutral", None)
+
 
 # ---------- momentum ----------
 
@@ -127,21 +164,57 @@ class TestMomentum:
         assert ind["macd_recent_cross"] is None
 
 
+class TestRsiZoneAdjusted:
+    """Characterization tests. These pin CURRENT behaviour, including the
+    known gap flagged in the module: the Technical prompt's Design Decision
+    #5 says "80/40 in uptrends, 60/20 in downtrends" and is silent on
+    `mixed`, and the code gives `mixed` the downtrend thresholds. If that
+    is later decided to be wrong, test_mixed_* below should fail loudly."""
+
+    def test_none_rsi_returns_none(self):
+        assert _rsi_zone_adjusted(None, "bullish") is None
+
+    def test_bullish_uses_80_40_band(self):
+        assert _rsi_zone_adjusted(75.0, "bullish") == "neutral"
+        assert _rsi_zone_adjusted(85.0, "bullish") == "overbought"
+        assert _rsi_zone_adjusted(35.0, "bullish") == "oversold"
+
+    def test_bearish_uses_60_20_band(self):
+        assert _rsi_zone_adjusted(65.0, "bearish") == "overbought"
+        assert _rsi_zone_adjusted(15.0, "bearish") == "oversold"
+
+    def test_mixed_is_currently_treated_as_a_downtrend(self):
+        # The known gap: mixed falls through to the 60/20 band, identical to
+        # bearish. RSI 70 is "neutral" under uptrend rules but "overbought"
+        # here. If mixed is later given its own band, this fails on purpose.
+        assert _rsi_zone_adjusted(70.0, "mixed") == "overbought"
+        for rsi in (25.0, 55.0, 70.0):
+            assert _rsi_zone_adjusted(rsi, "mixed") == _rsi_zone_adjusted(rsi, "bearish")
+
+
 # ---------- volume ----------
 
 
-def test_volume_ratio_computed_with_enough_bars():
+def test_volume_block_computed_with_enough_bars():
     df = _ohlcv(30)
-    result = compute_all(df, df, None, None, None, as_of=_AS_OF)
-    ind = result["technical_indicators"]
+    ind = compute_all(df, df, None, None, None, as_of=_AS_OF)["technical_indicators"]
     assert ind["volume_avg_20"] is not None
     assert ind["volume_ratio_today"] is not None
+    # volume_today: the prompt renders `Today vol={volume_today}` and had no
+    # producer, so the model was citing "today vol=N/A" as evidence.
+    assert ind["volume_today"] is not None
+    assert ind["volume_today"] > 0
 
 
-def test_volume_ratio_none_below_20_bars():
+def test_volume_block_shape_consistent_below_20_bars():
     df = _ohlcv(10)
-    result = compute_all(df, df, None, None, None, as_of=_AS_OF)
-    assert result["technical_indicators"]["volume_ratio_today"] is None
+    ind = compute_all(df, df, None, None, None, as_of=_AS_OF)["technical_indicators"]
+    assert ind["volume_ratio_today"] is None
+    assert ind["volume_avg_20"] is None
+    # volume_today must be present-and-None on the degraded path, not absent,
+    # so the payload template renders it consistently.
+    assert "volume_today" in ind
+    assert ind["volume_today"] is None
 
 
 # ---------- Bollinger / squeeze ----------

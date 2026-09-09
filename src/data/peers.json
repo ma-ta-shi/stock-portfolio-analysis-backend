@@ -1,1 +1,11 @@
-{}
+{
+  "RY.TO": ["TD.TO", "BNS.TO", "BMO.TO"],
+  "T.TO": ["BCE.TO", "RCI-B.TO"],
+  "ENB.TO": ["TRP.TO", "PPL.TO"],
+  "CNQ.TO": ["SU.TO", "CVE.TO", "IMO.TO"],
+  "SU.TO": ["CNQ.TO", "CVE.TO", "IMO.TO"],
+  "FM.TO": ["LUN.TO", "TECK-B.TO", "HBM.TO"],
+  "REI-UN.TO": ["SRU-UN.TO", "FCR-UN.TO", "CRT-UN.TO"],
+  "WELL.TO": ["EXE.TO", "SIA.TO", "AIDX.TO"],
+  "SHOP.TO": ["XYZ", "WIX", "GDDY"]
+}

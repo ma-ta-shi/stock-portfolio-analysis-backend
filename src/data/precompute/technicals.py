@@ -269,8 +269,14 @@ def _moving_averages(df: pd.DataFrame) -> dict:
         "ema_12": round(e12, 4) if e12 is not None else None,
         "ema_26": round(e26, 4) if e26 is not None else None,
         "stack_order": stack_order,
-        "primary_trend": stack_order,  # same signal, referenced by name elsewhere (rsi_zone_adjusted)
+        # `primary_trend` key removed 2026-08-30: it was a verbatim alias of `stack_order`,
+        # consumed in exactly one place (_momentum -> _rsi_zone_adjusted) and never rendered.
+        # Having two keys with the same value under different names collided with the LLM's
+        # own `primary_trend` output field, which used a different vocabulary entirely.
         "sma_50_slope": _slope_label(sma50) if sma50 is not None else None,
+        # Added 2026-08-30: the prompt renders Slope200={sma_200_slope} and only the
+        # 50 had a producer, so Slope200 was always N/A. Mirrors sma_50_slope exactly.
+        "sma_200_slope": _slope_label(sma200) if sma200 is not None else None,
         "price_vs_sma20_pct": _price_vs(s20),
         "price_vs_sma50_pct": _price_vs(s50),
         "price_vs_sma200_pct": _price_vs(s200),
@@ -310,10 +316,16 @@ def _divergence(close: pd.Series, rsi: pd.Series, lookback: int = 20) -> str | N
     return "none"
 
 
-def _rsi_zone_adjusted(rsi14: float | None, primary_trend: str | None) -> str | None:
+def _rsi_zone_adjusted(rsi14: float | None, stack_order: str | None) -> str | None:
     if rsi14 is None or pd.isna(rsi14):
         return None
-    uptrend = primary_trend == "bullish"
+    # NOTE (2026-08-30): only stack_order == "bullish" gets the 80/40 thresholds —
+    # both "bearish" AND "mixed" fall through to 60/20. The Technical prompt's Design
+    # Decision #5 specifies "80/40 in uptrends and 60/20 in downtrends" and is silent
+    # on mixed, so mixed silently receives downtrend treatment. No effect at RSI ~57,
+    # but it changes the classification in the 62-79 band. Decide the intended
+    # behaviour before relying on this. Ticket 86ban0wde / 86bbuqd8m comment.
+    uptrend = stack_order == "bullish"
     if uptrend:
         if rsi14 > 80:
             return "overbought"
@@ -327,7 +339,7 @@ def _rsi_zone_adjusted(rsi14: float | None, primary_trend: str | None) -> str | 
     return "neutral"
 
 
-def _momentum(df: pd.DataFrame, primary_trend: str | None) -> dict:
+def _momentum(df: pd.DataFrame, stack_order: str | None) -> dict:
     close = df["close"]
     rsi14 = _ta_result(df, df.ta.rsi(length=14))
     macd = _ta_result(df, df.ta.macd(fast=12, slow=26, signal=9))
@@ -346,7 +358,7 @@ def _momentum(df: pd.DataFrame, primary_trend: str | None) -> dict:
 
     return {
         "rsi_14": round(rsi_last, 2) if rsi_last is not None else None,
-        "rsi_zone_adjusted": _rsi_zone_adjusted(rsi_last, primary_trend),
+        "rsi_zone_adjusted": _rsi_zone_adjusted(rsi_last, stack_order),
         "macd_line": round(line_last, 4) if line_last is not None else None,
         "macd_signal": round(signal_last, 4) if signal_last is not None else None,
         "macd_histogram": round(hist_last, 4) if hist_last is not None else None,
@@ -363,13 +375,17 @@ def _momentum(df: pd.DataFrame, primary_trend: str | None) -> dict:
 def _volume(df: pd.DataFrame) -> dict:
     volume = df["volume"]
     if len(volume.dropna()) < 20:
-        return {"volume_avg_20": None, "volume_ratio_today": None}
+        return {"volume_avg_20": None, "volume_ratio_today": None, "volume_today": None}
     avg20 = volume.rolling(20).mean().iloc[-1]
     today = volume.iloc[-1]
     ratio = round(today / avg20, 2) if avg20 else None
     return {
         "volume_avg_20": round(avg20, 0) if pd.notna(avg20) else None,
         "volume_ratio_today": ratio,
+        # Exposed 2026-08-30: the prompt's VOL block renders {volume_today} and had no
+        # producer, so it always printed N/A -- and the model cited "today vol=N/A"
+        # as evidence. The value was already being read here to compute the ratio.
+        "volume_today": round(today, 0) if pd.notna(today) else None,
     }
 
 
@@ -545,6 +561,13 @@ def _support_resistance(df: pd.DataFrame, atr14: float | None) -> dict:
 
 
 def _swing_structure(df: pd.DataFrame, window: int = 20) -> str | None:
+    # POSSIBLE GAP (2026-08-30 / 86bbuqd8m): observed returning None on the
+    # WEEKLY-resampled series for RY.TO (a low-volatility large-cap) while the
+    # daily series resolved -> "LL", so trend_structure_weekly rendered N/A for
+    # that name. NOT universal: a synthetic ~180-week trending series does
+    # resolve (-> "LH"), so this looks volatility-dependent rather than a hard
+    # break — _ZIGZAG_DEVIATION (0.03) may rarely trigger on quiet weekly bars.
+    # Left as-is here; needs a live multi-ticker check before deciding a fix.
     if len(df) < window:
         return None
     # Hard precondition, not a try/except: confirmed live that pandas-ta's
@@ -863,7 +886,7 @@ def compute_all(
         }
 
     ma = _moving_averages(df)
-    momentum = _momentum(df, ma["primary_trend"])
+    momentum = _momentum(df, ma["stack_order"])
     volume = _volume(df)
     bollinger = _bollinger(df)
     volatility = _volatility(df)

@@ -10,3 +10,8 @@ __pycache__/
 .ruff_cache/
 *.db
 *.sqlite
+
+# 2026-09 prompt audit rigs, caches and logs. Reference material, never shipped.
+# See _audit/README.md. Kept out of git deliberately: throwaway measurement
+# scaffolding, live provider data in the caches, and ~40MB of run logs.
+_audit/
