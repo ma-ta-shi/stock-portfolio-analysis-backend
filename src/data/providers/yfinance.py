@@ -35,6 +35,11 @@ MAPPING = {
 _INCOME_ROWS = {
     "revenue": "Total Revenue",
     "net_income": "Net Income",
+    # Net income attributable to common shareholders (after preferred dividends).
+    # For preferred-heavy names (banks, insurers) this runs 2-8% below "Net Income";
+    # it's the correct denominator for a per-common-share P/E. Genuinely absent for
+    # some filers -> a normal None, and fundamentals.py falls back to net_income.
+    "net_income_common": "Net Income Common Stockholders",
     "eps": "Diluted EPS",
     "operating_income": "Operating Income",
     "interest_expense": "Interest Expense",
@@ -152,6 +157,14 @@ class YFinanceDataProvider(StockDataProvider):
                 row[field] = _extract_row(income, label, column)
             for field, label in _CASHFLOW_ROWS.items():
                 row[field] = _extract_row(cashflow, label, column)
+            # yfinance materialises a column for the newest period as soon as the
+            # filing is docketed, before the actual statement data lands — an
+            # all-None placeholder that _ttm()/_cagr() would otherwise poison the
+            # whole trailing window with. Drop any period carrying neither revenue
+            # nor net income (eps alone being None is normal for CA filers, so it
+            # isn't part of the sentinel).
+            if row["revenue"] is None and row["net_income"] is None:
+                continue
             periods.append(row)
         return periods
 
@@ -167,7 +180,19 @@ class YFinanceDataProvider(StockDataProvider):
         balance = correct_alignment(await self.get_financials(ticker, "balance", "quarterly"))
         balance_sheet: dict = {}
         if not balance.empty:
-            latest_column = balance.columns[0]
+            # Same recent-filer lag as _periods(): the newest balance-sheet column
+            # can be an all-None placeholder while the data is still landing (seen
+            # on recent CA filers). Take the newest column that actually has
+            # equity or assets, not blindly columns[0].
+            latest_column = next(
+                (
+                    c
+                    for c in balance.columns
+                    if _extract_row(balance, _BALANCE_ROWS["total_equity"], c) is not None
+                    or _extract_row(balance, _BALANCE_ROWS["total_assets"], c) is not None
+                ),
+                balance.columns[0],
+            )
             for field, label in _BALANCE_ROWS.items():
                 balance_sheet[field] = _extract_row(balance, label, latest_column)
 
@@ -176,10 +201,18 @@ class YFinanceDataProvider(StockDataProvider):
             quarters=quarters,
             annual=annual,
             balance_sheet=balance_sheet,
-            # .get("currency") or "" — same real bug pattern found and fixed
-            # elsewhere this sweep: .get(key, "") only guards a missing key,
-            # not an explicit None value.
-            currency=info.get("currency") or "",
+            # financialCurrency, NOT currency: for a Canadian-listed company that
+            # reports in USD (ATD.TO, NTR.TO, QSR.TO, AEM.TO, BN.TO, CSU.TO, ...)
+            # yfinance gives currency="CAD" (the trading currency) while the
+            # statement line items are actually in USD. The accurate label lets
+            # compute_all() detect the CAD-quote / USD-statement mismatch and flag
+            # the FX-distorted valuation multiples (P/E, P/S, EV/EBITDA — mcap in
+            # CAD over earnings in USD, off by the CAD/USD rate ~1.37). FX-aware
+            # reconciliation is ClickUp 86bbxucf0; for now the numbers still flow,
+            # marked. Fall back to currency when financialCurrency is absent.
+            # .get(key) or "" (not .get(key, "")) — yfinance can hold an explicit
+            # None here, not just omit the key.
+            currency=info.get("financialCurrency") or info.get("currency") or "",
         )
 
     async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo:
