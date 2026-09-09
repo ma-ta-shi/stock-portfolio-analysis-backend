@@ -176,9 +176,25 @@ def _ev_ebitda(fin: NormalizedFinancials, price_info: NormalizedQuote) -> float 
     return enterprise_value / ebitda
 
 
+_PEG_MAX_GROWTH = 1.0  # 100% YoY EPS growth
+
+
 def _peg(pe_ratio: float | None, eps_growth_yoy: float | None) -> float | None:
-    """PEG undefined for negative/zero growth."""
-    if pe_ratio is None or not eps_growth_yoy or eps_growth_yoy <= 0:
+    """PEG undefined for negative/zero growth, and meaningless when the YoY
+    rate is a base-year artifact (a prior-year EPS near zero — an impairment
+    year, a cyclical trough) rather than a sustainable rate: that produces a
+    multi-hundred-percent "growth" and collapses PEG toward zero. Cap at
+    _PEG_MAX_GROWTH — above it the denominator isn't the growth PEG is meant
+    to normalise against. First-pass bound, same disclosure convention as
+    _PEER_METRIC_VALID_RANGE. Guarding eps_growth_yoy itself (and
+    revenue_growth_yoy) in compute_growth_metrics is a separate, pre-existing
+    concern this doesn't try to solve."""
+    if (
+        pe_ratio is None
+        or not eps_growth_yoy
+        or eps_growth_yoy <= 0
+        or eps_growth_yoy > _PEG_MAX_GROWTH
+    ):
         return None
     return pe_ratio / (eps_growth_yoy * 100)
 
@@ -215,10 +231,17 @@ def _net_margin(quarter: dict) -> float | None:
     return net_income / revenue
 
 
-def _dividend_type(dividend_history: list[NormalizedDividendRecord]) -> str:
-    """Flags special/irregular payouts so the agent doesn't treat them as
-    sustainable yield. Assumes newest-last (ascending) ordering — callers
-    must sort first, see compute_dividend_info()."""
+def _dividend_regularity(dividend_history: list[NormalizedDividendRecord]) -> str:
+    """Classifies payout *regularity* ("regular" | "irregular" | "none") so the
+    agent doesn't treat a lumpy/special-heavy history as sustainable yield.
+
+    Named for what it measures: this is NOT the dividend's tax character
+    (eligible Canadian / US-qualified / foreign / return-of-capital) — that
+    classification has no provider source and is security-tax-classification.py's
+    job. The Fundamental prompt's DIV block reads this as {dividend_regularity}.
+
+    Assumes newest-last (ascending) ordering — callers must sort first, see
+    compute_dividend_info()."""
     if not dividend_history:
         return "none"
     amounts = [d["amount_per_share"] for d in dividend_history[-8:]]  # ~2yrs quarterly
@@ -364,9 +387,24 @@ def compute_valuation_metrics(
     analyst_estimates: NormalizedAnalystEstimates | None = None,
 ) -> dict:
     current_price = price_info.get("current_price")
+    market_cap = price_info.get("market_cap")
 
     ttm_eps = _ttm(fin.quarters, "eps")
     pe_ratio = current_price / ttm_eps if current_price is not None and ttm_eps else None
+    if pe_ratio is None:
+        # yfinance's per-quarter Diluted EPS is sporadically NaN for essentially
+        # every Canadian filer, so _ttm("eps") is None sector-wide. price / EPS
+        # is identically market_cap / net income to common, and net income is
+        # reliably present per quarter. Income to common (not total) because P/E
+        # is a per-common-share metric: this tracks .info trailingPE within ~2%
+        # for preferred-heavy names where total net income runs 5-9% low. Falls
+        # back to total net_income for filers that don't disclose the common
+        # split (identical for names with no preferred). A real TTM loss leaves
+        # pe_ratio None, same as a negative real-EPS P/E. compute_peer_comparison
+        # runs this per peer, so sector_median_pe is derived the same way.
+        ttm_ni = _ttm(fin.quarters, "net_income_common") or _ttm(fin.quarters, "net_income")
+        if ttm_ni is not None and ttm_ni > 0 and market_cap is not None:
+            pe_ratio = market_cap / ttm_ni
 
     shares_outstanding = fin.quarters[0].get("shares_outstanding") if fin.quarters else None
     total_equity = fin.balance_sheet.get("total_equity")
@@ -375,7 +413,6 @@ def compute_valuation_metrics(
         book_value_per_share = total_equity / shares_outstanding
         pb_ratio = current_price / book_value_per_share if book_value_per_share else None
 
-    market_cap = price_info.get("market_cap")
     ttm_revenue = _ttm(fin.quarters, "revenue")
     ps_ratio = market_cap / ttm_revenue if market_cap is not None and ttm_revenue else None
 
@@ -408,7 +445,7 @@ def compute_dividend_info(
             "dividend_yield": None,
             "payout_ratio": None,
             "dividend_growth_5yr": None,
-            "dividend_type": "none",
+            "dividend_regularity": "none",
             "consecutive_years_paid": 0,
         }
 
@@ -456,12 +493,24 @@ def compute_dividend_info(
 
     ttm_eps = _ttm(fin.quarters, "eps")
     payout_ratio = trailing_annual_dividend / ttm_eps if ttm_eps else None
+    if payout_ratio is None:
+        # Same yfinance quarterly-EPS-NaN problem as compute_valuation_metrics:
+        # for CA filers the per-share path never resolves. Fall back to total
+        # cash dividends paid / total net income. Total net_income here (not
+        # net income to common, unlike the P/E path) because "Cash Dividends
+        # Paid" is total cash dividends including preferred, so the consistent
+        # denominator is total net income — this also matches how .info
+        # payoutRatio is computed (verified within 0.1pp for RY.TO / SU.TO).
+        ttm_ni = _ttm(fin.quarters, "net_income")
+        ttm_dividends_paid = _ttm(fin.quarters, "dividends_paid")
+        if ttm_ni is not None and ttm_ni > 0 and ttm_dividends_paid is not None:
+            payout_ratio = abs(ttm_dividends_paid) / ttm_ni
 
     return {
         "dividend_yield": dividend_yield,
         "payout_ratio": payout_ratio,
         "dividend_growth_5yr": dividend_growth_5yr,
-        "dividend_type": _dividend_type(sorted_history),
+        "dividend_regularity": _dividend_regularity(sorted_history),
         "consecutive_years_paid": _consecutive_years_paid(set(years_sorted)),
     }
 
@@ -524,13 +573,25 @@ def compute_all(
     needs eps_growth_yoy). analyst_estimates/earnings_surprises (86bbdu04a)
     default to None — an existing caller with no analyst data still works
     unchanged, same graceful-degradation convention as every other input
-    here."""
+    here.
+
+    Returns a `currency_mismatch` key: None when the statement currency and
+    the quote currency agree, else {financials_currency, quote_currency}. The
+    price-vs-statement multiples are still computed in that case but are
+    FX-distorted — see the note below and ClickUp 86bbxucf0."""
+    # A Canadian-listed company that reports in USD (ATD.TO, NTR.TO, BN.TO,
+    # CSU.TO, ...) has USD statements but a CAD quote. Every price-vs-statement
+    # metric below (pe_ratio, pb_ratio, ps_ratio, ev_ebitda, peg_ratio, and the
+    # eps-path payout_ratio) is then off by the CAD/USD rate (~1.37). We still
+    # emit them for now — coverage first — and mark the mismatch so the payload
+    # builder / reliability scorer can flag or suppress the affected multiples.
+    # FX-aware reconciliation is ClickUp 86bbxucf0.
+    currency_mismatch = None
     if fin.currency != price_info.get("currency"):
-        raise ValueError(
-            f"Currency mismatch: financials are {fin.currency!r}, "
-            f"price_info is {price_info.get('currency')!r} — should not happen "
-            "if the adapter is correct."
-        )
+        currency_mismatch = {
+            "financials_currency": fin.currency,
+            "quote_currency": price_info.get("currency"),
+        }
 
     growth = compute_growth_metrics(fin, earnings_surprises)
     profitability = compute_profitability_metrics(fin)
@@ -560,4 +621,5 @@ def compute_all(
         "peer_metrics": peer,
         "quarters_available": len(fin.quarters),
         "missing_fields": missing_fields,
+        "currency_mismatch": currency_mismatch,
     }

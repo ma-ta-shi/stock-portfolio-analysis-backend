@@ -102,18 +102,22 @@ class NormalizedFinancials:
     """
 
     quarters: list[dict]  # newest first, each: {period_end, revenue, net_income,
-    # eps, operating_income, interest_expense, tax_expense,
+    # net_income_common, eps, operating_income, interest_expense, tax_expense,
     # depreciation_amortization, dividends_paid, shares_outstanding,
     # cost_of_revenue, operating_cash_flow, capital_expenditures}
     # cost_of_revenue/operating_cash_flow/capital_expenditures added beyond
     # the original ticket spec — needed for gross_margin and free_cash_flow,
     # both live Fundamental Analyst prompt core fields the original shape
-    # couldn't actually compute.
+    # couldn't actually compute. net_income_common (income to common after
+    # preferred dividends) is optional — present from yfinance, absent from
+    # edgartools; fundamentals.py falls back to net_income when it's missing.
     annual: list[dict]  # same shape as quarters, 3+ years for CAGR
     balance_sheet: dict  # latest only (not per-period): total_assets,
     # total_liabilities, total_equity, total_debt, cash_and_equivalents,
     # current_assets, current_liabilities
-    currency: str  # "CAD" | "USD" — must match price_info["currency"]
+    currency: str  # "CAD" | "USD" — the statement (financial) currency, which
+    # for a Canadian-listed USD-reporter (ATD.TO, NTR.TO, ...) is NOT the quote
+    # currency; compute_all() flags that mismatch as currency_mismatch (86bbxucf0)
 
 
 class StockDataProvider(ABC):
