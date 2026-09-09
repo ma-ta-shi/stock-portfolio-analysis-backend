@@ -29,13 +29,19 @@ MacroSourcesBundle dataclass, and financial-data-api-research.md):
   provider layer (no FMP revenue-by-geography method exists) — always
   None for this build, consistent with the field's Optional design.
   Building that provider method is out of this ticket's scope.
-- policy_rate_90d_delta_bp/rate_trend remain US-only (FEDFUNDS) — no BoC
-  policy-rate-delta/trend counterpart exists in the contract, matching
-  gdp/unemployment/vix (unconditionally US-only, no CA variant). CPI is
-  no longer part of that asymmetric group as of 86bbahum6: Canada now has
-  its own parallel delta/trend apparatus (ca_cpi_yoy/ca_cpi_3m_delta/
-  ca_cpi_trend, ca_gdp_qoq/ca_gdp_4q_trend), not just the raw canada_cpi
-  reading — see the reconciliation entry above.
+- policy_rate_90d_delta_bp/rate_trend are now paired with a BoC
+  counterpart (boc_rate_90d_delta_bp/boc_rate_trend) as of 86bbq8rj1,
+  computed by the same generic _policy_rate_delta_bp/_rate_trend helpers
+  off V39079. CPI/GDP reached parity earlier (86bbahum6: ca_cpi_yoy/
+  ca_cpi_3m_delta/ca_cpi_trend, ca_gdp_qoq/ca_gdp_4q_trend). VIX stays
+  US-only (a US index with no Canadian equivalent). Of the US-side
+  86bbq8rj1 fields: us_cpi_yoy/us_core_cpi_yoy/vix_30d_avg are
+  derivations of already-fetched series (CPIAUCSL/CPILFESL/VIXCLS) —
+  us_cpi_yoy/us_core_cpi_yoy via _yoy_pct_latest, NOT the day-based
+  _yoy_pct_at that backs cpi_3m_delta_pp (that one's ~10-month window is
+  fine inside a subtraction but wrong for a YoY rate on its own);
+  us_gdp_qoq/us_gdp_4q_trend need GDPC1 (real GDP), newly added to
+  _FRED_SERIES, since the existing `gdp` series is nominal.
 - Materials sector maps to copper only, not "copper/gold" as the doc
   lists — GOLDAMGBD228NLBM and GOLDPMGBD228NLBM (the standard FRED gold
   fixing series) are both discontinued (confirmed live 2026-08-07, empty
@@ -79,7 +85,8 @@ _FRED_SERIES = {
     "treasury_10y": "DGS10",
     "cpi": "CPIAUCSL",
     "core_cpi": "CPILFESL",
-    "gdp": "GDP",
+    "gdp": "GDP",  # nominal level — the `gdp` bundle field; unrendered today
+    "gdp_real": "GDPC1",  # real GDP, for us_gdp_qoq/us_gdp_4q_trend (86bbq8rj1)
     "unemployment": "UNRATE",
     "vix": "VIXCLS",
     "cad_usd_fred": "DEXCAUS",
@@ -91,6 +98,11 @@ _BOC_BOND_SERIES = {
     "canada_bond_5y": "BD.CDN.5YR.DQ.YLD",
     "canada_bond_10y": "BD.CDN.10YR.DQ.YLD",
 }
+
+# BoC overnight-rate target — daily series, fetched as a window (not just
+# the latest) for the 90-day delta (86bbq8rj1). boc.get_macro_data was
+# widened to recent=200 so this lookback resolves.
+_BOC_OVERNIGHT_RATE_SERIES = "V39079"
 
 # sector (lowercased GICS name) -> (display name, FRED series id)
 _SECTOR_COMMODITY = {
@@ -205,7 +217,14 @@ def _yoy_pct_at(series: pd.Series, as_of: date, days_ago: int) -> float | None:
     (stats_canada.py's _yoy_pct_for_period) does it the other way,
     subtracting fully unrounded values and rounding only the final
     result. See that function's docstring for why this asymmetry exists
-    and is left as-is."""
+    and is left as-is.
+
+    Both anchors are day-based offsets from as_of. current floats back to
+    the latest published point (monthly CPI lands ~5 weeks late) while
+    prior stays pinned 365 days before as_of, so the two are only ~10
+    months apart, not 12 — fine for cpi_3m_delta_pp (the bias is in both
+    terms of the subtraction and cancels), WRONG for a YoY rate surfaced
+    on its own. Use _yoy_pct_latest for the latter."""
     current = _value_n_days_ago(series, as_of, days_ago)
     prior = _value_n_days_ago(series, as_of, days_ago + 365)
     if current is None or prior is None or prior == 0:
@@ -213,11 +232,76 @@ def _yoy_pct_at(series: pd.Series, as_of: date, days_ago: int) -> float | None:
     return round((current / prior - 1) * 100, 2)
 
 
-def _policy_rate_delta_bp(fed_funds: pd.Series, as_of: date) -> float | None:
-    delta_pp = _point_delta(fed_funds, as_of, 90)
+def _yoy_pct_latest(series: pd.Series, as_of: date) -> float | None:
+    """True 12-month % change ending at the latest available observation.
+    Unlike _yoy_pct_at, the 1-year lookback is anchored to that
+    observation's own date, not to as_of, so publication lag can't
+    compress the window to ~10 months. Same correction _real_gdp_growth
+    applies for quarterly GDP and stats_canada._yoy_pct_for_period
+    applies (via exact-period match) on the CA side."""
+    dropped = _sorted_dropna(series)
+    if dropped.empty:
+        return None
+    dropped = dropped[dropped.index <= pd.Timestamp(as_of)]
+    if dropped.empty:
+        return None
+    latest_date = dropped.index[-1]
+    prior_eligible = dropped[dropped.index <= latest_date - pd.Timedelta(days=365)]
+    if prior_eligible.empty:
+        return None
+    prior = float(prior_eligible.iloc[-1])
+    if prior == 0:
+        return None
+    return round((float(dropped.iloc[-1]) / prior - 1) * 100, 2)
+
+
+def _policy_rate_delta_bp(policy_rate: pd.Series, as_of: date) -> float | None:
+    """90-day change in a central-bank policy rate, in basis points.
+    Generic — used for both FEDFUNDS and the BoC overnight rate (V39079)."""
+    delta_pp = _point_delta(policy_rate, as_of, 90)
     if delta_pp is None:
         return None
     return round(delta_pp * 100, 1)
+
+
+def _rolling_avg(series: pd.Series, as_of: date, days: int) -> float | None:
+    """Mean over the trailing `days`-calendar-day window ending at as_of.
+    None if that window holds no observations (e.g. a badly stale series).
+    Day-based window, consistent with _value_n_days_ago's cutoffs."""
+    dropped = _sorted_dropna(series)
+    if dropped.empty:
+        return None
+    end = pd.Timestamp(as_of)
+    window = dropped[(dropped.index > end - pd.Timedelta(days=days)) & (dropped.index <= end)]
+    if window.empty:
+        return None
+    return round(float(window.mean()), 2)
+
+
+def _real_gdp_growth(series: pd.Series, as_of: date) -> dict:
+    """QoQ-annualized and YoY growth from a quarterly real-GDP level
+    series, by exact positional offset (previous quarter, 4 quarters
+    back) — NOT the day-based lookback _yoy_pct_at uses. Quarterly GDP
+    has a ~2-quarter publication lag, so a 365-day lookback lands a full
+    quarter early. Mirrors stats_canada.get_real_gdp_index()'s CA-side
+    computation so US and CA GDP growth stay methodologically identical:
+    same `(latest / prior) ** 4 - 1` QoQ formula, same return keys
+    (qoq_annualized_pct / yoy_pct)."""
+    dropped = _sorted_dropna(series)
+    if dropped.empty:
+        return {"qoq_annualized_pct": None, "yoy_pct": None}
+    dropped = dropped[dropped.index <= pd.Timestamp(as_of)]
+    if len(dropped) < 2:
+        return {"qoq_annualized_pct": None, "yoy_pct": None}
+    latest = float(dropped.iloc[-1])
+    prev_q = float(dropped.iloc[-2])
+    qoq = round(((latest / prev_q) ** 4 - 1) * 100, 2) if prev_q > 0 else None
+    yoy = None
+    if len(dropped) >= 5:
+        year_ago = float(dropped.iloc[-5])
+        if year_ago > 0:
+            yoy = round((latest / year_ago - 1) * 100, 2)
+    return {"qoq_annualized_pct": qoq, "yoy_pct": yoy}
 
 
 # ---------- trend classification (first-pass thresholds, not sourced from
@@ -410,7 +494,6 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
     unemployment = await stats_canada.get_unemployment_rate()
     housing = await stats_canada.get_housing_starts()
     retail = await stats_canada.get_retail_sales_yoy()
-    cpi_by_province = await stats_canada.get_cpi_by_province()
     cpi_national = await stats_canada.get_cpi_national()
     gdp_index = await stats_canada.get_real_gdp_index()
 
@@ -418,11 +501,9 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
     # says which underlying fetch it should track, so it's taken from
     # whichever of these resolved first (unemployment preferred, since
     # it's the statcan_* field explicitly named in the reliability-scorer
-    # ticket text). get_cpi_by_province() never returns a "released" date
-    # (confirmed in stats_canada.py — always None), so it can't anchor
-    # this even as a last resort. cpi_national/gdp_index included so a
-    # run where unemployment/housing/retail all fail but CPI/GDP succeed
-    # doesn't silently report no Canadian macro data was fetched at all.
+    # ticket text). cpi_national/gdp_index included so a run where
+    # unemployment/housing/retail all fail but CPI/GDP succeed doesn't
+    # silently report no Canadian macro data was fetched at all.
     age_days = None
     for result in (unemployment, housing, retail, cpi_national, gdp_index):
         if result and result.get("released"):
@@ -457,12 +538,20 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
         if cpi_national and cpi_national["delta_3m_pp"] is not None
         else None
     )
+    # Rounded here, not in stats_canada.py (raw-return convention) — same
+    # 2-decimal precision as ca_cpi_3m_delta above and the US-side
+    # unemployment_6m_delta (which _point_delta rounds).
+    ca_unemployment_6m_delta = (
+        round(unemployment["delta_6m_pp"], 2)
+        if unemployment and unemployment["delta_6m_pp"] is not None
+        else None
+    )
 
     return {
         "statcan_unemployment_ca": unemployment["value"] if unemployment else None,
+        "ca_unemployment_6m_delta": ca_unemployment_6m_delta,
         "statcan_housing_starts": housing["value"] if housing else None,
         "statcan_retail_sales_yoy": retail["value"] if retail else None,
-        "statcan_cpi_by_province": cpi_by_province["value"] if cpi_by_province else None,
         "statcan_age_days": age_days,
         "canada_cpi": cpi_national["value"] if cpi_national else None,
         "ca_cpi_yoy": ca_cpi_yoy,
@@ -475,9 +564,9 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
 
 _EMPTY_STATCAN_FIELDS = {
     "statcan_unemployment_ca": None,
+    "ca_unemployment_6m_delta": None,
     "statcan_housing_starts": None,
     "statcan_retail_sales_yoy": None,
-    "statcan_cpi_by_province": None,
     "statcan_age_days": None,
     "canada_cpi": None,
     "ca_cpi_yoy": None,
@@ -527,7 +616,7 @@ async def compute_macro_sources(
     as_of_date = as_of_dt.date()
 
     fred_series = await fred.get_macro_data(list(_FRED_SERIES.values()))
-    boc_bonds = await boc.get_macro_data(list(_BOC_BOND_SERIES.values()))
+    boc_series = await boc.get_macro_data([*_BOC_BOND_SERIES.values(), _BOC_OVERNIGHT_RATE_SERIES])
     boc_rates = await boc.get_interest_rates()
     boc_fx = await boc.get_exchange_rates("CADUSD")
 
@@ -535,16 +624,20 @@ async def compute_macro_sources(
         return fred_series.get(_FRED_SERIES[field], pd.Series(dtype="float64"))
 
     def boc_series_for(field: str) -> pd.Series:
-        return boc_bonds.get(_BOC_BOND_SERIES[field], pd.Series(dtype="float64"))
+        return boc_series.get(_BOC_BOND_SERIES[field], pd.Series(dtype="float64"))
 
     fed_funds_series = fred_series_for("fed_funds_rate")
     cpi_series = fred_series_for("cpi")
+    core_cpi_series = fred_series_for("core_cpi")
     cad_usd_fred_series = fred_series_for("cad_usd_fred")
     vix_series = fred_series_for("vix")
     unemployment_series = fred_series_for("unemployment")
     gdp_series = fred_series_for("gdp")
+    gdp_real_series = fred_series_for("gdp_real")
+    boc_overnight_series = boc_series.get(_BOC_OVERNIGHT_RATE_SERIES, pd.Series(dtype="float64"))
 
     policy_rate_delta_bp = _policy_rate_delta_bp(fed_funds_series, as_of_date)
+    boc_rate_delta_bp = _policy_rate_delta_bp(boc_overnight_series, as_of_date)
     cpi_yoy_now = _yoy_pct_at(cpi_series, as_of_date, 0)
     cpi_yoy_3mo_ago = _yoy_pct_at(cpi_series, as_of_date, 90)
     cpi_delta_pp = (
@@ -552,9 +645,13 @@ async def compute_macro_sources(
         if cpi_yoy_now is None or cpi_yoy_3mo_ago is None
         else round(cpi_yoy_now - cpi_yoy_3mo_ago, 2)
     )
+    us_cpi_yoy = _yoy_pct_latest(cpi_series, as_of_date)
+    us_core_cpi_yoy = _yoy_pct_latest(core_cpi_series, as_of_date)
+    us_gdp_growth = _real_gdp_growth(gdp_real_series, as_of_date)
     cad_change_pct = _pct_change(cad_usd_fred_series, as_of_date, 90)
     unemployment_delta = _point_delta(unemployment_series, as_of_date, 180)  # ~6 months
     latest_vix = _latest_value(vix_series)
+    vix_30d_avg = _rolling_avg(vix_series, as_of_date, 30)
 
     sector_commodity = await _resolve_sector_commodity(sector, fred, as_of_date)
     cb_items = await _fetch_cb_commentary(finnhub, timeline, as_of_dt)
@@ -577,7 +674,7 @@ async def compute_macro_sources(
         treasury_5y=_latest_value(fred_series_for("treasury_5y")),
         treasury_10y=treasury_10y,
         cpi=_latest_value(cpi_series),
-        core_cpi=_latest_value(fred_series_for("core_cpi")),
+        core_cpi=_latest_value(core_cpi_series),
         gdp=_latest_value(gdp_series),
         unemployment=_latest_value(unemployment_series),
         vix=latest_vix,
@@ -593,7 +690,14 @@ async def compute_macro_sources(
         cad_usd_90d_change_pct=cad_change_pct,
         commodity_90d_change_pct=sector_commodity["commodity_90d_change_pct"],
         unemployment_6m_delta=unemployment_delta,
+        boc_rate_90d_delta_bp=boc_rate_delta_bp,
+        us_cpi_yoy=us_cpi_yoy,
+        us_core_cpi_yoy=us_core_cpi_yoy,
+        us_gdp_qoq=us_gdp_growth["qoq_annualized_pct"],
+        us_gdp_4q_trend=_gdp_trend(us_gdp_growth["yoy_pct"]),
+        vix_30d_avg=vix_30d_avg,
         rate_trend=_rate_trend(policy_rate_delta_bp),
+        boc_rate_trend=_rate_trend(boc_rate_delta_bp),
         cpi_trend=_cpi_trend(cpi_delta_pp),
         cad_trend=_cad_trend(cad_change_pct),
         vix_regime=_vix_regime(latest_vix),
@@ -611,6 +715,9 @@ async def compute_macro_sources(
         cb_stance_note=cb_stance_note,
         policy_rate_age_days=_latest_age_days(fed_funds_series, as_of_date),
         cpi_age_days=_latest_age_days(cpi_series, as_of_date),
+        # tracks nominal GDP; also the freshness proxy for us_gdp_qoq/
+        # us_gdp_4q_trend (GDPC1) — the BEA co-releases nominal and real
+        # GDP on the same schedule.
         gdp_age_days=_latest_age_days(gdp_series, as_of_date),
         unemployment_age_days=_latest_age_days(unemployment_series, as_of_date),
         cad_usd_age_days=_latest_age_days(cad_usd_fred_series, as_of_date),

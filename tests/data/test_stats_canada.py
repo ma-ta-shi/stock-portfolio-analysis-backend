@@ -110,16 +110,35 @@ def test_latest_point_ignores_null_values(provider):
 # --- get_unemployment_rate ---
 
 
-async def test_get_unemployment_rate_returns_value_and_period(provider, monkeypatch):
-    _mock_fetch(monkeypatch, provider, [[_success_row(_point("2026-06-01", 6.5))]])
+async def test_get_unemployment_rate_returns_value_period_and_6m_delta(provider, monkeypatch):
+    calls = _mock_fetch(
+        monkeypatch,
+        provider,
+        [[_success_row(_point("2025-12-01", 6.2), _point("2026-06-01", 6.5))]],
+    )
 
     result = await provider.get_unemployment_rate()
 
+    assert calls[0][1] == 8  # latest_n
     assert result == {
         "value": 6.5,
+        "delta_6m_pp": pytest.approx(
+            0.3
+        ),  # 6.5 now vs 6.2 six months back (raw; rounded in macro_sources)
         "reference_period": "2026-06-01",
         "released": "2026-07-10T08:30",
     }
+
+
+async def test_get_unemployment_rate_6m_delta_none_when_no_prior_point(provider, monkeypatch):
+    _mock_fetch(monkeypatch, provider, [[_success_row(_point("2026-06-01", 6.5))]])
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_unemployment_rate()
+
+    assert result["value"] == 6.5
+    assert result["delta_6m_pp"] is None
+    assert any(log["event"] == "statcan_unemployment_no_prior_6m" for log in logs)
 
 
 async def test_get_unemployment_rate_failed_returns_none_and_logs(provider, monkeypatch):
@@ -211,123 +230,6 @@ async def test_get_retail_sales_yoy_all_null_values_returns_none(provider, monke
     assert result is None
 
 
-# --- get_cpi_by_province ---
-
-
-PROVINCE_VECTORS = [
-    ("NL", 41691244),
-    ("PE", 41691379),
-    ("NS", 41691513),
-    ("NB", 41691648),
-    ("QC", 41691783),
-    ("ON", 41691919),
-    ("MB", 41692055),
-    ("SK", 41692191),
-    ("AB", 41692327),
-    ("BC", 41692462),
-]
-
-
-async def test_get_cpi_by_province_returns_dict_for_all_provinces(provider, monkeypatch):
-    rows = [
-        _success_row(_point("2026-06-01", 170.0 + i), vector_id=vid)
-        for i, (_, vid) in enumerate(PROVINCE_VECTORS)
-    ]
-    _mock_fetch(monkeypatch, provider, [rows])
-
-    result = await provider.get_cpi_by_province()
-
-    assert set(result["value"].keys()) == {code for code, _ in PROVINCE_VECTORS}
-    assert result["reference_period"] == "2026-06-01"
-    assert result["released"] is None
-
-
-async def test_get_cpi_by_province_matches_by_vector_id_not_response_position(
-    provider, monkeypatch
-):
-    """Regression test: confirmed live that getDataFromVectorsAndLatestNPeriods
-    does not preserve request order when multiple vectors share a productId
-    (all 10 province CPI vectors do) — it comes back sorted ascending by
-    vectorId instead. A positional zip() would silently misassign values to
-    the wrong provinces. Scramble the response order here to prove the fix
-    doesn't depend on it."""
-    scrambled = [
-        _success_row(_point("2026-06-01", 170.0 + i), vector_id=vid)
-        for i, (_, vid) in enumerate(PROVINCE_VECTORS)
-    ]
-    scrambled = list(reversed(scrambled))  # deliberately not request order
-    _mock_fetch(monkeypatch, provider, [scrambled])
-
-    result = await provider.get_cpi_by_province()
-
-    # Each province's value must match its OWN vector's value (170 + its
-    # original index), not whatever ended up in that position after scrambling.
-    for i, (code, _) in enumerate(PROVINCE_VECTORS):
-        assert result["value"][code] == pytest.approx(170.0 + i)
-
-
-async def test_get_cpi_by_province_skips_failed_province_but_keeps_others(provider, monkeypatch):
-    rows = [
-        _success_row(_point("2026-06-01", 170.0 + i), vector_id=vid)
-        for i, (_, vid) in enumerate(PROVINCE_VECTORS)
-    ]
-    rows[3] = _failed_row(vector_id=PROVINCE_VECTORS[3][1])  # NB
-    _mock_fetch(monkeypatch, provider, [rows])
-
-    with structlog.testing.capture_logs() as logs:
-        result = await provider.get_cpi_by_province()
-
-    assert "NB" not in result["value"]
-    assert len(result["value"]) == 9
-    assert any(
-        log["event"] == "statcan_cpi_missing_province" and log["province"] == "NB" for log in logs
-    )
-
-
-async def test_get_cpi_by_province_all_failed_returns_none(provider, monkeypatch):
-    rows = [_failed_row(vector_id=vid) for _, vid in PROVINCE_VECTORS]
-    _mock_fetch(monkeypatch, provider, [rows])
-
-    result = await provider.get_cpi_by_province()
-
-    assert result is None
-
-
-async def test_get_cpi_by_province_warns_on_period_mismatch(provider, monkeypatch):
-    rows = [
-        _success_row(_point("2026-06-01", 170.0), vector_id=vid) for _, vid in PROVINCE_VECTORS[:9]
-    ]
-    lagging_code, lagging_vid = PROVINCE_VECTORS[9]
-    rows.append(_success_row(_point("2026-05-01", 180.0), vector_id=lagging_vid))
-    _mock_fetch(monkeypatch, provider, [rows])
-
-    with structlog.testing.capture_logs() as logs:
-        result = await provider.get_cpi_by_province()
-
-    assert result["reference_period"] == "2026-06-01"
-    assert any(log["event"] == "statcan_cpi_period_mismatch_across_provinces" for log in logs)
-
-
-async def test_get_cpi_by_province_unrecognized_vector_in_response_is_skipped_and_logged(
-    provider, monkeypatch
-):
-    """Defensive case: a response row whose vectorId isn't one we asked for
-    (shouldn't happen, but the API is the one deciding response shape, not
-    us) must be skipped and logged, not silently mis-mapped to some province."""
-    rows = [_success_row(_point("2026-06-01", 999.0), vector_id=123456789)]
-    _mock_fetch(monkeypatch, provider, [rows])
-
-    with structlog.testing.capture_logs() as logs:
-        result = await provider.get_cpi_by_province()
-
-    assert result is None
-    assert any(
-        log["event"] == "statcan_cpi_unrecognized_vector_in_response"
-        and log["vector_id"] == 123456789
-        for log in logs
-    )
-
-
 # --- _yoy_pct_for_period ---
 
 
@@ -375,9 +277,7 @@ async def test_get_cpi_national_computes_yoy_and_pp_delta(provider, monkeypatch)
 
 
 async def test_get_cpi_national_requests_17_periods(provider, monkeypatch):
-    calls = _mock_fetch(
-        monkeypatch, provider, [[_success_row(_point("2026-06-01", 110.0))]]
-    )
+    calls = _mock_fetch(monkeypatch, provider, [[_success_row(_point("2026-06-01", 110.0))]])
 
     await provider.get_cpi_national()
 
@@ -451,9 +351,7 @@ async def test_get_real_gdp_index_computes_annualized_qoq_and_yoy(provider, monk
 
 
 async def test_get_real_gdp_index_requests_6_periods(provider, monkeypatch):
-    calls = _mock_fetch(
-        monkeypatch, provider, [[_success_row(_point("2026-01-01", 110.0))]]
-    )
+    calls = _mock_fetch(monkeypatch, provider, [[_success_row(_point("2026-01-01", 110.0))]])
 
     await provider.get_real_gdp_index()
 

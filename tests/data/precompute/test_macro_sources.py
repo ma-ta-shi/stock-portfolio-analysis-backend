@@ -1,9 +1,13 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import pytest
 
-from data.precompute.macro_sources import compute_macro_sources
+from data.precompute.macro_sources import (
+    _yoy_pct_at,
+    _yoy_pct_latest,
+    compute_macro_sources,
+)
 
 _AS_OF = datetime(2026, 8, 7, 12, 0, 0, tzinfo=UTC)
 
@@ -51,14 +55,12 @@ class _FakeStatsCanada:
         unemployment=None,
         housing=None,
         retail=None,
-        cpi_by_province=None,
         cpi_national=None,
         gdp_index=None,
     ):
         self._unemployment = unemployment
         self._housing = housing
         self._retail = retail
-        self._cpi_by_province = cpi_by_province
         self._cpi_national = cpi_national
         self._gdp_index = gdp_index
         self.call_count = 0
@@ -72,9 +74,6 @@ class _FakeStatsCanada:
 
     async def get_retail_sales_yoy(self):
         return self._retail
-
-    async def get_cpi_by_province(self):
-        return self._cpi_by_province
 
     async def get_cpi_national(self):
         return self._cpi_national
@@ -90,20 +89,23 @@ def _full_fred_series() -> dict[str, pd.Series]:
         "DGS5": _series({0: 4.40}),
         "DGS10": _series({0: 4.70}),
         "CPIAUCSL": _series({455: 310.0, 365: 313.0, 90: 320.0, 0: 322.0}),
-        "CPILFESL": _series({0: 330.0}),
+        "CPILFESL": _series({365: 320.0, 0: 330.0}),
         "GDP": _series({0: 28000.0}),
+        # GDPC1: 5 quarterly points so _real_gdp_growth can do QoQ + YoY
+        "GDPC1": _series({365: 22800.0, 273: 22900.0, 182: 23000.0, 91: 23100.0, 0: 23300.0}),
         "UNRATE": _series({180: 3.9, 0: 4.2}),
-        "VIXCLS": _series({0: 16.5}),
+        "VIXCLS": _series({20: 15.0, 10: 16.0, 0: 16.5}),
         "DEXCAUS": _series({90: 1.35, 0: 1.40}),
         "DCOILWTICO": _series({0: 78.5}),
     }
 
 
-def _full_boc_bond_series() -> dict[str, pd.Series]:
+def _full_boc_series() -> dict[str, pd.Series]:
     return {
         "BD.CDN.2YR.DQ.YLD": _series({0: 3.5}),
         "BD.CDN.5YR.DQ.YLD": _series({0: 3.6}),
         "BD.CDN.10YR.DQ.YLD": _series({0: 3.8}),
+        "V39079": _series({90: 4.75, 0: 4.25}),  # BoC overnight rate, -50bp over 90d
     }
 
 
@@ -121,7 +123,7 @@ async def _compute(
         is_canadian_stock=is_canadian_stock,
         timeline=timeline,
         fred=fred or _FakeFred(_full_fred_series()),
-        boc=boc or _FakeBoc(_full_boc_bond_series()),
+        boc=boc or _FakeBoc(_full_boc_series()),
         finnhub=finnhub or _FakeFinnhub(),
         stats_canada=stats_canada,
         as_of=_AS_OF,
@@ -182,6 +184,22 @@ async def test_bond_yields_available_true_when_10y_resolves():
     assert bundle.bond_yields_available is True
 
 
+@pytest.mark.asyncio
+async def test_us_and_boc_derived_fields_populated():
+    """86bbq8rj1: the 5 US CPI/GDP/VIX fields + the BoC rate delta/trend.
+    us_cpi_yoy via _yoy_pct_latest (322 now vs 313 a year back = +2.88%);
+    core CPI 330 vs 320 = +3.12%; GDPC1 23300 vs 23100 QoQ-annualized and
+    23300 vs 22800 YoY; V39079 4.25 vs 4.75 = -50bp; VIX mean 15/16/16.5."""
+    bundle = await _compute()
+    assert bundle.us_cpi_yoy == pytest.approx(2.88, abs=0.02)
+    assert bundle.us_core_cpi_yoy == pytest.approx(3.12, abs=0.02)
+    assert bundle.us_gdp_qoq == pytest.approx(3.51, abs=0.05)
+    assert bundle.us_gdp_4q_trend == "rising"  # yoy ~2.2% > 1.0 deadband
+    assert bundle.vix_30d_avg == pytest.approx(15.83, abs=0.02)
+    assert bundle.boc_rate_90d_delta_bp == pytest.approx(-50.0, abs=0.1)
+    assert bundle.boc_rate_trend == "easing"
+
+
 # ---------- graceful degradation ----------
 
 
@@ -212,6 +230,29 @@ async def test_totally_empty_fred_and_boc_still_constructs():
     assert bundle.boc_rate is None
     assert bundle.cad_usd is None
     assert bundle.bond_yields_available is False
+    # 86bbq8rj1 fields all degrade to None when their source series is
+    # absent — no GDPC1 (us_gdp_*), no VIX window (vix_30d_avg), no
+    # V39079 lookback (boc_rate_*).
+    for field in (
+        "us_cpi_yoy",
+        "us_core_cpi_yoy",
+        "us_gdp_qoq",
+        "us_gdp_4q_trend",
+        "vix_30d_avg",
+        "boc_rate_90d_delta_bp",
+        "boc_rate_trend",
+    ):
+        assert getattr(bundle, field) is None, field
+
+
+@pytest.mark.asyncio
+async def test_us_gdp_yoy_none_when_under_five_quarters_but_qoq_still_computes():
+    """_real_gdp_growth needs 5 points for YoY, 2 for QoQ — a short GDPC1
+    series gives us_gdp_qoq but leaves us_gdp_4q_trend None."""
+    fred = _FakeFred({**_full_fred_series(), "GDPC1": _series({91: 23100.0, 0: 23300.0})})
+    bundle = await _compute(fred=fred)
+    assert bundle.us_gdp_qoq is not None
+    assert bundle.us_gdp_4q_trend is None
 
 
 @pytest.mark.asyncio
@@ -223,6 +264,42 @@ async def test_delta_is_none_when_only_the_latest_point_exists_no_lookback():
     assert bundle.fed_funds_rate == 5.25
     assert bundle.policy_rate_90d_delta_bp is None
     assert bundle.rate_trend is None
+
+
+# ---------- YoY helpers: publication-lag handling ----------
+
+
+def _dated_series(values_by_date: dict[str, float]) -> pd.Series:
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in values_by_date])
+    return pd.Series(list(values_by_date.values()), index=idx).sort_index()
+
+
+def test_yoy_pct_latest_anchors_lookback_to_latest_observation_not_as_of():
+    """A monthly series published ~2 months late: latest point is
+    2026-06-01, as_of is 2026-08-07. _yoy_pct_at pins the prior anchor to
+    as_of - 365d (lands on 2025-08-01) and compares across only ~10
+    months; _yoy_pct_latest pins it to latest - 365d (2025-06-01) for a
+    true 12-month reading."""
+    as_of = date(2026, 8, 7)
+    series = _dated_series(
+        {
+            "2025-06-01": 96.0,  # 12 months before the latest point
+            "2025-08-01": 97.0,  # decoy: what _yoy_pct_at picks as "prior"
+            "2026-06-01": 100.0,  # latest available (publication lag)
+        }
+    )
+    assert _yoy_pct_latest(series, as_of) == pytest.approx(4.17, abs=0.01)  # 100/96
+    assert _yoy_pct_at(series, as_of, 0) == pytest.approx(3.09, abs=0.01)  # 100/97, compressed
+
+
+def test_yoy_pct_latest_none_when_no_point_a_full_year_before_latest():
+    as_of = date(2026, 8, 7)
+    series = _dated_series({"2026-01-01": 98.0, "2026-06-01": 100.0})
+    assert _yoy_pct_latest(series, as_of) is None
+
+
+def test_yoy_pct_latest_none_on_empty_series():
+    assert _yoy_pct_latest(pd.Series(dtype="float64"), date(2026, 8, 7)) is None
 
 
 # ---------- trend classification thresholds ----------
@@ -405,15 +482,26 @@ async def test_statcan_not_called_for_a_us_stock():
 @pytest.mark.asyncio
 async def test_statcan_called_and_populated_for_a_canadian_stock():
     stats_canada = _FakeStatsCanada(
-        unemployment={"value": 6.8, "released": "2026-07-04"},
-        cpi_by_province={"value": {"ON": 160.1, "BC": 158.4}, "released": None},
-        cpi_national={"value": 169.0, "yoy_pct": 10.0, "delta_3m_pp": 0.5, "reference_period": "2026-06-01", "released": "2026-07-20T08:30"},
-        gdp_index={"value": 116.8, "qoq_annualized_pct": 2.1, "yoy_pct": -1.5, "reference_period": "2026-01-01", "released": "2026-05-29T08:30"},
+        unemployment={"value": 6.8, "delta_6m_pp": 0.3, "released": "2026-07-04"},
+        cpi_national={
+            "value": 169.0,
+            "yoy_pct": 10.0,
+            "delta_3m_pp": 0.5,
+            "reference_period": "2026-06-01",
+            "released": "2026-07-20T08:30",
+        },
+        gdp_index={
+            "value": 116.8,
+            "qoq_annualized_pct": 2.1,
+            "yoy_pct": -1.5,
+            "reference_period": "2026-01-01",
+            "released": "2026-05-29T08:30",
+        },
     )
     bundle = await _compute(is_canadian_stock=True, stats_canada=stats_canada)
     assert stats_canada.call_count == 1
     assert bundle.statcan_unemployment_ca == 6.8
-    assert bundle.statcan_cpi_by_province == {"ON": 160.1, "BC": 158.4}
+    assert bundle.ca_unemployment_6m_delta == 0.3
     assert bundle.statcan_age_days is not None
     assert bundle.canada_cpi == 169.0
     assert bundle.ca_cpi_yoy == 10.0
@@ -603,7 +691,7 @@ async def test_naive_as_of_does_not_crash_the_cb_commentary_fetch():
         is_canadian_stock=False,
         timeline="medium_term",
         fred=_FakeFred(_full_fred_series()),
-        boc=_FakeBoc(_full_boc_bond_series()),
+        boc=_FakeBoc(_full_boc_series()),
         finnhub=finnhub,
         as_of=naive_as_of,
     )

@@ -49,7 +49,9 @@ async def test_get_macro_data_uses_recent_param(provider, monkeypatch):
 
     await provider.get_macro_data(["V39079"])
 
-    assert "recent=10" in seen_urls[0]
+    # recent=200 (~9 months of business days) — enough history for a 90-day
+    # delta on a daily series, not just the latest value (86bbq8rj1).
+    assert "recent=200" in seen_urls[0]
 
 
 async def test_get_macro_data_one_bad_series_does_not_crash_batch(provider, monkeypatch):
