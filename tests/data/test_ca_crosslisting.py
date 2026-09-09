@@ -2,7 +2,7 @@ from data.providers.ca_crosslisting import (
     _MDA_CONTENT_MARKERS,
     _MDA_DESCRIPTION_MARKERS,
     _find_40f_exhibit_text,
-    _get_10k_item,
+    _get_native_filing_item,
     _is_candidate_40f_exhibit,
     _normalize,
     get_crosslisted_business_overview,
@@ -223,36 +223,49 @@ async def test_find_40f_exhibit_skips_certification_without_fetching_text(monkey
     assert calls == []
 
 
-# --- _get_10k_item ---
+# --- _get_native_filing_item ---
 
 
-async def test_get_10k_item_returns_requested_attribute(monkeypatch):
+async def test_get_native_filing_item_returns_requested_attribute(monkeypatch):
     obj = FakeTenKObj(management_discussion="MDA text", business="Business text")
     fake = FakeCompany(filings_by_form={"10-K": [Fake10KFiling(obj)]})
     monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
 
-    mda = await _get_10k_item(16875, "management_discussion")
-    biz = await _get_10k_item(16875, "business")
+    mda = await _get_native_filing_item(16875, "10-K", "management_discussion")
+    biz = await _get_native_filing_item(16875, "10-K", "business")
 
     assert mda == "MDA text"
     assert biz == "Business text"
 
 
-async def test_get_10k_item_no_filings_returns_none(monkeypatch):
+async def test_get_native_filing_item_uses_the_given_form(monkeypatch):
+    """20-F filers parse natively too (confirmed live 2026-08-03 against
+    Canada Goose/Celestica/Lithium Americas) — must query the form the
+    caller actually asked for, not hardcode 10-K."""
+    obj = FakeTenKObj(management_discussion="20-F MDA text")
+    fake = FakeCompany(filings_by_form={"20-F": [Fake10KFiling(obj)]})
+    monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
+
+    result = await _get_native_filing_item(1690511, "20-F", "management_discussion")
+
+    assert result == "20-F MDA text"
+
+
+async def test_get_native_filing_item_no_filings_returns_none(monkeypatch):
     fake = FakeCompany(filings_by_form={"10-K": []})
     monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
 
-    result = await _get_10k_item(16875, "management_discussion")
+    result = await _get_native_filing_item(16875, "10-K", "management_discussion")
 
     assert result is None
 
 
-async def test_get_10k_item_missing_attr_returns_none(monkeypatch):
+async def test_get_native_filing_item_missing_attr_returns_none(monkeypatch):
     obj = FakeTenKObj(management_discussion=None)
     fake = FakeCompany(filings_by_form={"10-K": [Fake10KFiling(obj)]})
     monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
 
-    result = await _get_10k_item(16875, "management_discussion")
+    result = await _get_native_filing_item(16875, "10-K", "management_discussion")
 
     assert result is None
 
@@ -280,6 +293,30 @@ async def test_get_crosslisted_mda_10k_filer_uses_10k_path(monkeypatch):
     result = await get_crosslisted_mda("CP.TO")
 
     assert result == "CP's real Item 7 text"
+
+
+async def test_get_crosslisted_mda_20f_filer_uses_native_path(monkeypatch):
+    """Confirmed live 2026-08-03: 20-F parses natively via edgartools, same
+    shape as 10-K — no exhibit-hunting needed, contrary to the original
+    assumption that it would need the 40-F exhibit-search path."""
+    _patch_crosslisting_map(
+        monkeypatch,
+        {
+            "GOOS.TO": {
+                "us_ticker": "GOOS",
+                "cik": 1690511,
+                "form_type": "20-F",
+                "company_name": "Canada Goose",
+            }
+        },
+    )
+    obj = FakeTenKObj(management_discussion="Canada Goose's real MD&A text")
+    fake = FakeCompany(filings_by_form={"20-F": [Fake10KFiling(obj)]})
+    monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
+
+    result = await get_crosslisted_mda("GOOS.TO")
+
+    assert result == "Canada Goose's real MD&A text"
 
 
 async def test_get_crosslisted_mda_40f_filer_uses_exhibit_path(monkeypatch):
@@ -316,6 +353,27 @@ async def test_get_crosslisted_business_overview_10k_filer_uses_business_attr(mo
     result = await get_crosslisted_business_overview("CP.TO")
 
     assert result == "CP's real Item 1 text"
+
+
+async def test_get_crosslisted_business_overview_20f_filer_uses_native_path(monkeypatch):
+    _patch_crosslisting_map(
+        monkeypatch,
+        {
+            "GOOS.TO": {
+                "us_ticker": "GOOS",
+                "cik": 1690511,
+                "form_type": "20-F",
+                "company_name": "Canada Goose",
+            }
+        },
+    )
+    obj = FakeTenKObj(business="Canada Goose's real business text")
+    fake = FakeCompany(filings_by_form={"20-F": [Fake10KFiling(obj)]})
+    monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
+
+    result = await get_crosslisted_business_overview("GOOS.TO")
+
+    assert result == "Canada Goose's real business text"
 
 
 async def test_get_crosslisted_business_overview_40f_filer_uses_aif_exhibit(monkeypatch):
@@ -382,3 +440,25 @@ async def test_get_crosslisted_interim_exhibits_40f_filer_returns_recent_filings
         {"filing_date": "2026-03-01", "accession_no": "0003"},
         {"filing_date": "2026-02-01", "accession_no": "0002"},
     ]
+
+
+async def test_get_crosslisted_interim_exhibits_20f_filer_returns_recent_filings(monkeypatch):
+    """20-F filers are foreign private issuers too and use 6-K for interim
+    filings, same as 40-F — must not be excluded like the 10-K/8-K case."""
+    _patch_crosslisting_map(
+        monkeypatch,
+        {
+            "GOOS.TO": {
+                "us_ticker": "GOOS",
+                "cik": 1690511,
+                "form_type": "20-F",
+                "company_name": "Canada Goose",
+            }
+        },
+    )
+    fake = FakeCompany(filings_by_form={"6-K": [Fake6KFiling("2026-03-01", "0001")]})
+    monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
+
+    result = await get_crosslisted_interim_exhibits("GOOS.TO")
+
+    assert result == [{"filing_date": "2026-03-01", "accession_no": "0001"}]

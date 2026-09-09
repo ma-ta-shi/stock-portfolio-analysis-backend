@@ -6,6 +6,7 @@ from data.tools.resolve_ca_crosslisting import (
     _name_tokens,
     _names_plausibly_match,
     build_mapping,
+    build_tsx_candidates,
     fetch_sec_ticker_index,
     find_name_fallback_candidate,
     resolve_ticker,
@@ -69,8 +70,8 @@ def _ticker_rows(*entries: tuple[str, int, str]) -> dict:
 
 
 def test_name_tokens_strips_noise_words():
-    assert _name_tokens("WSP Global Inc.") == {"WSP"}
-    assert _name_tokens("BCE Inc.") == {"BCE"}
+    assert _name_tokens("WSP Global Inc.") == ["WSP"]
+    assert _name_tokens("BCE Inc.") == ["BCE"]
 
 
 def test_names_plausibly_match_requires_full_subset():
@@ -93,6 +94,87 @@ def test_names_plausibly_match_rejects_acronym_with_zero_overlap():
 def test_names_plausibly_match_empty_inputs_do_not_match():
     assert _names_plausibly_match("", "ANYTHING") is False
     assert _names_plausibly_match("ANYTHING", "") is False
+
+
+def test_names_plausibly_match_tolerates_truncated_last_token():
+    """yfinance's `name` field truncates at 32 chars server-side, cutting a
+    real trailing token mid-word (e.g. CORPORA for CORPORATION). The last
+    token should match as a prefix (min 3 chars), not require exact
+    equality. Note: a 2-char remnant (e.g. real yfinance truncation of
+    "CANADIAN PACIFIC KANSAS CITY LTD/CN" down to "...LI") is deliberately
+    NOT covered — too short a fragment to trust as a truncation signal
+    rather than coincidence; that case correctly falls through to the
+    flagged-for-human-review path instead, which is safe, not a regression."""
+    assert _names_plausibly_match("ROYAL BANK OF CANA", "ROYAL BANK OF CANADA") is True
+
+
+def test_names_plausibly_match_does_not_prefix_match_non_last_tokens():
+    """Truncation only ever cuts the tail — a mismatched *middle* token must
+    still fail exactly, or this would reopen the WSP-Global/S&P-Global
+    false-positive risk the strict matcher was built to prevent."""
+    assert _names_plausibly_match("CAN PACIFIC RAILWAY", "CANADIAN PACIFIC RAILWAY LTD") is False
+
+
+def test_names_plausibly_match_rejects_short_last_token_prefix():
+    """The prefix tolerance requires >= 3 chars — too short a fragment is
+    more likely coincidence than truncation."""
+    assert _names_plausibly_match("ROYAL BANK OF C", "ROYAL BANK OF CANADA") is False
+
+
+# --- build_tsx_candidates (union + filtering) ---
+
+
+async def test_build_tsx_candidates_filters_noise_categories(monkeypatch):
+    monkeypatch.setattr(
+        "data.tools.resolve_ca_crosslisting._fetch_tmx_tsx_tickers",
+        lambda: _async_return(
+            {
+                "RY.TO": "ROYAL BANK OF CANADA",
+                "ZQQ.TO": "BMO NASDAQ 100 EQUITY HEDGED TO CAD ETF",
+                "AAPL.TO": "APPLE CDR (CAD HEDGED)",
+                "CAR-UN.TO": "CANADIAN APARTMENT PROPERTIES REAL ESTATE INVESTMENT TRUST",
+                "BEP-PR-M.TO": "BROOKFIELD RENEWABLE PARTNERS PREFERRED SERIES M",
+                "AD-DB-A.TO": "ALARIS EQUITY PARTNERS DEBENTURE A",
+                "DFN.TO": "DIVIDEND 15 SPLIT CORP",
+                "ATCO-X.TO": "ATCO LTD.",  # genuine non-voting class, must survive
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        "data.tools.resolve_ca_crosslisting._fetch_yfinance_tsx_tickers",
+        lambda: _async_return({}),
+    )
+
+    candidates = await build_tsx_candidates()
+
+    tickers = {t for t, _ in candidates}
+    assert tickers == {"RY.TO", "ATCO-X.TO"}
+
+
+async def test_build_tsx_candidates_unions_and_prefers_tmx_name_on_overlap(monkeypatch):
+    monkeypatch.setattr(
+        "data.tools.resolve_ca_crosslisting._fetch_tmx_tsx_tickers",
+        lambda: _async_return({"RY.TO": "ROYAL BANK OF CANADA"}),
+    )
+    monkeypatch.setattr(
+        "data.tools.resolve_ca_crosslisting._fetch_yfinance_tsx_tickers",
+        lambda: _async_return(
+            {
+                "RY.TO": "ROYAL BANK OF C",  # truncated — TMX's name must win
+                "BBD-B.TO": "BOMBARDIER INC., CL. B, SV",  # TMX-directory gap, yfinance-only
+            }
+        ),
+    )
+
+    candidates = await build_tsx_candidates()
+
+    result = dict(candidates)
+    assert result["RY.TO"] == "ROYAL BANK OF CANADA"
+    assert result["BBD-B.TO"] == "BOMBARDIER INC., CL. B, SV"
+
+
+async def _async_return(value):
+    return value
 
 
 # --- find_name_fallback_candidate ---

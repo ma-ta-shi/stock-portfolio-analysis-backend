@@ -1,9 +1,153 @@
 {
+  "AAUC.TO": {
+    "cik": 1993344,
+    "company_name": "Allied Gold Corp",
+    "form_type": "40-F",
+    "us_ticker": "AAUC"
+  },
+  "ACB.TO": {
+    "cik": 1683541,
+    "company_name": "AURORA CANNABIS INC",
+    "form_type": "40-F",
+    "us_ticker": "ACB"
+  },
+  "AEM.TO": {
+    "cik": 2809,
+    "company_name": "AGNICO EAGLE MINES LTD",
+    "form_type": "40-F",
+    "us_ticker": "AEM"
+  },
+  "AG.TO": {
+    "cik": 1308648,
+    "company_name": "FIRST MAJESTIC SILVER CORP",
+    "form_type": "40-F",
+    "us_ticker": "AG"
+  },
+  "AGI.TO": {
+    "cik": 1178819,
+    "company_name": "ALAMOS GOLD INC",
+    "form_type": "40-F",
+    "us_ticker": "AGI"
+  },
+  "ALYA.TO": {
+    "cik": 1734520,
+    "company_name": "Alithya Group inc",
+    "form_type": "40-F",
+    "us_ticker": "ALYAF"
+  },
+  "AQN.TO": {
+    "cik": 1174169,
+    "company_name": "ALGONQUIN POWER & UTILITIES CORP.",
+    "form_type": "40-F",
+    "us_ticker": "AQN"
+  },
+  "ARIS.TO": {
+    "cik": 1964504,
+    "company_name": "Aris Mining Corp",
+    "form_type": "40-F",
+    "us_ticker": "ARIS"
+  },
+  "ASM.TO": {
+    "cik": 316888,
+    "company_name": "AVINO SILVER & GOLD MINES LTD",
+    "form_type": "40-F",
+    "us_ticker": "ASM"
+  },
+  "ASTL.TO": {
+    "cik": 1860805,
+    "company_name": "Algoma Steel Group Inc.",
+    "form_type": "40-F",
+    "us_ticker": "ASTL"
+  },
+  "ATS.TO": {
+    "cik": 1394832,
+    "company_name": "ATS Corp /ATS",
+    "form_type": "40-F",
+    "us_ticker": "ATS"
+  },
+  "AUMN.TO": {
+    "cik": 1011509,
+    "company_name": "Golden Minerals Co",
+    "form_type": "10-K",
+    "us_ticker": "AUMN"
+  },
+  "AVL.TO": {
+    "cik": 1362898,
+    "company_name": "Avalon Advanced Materials Inc.",
+    "form_type": "40-F",
+    "us_ticker": "AVLNF"
+  },
+  "BAM.TO": {
+    "cik": 1937926,
+    "company_name": "Brookfield Asset Management Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "BAM"
+  },
+  "BB.TO": {
+    "cik": 1070235,
+    "company_name": "BLACKBERRY Ltd",
+    "form_type": "40-F",
+    "us_ticker": "BB"
+  },
+  "BBUC.TO": {
+    "cik": 1654795,
+    "company_name": "Brookfield Business Corp",
+    "form_type": "20-F",
+    "us_ticker": "BBUC"
+  },
   "BCE.TO": {
     "cik": 718940,
     "company_name": "BCE INC",
     "form_type": "40-F",
     "us_ticker": "BCE"
+  },
+  "BCHT.TO": {
+    "cik": 728385,
+    "company_name": "Birchtech Corp.",
+    "form_type": "10-K",
+    "us_ticker": "BCHT"
+  },
+  "BCT.TO": {
+    "cik": 1610820,
+    "company_name": "BriaCell Therapeutics Corp.",
+    "form_type": "40-F",
+    "us_ticker": "BCTX"
+  },
+  "BDI.TO": {
+    "cik": 1701541,
+    "company_name": "Black Diamond Therapeutics, Inc.",
+    "form_type": "10-K",
+    "us_ticker": "BDTX"
+  },
+  "BEPC.TO": {
+    "cik": 1791863,
+    "company_name": "Brookfield Renewable Corp",
+    "form_type": "20-F",
+    "us_ticker": "BEPC"
+  },
+  "BHC.TO": {
+    "cik": 885590,
+    "company_name": "Bausch Health Companies Inc.",
+    "form_type": "10-K",
+    "us_ticker": "BHC"
+  },
+  "BIPC.TO": {
+    "cik": 1788348,
+    "company_name": "Brookfield Infrastructure Corp",
+    "form_type": "20-F",
+    "us_ticker": "BIPC"
+  },
+  "BLCO.TO": {
+    "cik": 1860742,
+    "company_name": "Bausch & Lomb Corp",
+    "form_type": "10-K",
+    "us_ticker": "BLCO"
+  },
+  "BLDP.TO": {
+    "cik": 1453015,
+    "company_name": "Ballard Power Systems Inc.",
+    "form_type": "40-F",
+    "us_ticker": "BLDP"
   },
   "BMO.TO": {
     "cik": 927971,
@@ -11,11 +155,77 @@
     "form_type": "40-F",
     "us_ticker": "BMO"
   },
+  "BN.TO": {
+    "cik": 1001085,
+    "company_name": "BROOKFIELD Corp /ON/",
+    "form_type": "40-F",
+    "us_ticker": "BN"
+  },
+  "BNKR.TO": {
+    "cik": 1407583,
+    "company_name": "Bunker Hill Mining Corp.",
+    "form_type": "10-K",
+    "us_ticker": "BHLL"
+  },
   "BNS.TO": {
     "cik": 9631,
     "company_name": "BANK OF NOVA SCOTIA",
     "form_type": "40-F",
     "us_ticker": "BNS"
+  },
+  "BNT.TO": {
+    "cik": 1837429,
+    "company_name": "Brookfield Wealth Solutions Ltd.",
+    "form_type": "20-F",
+    "us_ticker": "BNT"
+  },
+  "BRAG.TO": {
+    "cik": 1867834,
+    "company_name": "Bragg Gaming Group Inc.",
+    "form_type": "40-F",
+    "us_ticker": "BRAG"
+  },
+  "BTE.TO": {
+    "cik": 1279495,
+    "company_name": "BAYTEX ENERGY CORP.",
+    "form_type": "40-F",
+    "us_ticker": "BTE"
+  },
+  "BTO.TO": {
+    "cik": 1429937,
+    "company_name": "B2GOLD CORP",
+    "form_type": "40-F",
+    "us_ticker": "BTG"
+  },
+  "BU.TO": {
+    "cik": 1158399,
+    "company_name": "Burcon NutraScience Corp",
+    "form_type": "40-F",
+    "us_ticker": "BRCNF"
+  },
+  "CAE.TO": {
+    "cik": 1173382,
+    "company_name": "CAE INC",
+    "form_type": "40-F",
+    "us_ticker": "CAE"
+  },
+  "CDE.TO": {
+    "cik": 215466,
+    "company_name": "Coeur Mining, Inc.",
+    "form_type": "10-K",
+    "us_ticker": "CDE"
+  },
+  "CIGI.TO": {
+    "cik": 913353,
+    "company_name": "Colliers International Group Inc.",
+    "form_type": "40-F",
+    "us_ticker": "CIGI"
+  },
+  "CLS.TO": {
+    "cik": 1030894,
+    "company_name": "CELESTICA INC",
+    "form_type": "20-F",
+    "us_ticker": "CLS"
   },
   "CM.TO": {
     "cik": 1045520,
@@ -23,6 +233,18 @@
     "form_type": "40-F",
     "manually_confirmed": "resolver flagged CIBC vs the legal name as a name mismatch (correctly, per the resolver's own logic) - ticker and filing-type both check out; CIBC is just the common name for this bank, confirmed 2026-07-30",
     "us_ticker": "CM"
+  },
+  "CNL.TO": {
+    "cik": 1953575,
+    "company_name": "Collective Mining Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "CNL"
+  },
+  "CNQ.TO": {
+    "cik": 1017413,
+    "company_name": "CANADIAN NATURAL RESOURCES Ltd",
+    "form_type": "40-F",
+    "us_ticker": "CNQ"
   },
   "CNR.TO": {
     "cik": 16868,
@@ -37,11 +259,377 @@
     "form_type": "10-K",
     "us_ticker": "CP"
   },
+  "CRDL.TO": {
+    "cik": 1702123,
+    "company_name": "Cardiol Therapeutics Inc.",
+    "form_type": "40-F",
+    "us_ticker": "CRDL"
+  },
+  "CRON.TO": {
+    "cik": 1656472,
+    "company_name": "Cronos Group Inc.",
+    "form_type": "40-F",
+    "us_ticker": "CRON"
+  },
+  "CSCI.TO": {
+    "cik": 1113423,
+    "company_name": "COSCIENS Biopharma Inc.",
+    "form_type": "40-F",
+    "us_ticker": "CSCID"
+  },
+  "CTGO.TO": {
+    "cik": 1502377,
+    "company_name": "Contango Silver & Gold Inc.",
+    "form_type": "10-K",
+    "us_ticker": "CTGO"
+  },
+  "CURA.TO": {
+    "cik": 1756770,
+    "company_name": "Curaleaf Holdings, Inc.",
+    "form_type": "40-F",
+    "us_ticker": "CURLF"
+  },
+  "CVE.TO": {
+    "cik": 1475260,
+    "company_name": "CENOVUS ENERGY INC.",
+    "form_type": "40-F",
+    "us_ticker": "CVE"
+  },
+  "CWEB.TO": {
+    "cik": 1750155,
+    "company_name": "Charlotte's Web Holdings, Inc.",
+    "form_type": "10-K",
+    "us_ticker": "CWBHF"
+  },
+  "DCBO.TO": {
+    "cik": 1829959,
+    "company_name": "Docebo Inc.",
+    "form_type": "40-F",
+    "us_ticker": "DCBO"
+  },
+  "DML.TO": {
+    "cik": 1063259,
+    "company_name": "DENISON MINES CORP.",
+    "form_type": "40-F",
+    "us_ticker": "DNN"
+  },
+  "DOO.TO": {
+    "cik": 1748797,
+    "company_name": "BRP Inc.",
+    "form_type": "40-F",
+    "us_ticker": "DOO"
+  },
+  "DRT.TO": {
+    "cik": 1340476,
+    "company_name": "DIRTT ENVIRONMENTAL SOLUTIONS LTD",
+    "form_type": "10-K",
+    "us_ticker": "DRTTF"
+  },
+  "DSG.TO": {
+    "cik": 1050140,
+    "company_name": "DESCARTES SYSTEMS GROUP INC",
+    "form_type": "40-F",
+    "us_ticker": "DSGX"
+  },
+  "EDR.TO": {
+    "cik": 1277866,
+    "company_name": "ENDEAVOUR SILVER CORP",
+    "form_type": "40-F",
+    "us_ticker": "EXK"
+  },
+  "EFR.TO": {
+    "cik": 1385849,
+    "company_name": "ENERGY FUELS INC",
+    "form_type": "40-F",
+    "us_ticker": "UUUU"
+  },
+  "EGLX.TO": {
+    "cik": 1854233,
+    "company_name": "Enthusiast Gaming Holdings Inc. / Canada",
+    "form_type": "40-F",
+    "us_ticker": "EGLXF"
+  },
+  "ELD.TO": {
+    "cik": 918608,
+    "company_name": "ELDORADO GOLD CORP /FI",
+    "form_type": "40-F",
+    "us_ticker": "EGO"
+  },
+  "ELE.TO": {
+    "cik": 2086771,
+    "company_name": "Elemental Royalty Corp",
+    "form_type": "40-F",
+    "us_ticker": "ELE"
+  },
+  "ELEF.TO": {
+    "cik": 1545224,
+    "company_name": "Silver Elephant Mining Corp.",
+    "form_type": "20-F",
+    "us_ticker": "SILEF"
+  },
+  "ELVA.TO": {
+    "cik": 1844450,
+    "company_name": "Electrovaya Inc.",
+    "form_type": "40-F",
+    "us_ticker": "ELVA"
+  },
+  "EMP-A.TO": {
+    "cik": 1541401,
+    "company_name": "Empire State Realty Trust, Inc.",
+    "form_type": "10-K",
+    "us_ticker": "ESRT"
+  },
   "ENB.TO": {
     "cik": 895728,
     "company_name": "ENBRIDGE INC",
     "form_type": "40-F",
     "us_ticker": "ENB"
+  },
+  "EPRX.TO": {
+    "cik": 1581178,
+    "company_name": "EUPRAXIA PHARMACEUTICALS INC.",
+    "form_type": "40-F",
+    "us_ticker": "EPRX"
+  },
+  "EQX.TO": {
+    "cik": 1756607,
+    "company_name": "Equinox Gold Corp.",
+    "form_type": "40-F",
+    "us_ticker": "EQX"
+  },
+  "ERO.TO": {
+    "cik": 1853860,
+    "company_name": "Ero Copper Corp.",
+    "form_type": "40-F",
+    "us_ticker": "ERO"
+  },
+  "ETG.TO": {
+    "cik": 1271554,
+    "company_name": "Entree Resources Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "ERLFF"
+  },
+  "FFH.TO": {
+    "cik": 915191,
+    "company_name": "FAIRFAX FINANCIAL HOLDINGS LTD/ CAN",
+    "form_type": "40-F",
+    "us_ticker": "FRFHF"
+  },
+  "FNV.TO": {
+    "cik": 1456346,
+    "company_name": "FRANCO NEVADA Corp",
+    "form_type": "40-F",
+    "us_ticker": "FNV"
+  },
+  "FRX.TO": {
+    "cik": 1211583,
+    "company_name": "FENNEC PHARMACEUTICALS INC.",
+    "form_type": "20-F",
+    "us_ticker": "FENC"
+  },
+  "FSV.TO": {
+    "cik": 1637810,
+    "company_name": "FirstService Corp",
+    "form_type": "40-F",
+    "us_ticker": "FSV"
+  },
+  "FTS.TO": {
+    "cik": 1666175,
+    "company_name": "Fortis Inc.",
+    "form_type": "40-F",
+    "us_ticker": "FTS"
+  },
+  "FURY.TO": {
+    "cik": 1514597,
+    "company_name": "FURY GOLD MINES LTD",
+    "form_type": "40-F",
+    "us_ticker": "FURY"
+  },
+  "FVI.TO": {
+    "cik": 1341335,
+    "company_name": "FORTUNA MINING CORP.",
+    "form_type": "40-F",
+    "us_ticker": "FSM"
+  },
+  "FVL.TO": {
+    "cik": 1064052,
+    "company_name": "FREEGOLD VENTURES LTD",
+    "form_type": "20-F",
+    "us_ticker": "FGOVF"
+  },
+  "GAU.TO": {
+    "cik": 1377757,
+    "company_name": "Galiano Gold Inc.",
+    "form_type": "40-F",
+    "us_ticker": "GAU"
+  },
+  "GFL.TO": {
+    "cik": 1780232,
+    "company_name": "GFL Environmental Inc.",
+    "form_type": "40-F",
+    "us_ticker": "GFL"
+  },
+  "GFR.TO": {
+    "cik": 1966287,
+    "company_name": "Greenfire Resources Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "GFR"
+  },
+  "GIB-A.TO": {
+    "cik": 1061574,
+    "company_name": "CGI INC",
+    "form_type": "40-F",
+    "us_ticker": "GIB"
+  },
+  "GIL.TO": {
+    "cik": 1061894,
+    "company_name": "Gildan Activewear Inc.",
+    "form_type": "40-F",
+    "us_ticker": "GIL"
+  },
+  "GOOS.TO": {
+    "cik": 1690511,
+    "company_name": "Canada Goose Holdings Inc.",
+    "form_type": "20-F",
+    "us_ticker": "GOOS"
+  },
+  "GTE.TO": {
+    "cik": 1273441,
+    "company_name": "GRAN TIERRA ENERGY INC.",
+    "form_type": "10-K",
+    "us_ticker": "GTE"
+  },
+  "GWO.TO": {
+    "cik": 850918,
+    "company_name": "GREAT-WEST LIFECO INC.",
+    "form_type": "40-F",
+    "us_ticker": "GWLIF"
+  },
+  "HBM.TO": {
+    "cik": 1322422,
+    "company_name": "Hudbay Minerals Inc.",
+    "form_type": "40-F",
+    "us_ticker": "HBM"
+  },
+  "HIVE.TO": {
+    "cik": 1720424,
+    "company_name": "HIVE Digital Technologies Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "HIVE"
+  },
+  "HSLV.TO": {
+    "cik": 2013223,
+    "company_name": "Highlander Silver Corp.",
+    "form_type": "40-F",
+    "us_ticker": "HSLV"
+  },
+  "HUT.TO": {
+    "cik": 1964789,
+    "company_name": "Hut 8 Corp.",
+    "form_type": "10-K",
+    "us_ticker": "HUT"
+  },
+  "IE.TO": {
+    "cik": 1879016,
+    "company_name": "Ivanhoe Electric Inc.",
+    "form_type": "10-K",
+    "us_ticker": "IE"
+  },
+  "ILLM.TO": {
+    "cik": 1110803,
+    "company_name": "ILLUMINA, INC.",
+    "form_type": "10-K",
+    "us_ticker": "ILMN"
+  },
+  "IMG.TO": {
+    "cik": 1203464,
+    "company_name": "IAMGOLD CORP",
+    "form_type": "40-F",
+    "us_ticker": "IAG"
+  },
+  "IMO.TO": {
+    "cik": 49938,
+    "company_name": "IMPERIAL OIL LTD",
+    "form_type": "10-K",
+    "us_ticker": "IMO"
+  },
+  "IMP.TO": {
+    "cik": 1285170,
+    "company_name": "INTERMAP TECHNOLOGIES CORP",
+    "form_type": "40-F",
+    "us_ticker": "ITMSF"
+  },
+  "IPCO.TO": {
+    "cik": 1510295,
+    "company_name": "Marathon Petroleum Corp",
+    "form_type": "10-K",
+    "us_ticker": "MPC"
+  },
+  "ISO.TO": {
+    "cik": 1997377,
+    "company_name": "IsoEnergy Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "ISOU"
+  },
+  "ITH.TO": {
+    "cik": 1134115,
+    "company_name": "INTERNATIONAL TOWER HILL MINES LTD",
+    "form_type": "40-F",
+    "us_ticker": "THM"
+  },
+  "K.TO": {
+    "cik": 701818,
+    "company_name": "KINROSS GOLD CORP",
+    "form_type": "40-F",
+    "us_ticker": "KGC"
+  },
+  "KEEL.TO": {
+    "cik": 1812477,
+    "company_name": "Keel Infrastructure Corp.",
+    "form_type": "40-F",
+    "us_ticker": "KEEL"
+  },
+  "KEI.TO": {
+    "cik": 1477081,
+    "company_name": "Kolibri Global Energy Inc.",
+    "form_type": "40-F",
+    "us_ticker": "KGEI"
+  },
+  "KLS.TO": {
+    "cik": 1161814,
+    "company_name": "KELSO TECHNOLOGIES INC",
+    "form_type": "20-F",
+    "us_ticker": "KIQSF"
+  },
+  "LAC.TO": {
+    "cik": 1966983,
+    "company_name": "LITHIUM AMERICAS CORP.",
+    "form_type": "20-F",
+    "us_ticker": "LAC"
+  },
+  "LAR.TO": {
+    "cik": 1440972,
+    "company_name": "Lithium Argentina AG",
+    "form_type": "40-F",
+    "us_ticker": "LAR"
+  },
+  "LGO.TO": {
+    "cik": 1400438,
+    "company_name": "Largo Inc.",
+    "form_type": "40-F",
+    "us_ticker": "LGO"
+  },
+  "LSPD.TO": {
+    "cik": 1823306,
+    "company_name": "Lightspeed Commerce Inc.",
+    "form_type": "40-F",
+    "us_ticker": "LSPD"
+  },
+  "MDNA.TO": {
+    "cik": 1807983,
+    "company_name": "Medicenna Therapeutics Corp.",
+    "form_type": "40-F",
+    "us_ticker": "MDNAF"
   },
   "MFC.TO": {
     "cik": 1086888,
@@ -49,11 +637,185 @@
     "form_type": "40-F",
     "us_ticker": "MFC"
   },
+  "MSCL.TO": {
+    "cik": 1421642,
+    "company_name": "Satellos Bioscience Inc.",
+    "form_type": "40-F",
+    "us_ticker": "MSLE"
+  },
+  "MUX.TO": {
+    "cik": 314203,
+    "company_name": "McEwen Inc.",
+    "form_type": "10-K",
+    "us_ticker": "MUX"
+  },
+  "NDM.TO": {
+    "cik": 1164771,
+    "company_name": "NORTHERN DYNASTY MINERALS LTD",
+    "form_type": "40-F",
+    "us_ticker": "NAK"
+  },
+  "NG.TO": {
+    "cik": 1173420,
+    "company_name": "NOVAGOLD RESOURCES INC",
+    "form_type": "10-K",
+    "us_ticker": "NG"
+  },
+  "NOA.TO": {
+    "cik": 1368519,
+    "company_name": "North American Construction Group Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "NOA"
+  },
+  "NOU.TO": {
+    "cik": 1649752,
+    "company_name": "Nouveau Monde Graphite Inc.",
+    "form_type": "40-F",
+    "us_ticker": "NMG"
+  },
+  "NTR.TO": {
+    "cik": 1725964,
+    "company_name": "Nutrien Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "NTR"
+  },
+  "NUAG.TO": {
+    "cik": 1369085,
+    "company_name": "NEW PACIFIC METALS CORP",
+    "form_type": "40-F",
+    "us_ticker": "NEWP"
+  },
+  "NXE.TO": {
+    "cik": 1698535,
+    "company_name": "NexGen Energy Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "NXE"
+  },
+  "OBE.TO": {
+    "cik": 1334388,
+    "company_name": "OBSIDIAN ENERGY LTD.",
+    "form_type": "40-F",
+    "us_ticker": "OBE"
+  },
+  "OGI.TO": {
+    "cik": 1620737,
+    "company_name": "ORGANIGRAM GLOBAL INC.",
+    "form_type": "40-F",
+    "us_ticker": "OGI"
+  },
+  "OLA.TO": {
+    "cik": 1680056,
+    "company_name": "Orla Mining Ltd.",
+    "form_type": "40-F",
+    "us_ticker": "ORLA"
+  },
+  "OR.TO": {
+    "cik": 1627272,
+    "company_name": "OR Royalties Inc.",
+    "form_type": "40-F",
+    "us_ticker": "OR"
+  },
+  "ORIO.TO": {
+    "cik": 1602842,
+    "company_name": "Orion Digital Corp.",
+    "form_type": "40-F",
+    "us_ticker": "ORIO"
+  },
+  "OTEX.TO": {
+    "cik": 1002638,
+    "company_name": "OPEN TEXT CORP",
+    "form_type": "10-K",
+    "us_ticker": "OTEX"
+  },
+  "OVV.TO": {
+    "cik": 1792580,
+    "company_name": "Ovintiv Inc.",
+    "form_type": "10-K",
+    "us_ticker": "OVV"
+  },
+  "PAAS.TO": {
+    "cik": 771992,
+    "company_name": "PAN AMERICAN SILVER CORP",
+    "form_type": "40-F",
+    "us_ticker": "PAAS"
+  },
+  "PHYS.TO": {
+    "cik": 1477049,
+    "company_name": "Sprott Physical Gold Trust",
+    "form_type": "40-F",
+    "us_ticker": "PHYS"
+  },
+  "PPTA.TO": {
+    "cik": 1526243,
+    "company_name": "PERPETUA RESOURCES CORP.",
+    "form_type": "40-F",
+    "us_ticker": "PPTA"
+  },
+  "PRN.TO": {
+    "cik": 1628808,
+    "company_name": "Profound Medical Corp.",
+    "form_type": "40-F",
+    "us_ticker": "PROF"
+  },
+  "PSLV.TO": {
+    "cik": 1494728,
+    "company_name": "Sprott Physical Silver Trust",
+    "form_type": "40-F",
+    "us_ticker": "PSLV"
+  },
+  "PTM.TO": {
+    "cik": 1095052,
+    "company_name": "PLATINUM GROUP METALS LTD",
+    "form_type": "40-F",
+    "us_ticker": "PLG"
+  },
+  "PYR.TO": {
+    "cik": 1743344,
+    "company_name": "PyroGenesis Canada Inc.",
+    "form_type": "40-F",
+    "us_ticker": "PYRGF"
+  },
+  "QBTC.TO": {
+    "cik": 1852317,
+    "company_name": "Fidelity Wise Origin Bitcoin Fund",
+    "form_type": "10-K",
+    "us_ticker": "FBTC"
+  },
+  "QSR.TO": {
+    "cik": 1618756,
+    "company_name": "Restaurant Brands International Inc.",
+    "form_type": "10-K",
+    "us_ticker": "QSR"
+  },
+  "RBA.TO": {
+    "cik": 1046102,
+    "company_name": "RB GLOBAL INC.",
+    "form_type": "10-K",
+    "us_ticker": "RBA"
+  },
+  "RCI-A.TO": {
+    "cik": 733099,
+    "company_name": "ROGERS COMMUNICATIONS INC",
+    "form_type": "40-F",
+    "us_ticker": "RCI"
+  },
+  "RIC.TO": {
+    "cik": 355948,
+    "company_name": "RICHARDSON ELECTRONICS, LTD.",
+    "form_type": "10-K",
+    "us_ticker": "RELL"
+  },
   "RY.TO": {
     "cik": 1000275,
     "company_name": "ROYAL BANK OF CANADA",
     "form_type": "40-F",
     "us_ticker": "RY"
+  },
+  "SEA.TO": {
+    "cik": 1231346,
+    "company_name": "SEABRIDGE GOLD INC",
+    "form_type": "40-F",
+    "us_ticker": "SA"
   },
   "SHOP.TO": {
     "cik": 1594805,
@@ -61,11 +823,77 @@
     "form_type": "40-F",
     "us_ticker": "SHOP"
   },
+  "SII.TO": {
+    "cik": 1512920,
+    "company_name": "SPROTT INC.",
+    "form_type": "40-F",
+    "us_ticker": "SII"
+  },
+  "SKE.TO": {
+    "cik": 1713748,
+    "company_name": "Skeena Resources Ltd",
+    "form_type": "40-F",
+    "us_ticker": "SKE"
+  },
+  "SLF.TO": {
+    "cik": 1097362,
+    "company_name": "SUN LIFE FINANCIAL INC",
+    "form_type": "40-F",
+    "us_ticker": "SLF"
+  },
+  "SLR.TO": {
+    "cik": 917225,
+    "company_name": "SOLITARIO RESOURCES CORP.",
+    "form_type": "10-K",
+    "us_ticker": "XPL"
+  },
+  "SOBO.TO": {
+    "cik": 2019061,
+    "company_name": "South Bow Corp",
+    "form_type": "40-F",
+    "us_ticker": "SOBO"
+  },
+  "SSRM.TO": {
+    "cik": 921638,
+    "company_name": "SSR MINING INC.",
+    "form_type": "40-F",
+    "us_ticker": "SSRM"
+  },
+  "STN.TO": {
+    "cik": 1131383,
+    "company_name": "STANTEC INC",
+    "form_type": "40-F",
+    "us_ticker": "STN"
+  },
   "SU.TO": {
     "cik": 311337,
     "company_name": "SUNCOR ENERGY INC",
     "form_type": "40-F",
     "us_ticker": "SU"
+  },
+  "SVB.TO": {
+    "cik": 1031093,
+    "company_name": "SILVER BULL RESOURCES, INC.",
+    "form_type": "10-K",
+    "us_ticker": "SVBL"
+  },
+  "SVM.TO": {
+    "cik": 1340677,
+    "company_name": "SILVERCORP METALS INC",
+    "form_type": "40-F",
+    "us_ticker": "SVM"
+  },
+  "TA.TO": {
+    "cik": 1144800,
+    "company_name": "TRANSALTA CORP",
+    "form_type": "40-F",
+    "us_ticker": "TAC"
+  },
+  "TCL-A.TO": {
+    "cik": 733590,
+    "company_name": "TRANSCONTINENTAL REALTY INVESTORS INC",
+    "form_type": "10-K",
+    "us_ticker": "TCI"
   },
   "TD.TO": {
     "cik": 947263,
@@ -73,10 +901,160 @@
     "form_type": "40-F",
     "us_ticker": "TD"
   },
+  "TECK-A.TO": {
+    "cik": 886986,
+    "company_name": "TECK RESOURCES LTD",
+    "form_type": "40-F",
+    "us_ticker": "TECK"
+  },
+  "TFII.TO": {
+    "cik": 1588823,
+    "company_name": "TFI International Inc.",
+    "form_type": "40-F",
+    "us_ticker": "TFII"
+  },
+  "TFPM.TO": {
+    "cik": 1829726,
+    "company_name": "Triple Flag Precious Metals Corp.",
+    "form_type": "40-F",
+    "us_ticker": "TFPM"
+  },
+  "TI.TO": {
+    "cik": 1791703,
+    "company_name": "Titan Mining Corp",
+    "form_type": "40-F",
+    "us_ticker": "TII"
+  },
+  "TLRY.TO": {
+    "cik": 1731348,
+    "company_name": "Tilray Brands, Inc.",
+    "form_type": "10-K",
+    "us_ticker": "TLRY"
+  },
+  "TMQ.TO": {
+    "cik": 1543418,
+    "company_name": "Trilogy Metals Inc.",
+    "form_type": "10-K",
+    "us_ticker": "TMQ"
+  },
   "TRI.TO": {
     "cik": 1075124,
     "company_name": "THOMSON REUTERS CORP /CAN/",
     "form_type": "40-F",
     "us_ticker": "TRI"
+  },
+  "TRP.TO": {
+    "cik": 1232384,
+    "company_name": "TC ENERGY CORP",
+    "form_type": "40-F",
+    "us_ticker": "TRP"
+  },
+  "TRX.TO": {
+    "cik": 1173643,
+    "company_name": "TRX GOLD Corp",
+    "form_type": "40-F",
+    "us_ticker": "TRX"
+  },
+  "TSAT.TO": {
+    "cik": 1845840,
+    "company_name": "Telesat Corp",
+    "form_type": "20-F",
+    "us_ticker": "TSAT"
+  },
+  "TSND.TO": {
+    "cik": 1778129,
+    "company_name": "TerrAscend Corp.",
+    "form_type": "10-K",
+    "us_ticker": "TSNDF"
+  },
+  "TVA-B.TO": {
+    "cik": 1346830,
+    "company_name": "Tvardi Therapeutics, Inc.",
+    "form_type": "10-K",
+    "us_ticker": "TVRD"
+  },
+  "URE.TO": {
+    "cik": 1375205,
+    "company_name": "UR-ENERGY INC",
+    "form_type": "40-F",
+    "us_ticker": "URG"
+  },
+  "VBNK.TO": {
+    "cik": 1690639,
+    "company_name": "VersaBank",
+    "form_type": "40-F",
+    "us_ticker": "VBNK"
+  },
+  "VET.TO": {
+    "cik": 1293135,
+    "company_name": "VERMILION ENERGY INC.",
+    "form_type": "40-F",
+    "us_ticker": "VET"
+  },
+  "VGZ.TO": {
+    "cik": 783324,
+    "company_name": "VISTA GOLD CORP",
+    "form_type": "10-K",
+    "us_ticker": "VGZ"
+  },
+  "VMET.TO": {
+    "cik": 2080073,
+    "company_name": "Versamet Royalties Corp",
+    "form_type": "20-F",
+    "us_ticker": "VMET"
+  },
+  "VOXR.TO": {
+    "cik": 1907909,
+    "company_name": "VOX ROYALTY CORP.",
+    "form_type": "40-F",
+    "us_ticker": "VOXR"
+  },
+  "VZLA.TO": {
+    "cik": 1796073,
+    "company_name": "Vizsla Silver Corp.",
+    "form_type": "40-F",
+    "us_ticker": "VZLA"
+  },
+  "WCN.TO": {
+    "cik": 1318220,
+    "company_name": "Waste Connections, Inc.",
+    "form_type": "40-F",
+    "us_ticker": "WCN"
+  },
+  "WEED.TO": {
+    "cik": 1737927,
+    "company_name": "Canopy Growth Corp",
+    "form_type": "40-F",
+    "us_ticker": "CGC"
+  },
+  "WFG.TO": {
+    "cik": 1402388,
+    "company_name": "WEST FRASER TIMBER CO., LTD",
+    "form_type": "40-F",
+    "us_ticker": "WFG"
+  },
+  "WPM.TO": {
+    "cik": 1323404,
+    "company_name": "Wheaton Precious Metals Corp.",
+    "form_type": "40-F",
+    "us_ticker": "WPM"
+  },
+  "WPRT.TO": {
+    "cik": 1370416,
+    "company_name": "WESTPORT FUEL SYSTEMS INC.",
+    "form_type": "40-F",
+    "us_ticker": "WPRT"
+  },
+  "XNDU.TO": {
+    "cik": 2097163,
+    "company_name": "Xanadu Quantum Technologies Ltd",
+    "form_type": "20-F",
+    "us_ticker": "XNDU"
+  },
+  "XTG.TO": {
+    "cik": 1288770,
+    "company_name": "XTRA-GOLD RESOURCES CORP",
+    "form_type": "20-F",
+    "us_ticker": "XTGRF"
   }
 }
