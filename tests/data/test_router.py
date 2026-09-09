@@ -404,6 +404,30 @@ async def test_get_filings_us_returns_empty_no_chain():
     assert await router.get_filings("AAPL") == []
 
 
+# --- get_short_interest: not on the ABC, yfinance .info is the only source ---
+
+
+async def test_get_short_interest_us_calls_yfinance():
+    router = Router(
+        ticker="AAPL",
+        yfinance=FakeProvider(get_short_interest=_ok({"short_interest_pct": 0.8})),
+        fmp=FakeProvider(),
+        edgartools=FakeProvider(),
+        finnhub=FakeProvider(),
+    )
+    assert await router.get_short_interest("AAPL") == {"short_interest_pct": 0.8}
+
+
+async def test_get_short_interest_ca_also_calls_yfinance():
+    router = Router(
+        ticker="SHOP.TO",
+        yfinance=FakeProvider(get_short_interest=_ok({"days_to_cover": 4.0})),
+        openbb_tmx=FakeProvider(),
+        yfinance_news=FakeProvider(),
+    )
+    assert await router.get_short_interest("SHOP.TO") == {"days_to_cover": 4.0}
+
+
 # --- CA get_analyst_recommendation_trends routes to the yfinance news class ---
 
 
@@ -467,6 +491,7 @@ _METHOD_ARGS: dict[str, tuple] = {
     "get_analyst_recommendation_trends": ("AAPL",),
     "get_ratios_ttm": ("AAPL",),
     "get_filings": ("AAPL", 20),
+    "get_short_interest": ("AAPL",),
 }
 
 _METHOD_EMPTY_TYPE: dict[str, type] = {
@@ -485,6 +510,7 @@ _METHOD_EMPTY_TYPE: dict[str, type] = {
     "get_analyst_recommendation_trends": list,
     "get_ratios_ttm": dict,
     "get_filings": list,
+    "get_short_interest": dict,
 }
 
 # Recent timestamp column so get_financials samples are a correct_alignment no-op.
@@ -495,7 +521,14 @@ _METHOD_SAMPLE_VALUE: dict[str, object] = {
     "get_quote": {"symbol": "AAPL", "price": 100},
     "get_company_info": {"symbol": "AAPL"},
     "get_analyst_estimates": {"forward_eps": 1.0},
-    "get_analyst_ratings": {"consensus": "buy"},
+    "get_analyst_ratings": {
+        "consensus_rating": "buy",
+        "num_analysts": 11,
+        "target_mean": 307.76,
+        "buy_count": 8,
+        "hold_count": 3,
+        "sell_count": 0,
+    },
     "get_earnings_surprises": [{"period_end": "2026-07-30", "eps_actual": 2.02}],
     "get_insider_trading": [{"insider_name": "Jane"}],
     "get_earnings_calendar": [{"date": "2024-01-01"}],
@@ -504,6 +537,14 @@ _METHOD_SAMPLE_VALUE: dict[str, object] = {
     "get_analyst_recommendation_trends": [{"period": "0m"}],
     "get_ratios_ttm": {"pe": 10},
     "get_filings": [{"filing_date": "2026-08-01", "report_type": "MD&A"}],
+    "get_short_interest": {
+        "short_interest_pct": 0.8,
+        "days_to_cover": 2.19,
+        "shares_short": 116_327_753,
+        "shares_short_prior_month": 146_547_784,
+        "as_of_date": "2026-08-14",
+        "prior_month_date": "2026-07-15",
+    },
 }
 
 _US_BRANCH_KEYS = ["fmp", "edgartools", "finnhub"]
@@ -606,7 +647,7 @@ def test_every_stockdataprovider_and_newsprovider_method_has_both_chains():
     matching entry in one or both static chain tables."""
     router_methods = {
         name for name in dir(Router) if not name.startswith("_") and callable(getattr(Router, name))
-    } - {"get_ratios_ttm"}  # not on either ABC, checked separately below
+    } - {"get_ratios_ttm", "get_filings", "get_short_interest"}  # not on either ABC, checked below
     abc_methods = {
         name
         for base in (StockDataProvider, NewsProvider)
@@ -621,3 +662,5 @@ def test_every_stockdataprovider_and_newsprovider_method_has_both_chains():
     assert "get_ratios_ttm" in CA_CHAINS
     assert "get_filings" in US_CHAINS
     assert "get_filings" in CA_CHAINS
+    assert "get_short_interest" in US_CHAINS
+    assert "get_short_interest" in CA_CHAINS

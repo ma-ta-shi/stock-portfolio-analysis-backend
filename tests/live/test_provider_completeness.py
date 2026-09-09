@@ -20,6 +20,8 @@ ticket. Edge-case categories below are each tested only against the
 specific method(s) their own "why" is about — see tickers.py.
 """
 
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -74,7 +76,12 @@ _LIST_DICT_METHODS = {
 # strings like ['DELL', 'SNDK', ...]); a separate category from the other
 # list-returning methods, which all return list[dict].
 _LIST_STR_METHODS = {"get_peers"}
-_DICT_METHODS = {"get_company_info", "get_analyst_estimates", "get_analyst_ratings"}
+_DICT_METHODS = {
+    "get_company_info",
+    "get_analyst_estimates",
+    "get_analyst_ratings",
+    "get_short_interest",
+}
 _DATAFRAME_METHODS = {"get_price_history", "get_financials"}
 
 _ARG_BUILDERS = {
@@ -83,6 +90,7 @@ _ARG_BUILDERS = {
     "get_company_info": lambda ticker: (ticker,),
     "get_analyst_estimates": lambda ticker: (ticker,),
     "get_analyst_ratings": lambda ticker: (ticker,),
+    "get_short_interest": lambda ticker: (ticker,),
     "get_insider_trading": lambda ticker: (ticker,),
     "get_peers": lambda ticker: (ticker,),
     "get_earnings_calendar": lambda ticker: (ticker,),
@@ -317,6 +325,47 @@ async def test_tsxv_tickers_all_raise_from_openbb_tmx_but_yfinance_covers_them()
 async def test_low_analyst_coverage_ticker_returns_graceful_empty_not_a_crash():
     result = await OpenBBTMXProvider().get_analyst_estimates(t.LOW_ANALYST_COVERAGE)
     assert result == {}
+
+
+async def test_low_analyst_coverage_ticker_analyst_ratings_also_empty_from_tmx():
+    """openbb_tmx.get_analyst_ratings maps the consensus row now (86bbpgrxh)
+    — MKO.V has no TMX consensus row at all (result.results == []), so it
+    must still return a graceful {}, not a keyed-None dict that would kill
+    the CA fallback to yfinance."""
+    result = await OpenBBTMXProvider().get_analyst_ratings(t.LOW_ANALYST_COVERAGE)
+    assert result == {}
+
+
+# ---------- Analyst ratings + short interest (86bbpgrxh) ----------
+# yfinance is the sole US analyst-ratings source and the only short-interest
+# source on either branch. DDD: FMP-402'd US small-cap, 2-analyst coverage,
+# ~27% short interest — the "still populated on thin coverage" case.
+
+
+async def test_us_thin_coverage_analyst_ratings_still_has_target_and_distribution():
+    result = await YFinanceDataProvider().get_analyst_ratings(t.US_FMP_GAP)
+    assert result, "yfinance should still return ratings for a 2-analyst US name"
+    assert result["target_mean"] is not None
+    assert result["buy_count"] is not None
+
+
+async def test_short_interest_full_shape_and_30d_trend():
+    """The gap this ticket set out to close. One .info pull gives every
+    NormalizedShortInterest field for both a US ticker (short_interest_pct
+    from yfinance's own shortPercentOfFloat) and a CA one (pct derived from
+    sharesShort / floatShares, since yfinance's field is US-only). The
+    30-day trend is real: shares_short vs shares_short_prior_month, with
+    the two snapshot dates a plausible one settlement cycle apart."""
+    for ticker in (t.US_FMP_GAP, t.DIVIDEND_PAYER_CA):
+        r = await YFinanceDataProvider().get_short_interest(ticker)
+        assert r["short_interest_pct"] is not None and r["short_interest_pct"] > 0, ticker
+        assert r["days_to_cover"] is not None, ticker
+        assert r["shares_short"] is not None and r["shares_short_prior_month"] is not None, ticker
+        assert r["as_of_date"] is not None and r["prior_month_date"] is not None, ticker
+        window = (
+            date.fromisoformat(r["as_of_date"]) - date.fromisoformat(r["prior_month_date"])
+        ).days
+        assert 20 <= window <= 45, f"{ticker}: {window}d between snapshots is not ~monthly"
 
 
 # ---------- Dividend edge cases ----------

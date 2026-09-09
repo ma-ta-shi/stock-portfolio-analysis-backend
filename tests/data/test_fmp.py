@@ -305,12 +305,16 @@ async def test_get_analyst_estimates_no_data_returns_empty_dict(provider):
 # --- get_analyst_ratings ---
 
 
-async def test_get_analyst_ratings_returns_snapshot(provider):
+async def test_get_analyst_ratings_is_a_stub_returning_empty_without_a_call(provider):
+    """86bbpgrxh: FMP's /ratings-snapshot is a letter-grade quality score
+    with no buy/hold/sell, target, or analyst count — no consumer, and FMP
+    is no longer in this method's router chain (US → yfinance). The impl is
+    now a bare {} stub that makes no HTTP call."""
     _wire(provider, FakeResponse(200, json_data=[{"symbol": "AAPL", "rating": "B"}]))
 
     result = await provider.get_analyst_ratings("AAPL")
 
-    assert result["rating"] == "B"
+    assert result == {}
 
 
 # --- get_earnings_surprises (new, 86bbdu04a) ---

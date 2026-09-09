@@ -106,7 +106,11 @@ US_CHAINS: dict[str, list[str]] = {
     "get_financials": ["edgartools", "yfinance"],
     "get_insider_trading": ["edgartools"],  # never FMP — CLAUDE.md hard rule
     "get_analyst_estimates": ["fmp"],
-    "get_analyst_ratings": ["fmp"],
+    # FMP's /ratings-snapshot is a letter-grade quality score with no
+    # buy/hold/sell, target, or analyst count — its adapter impl is now a
+    # {} stub (86bbpgrxh). yfinance .info + .recommendations has the full
+    # set for every tested US ticker including thin-coverage small-caps.
+    "get_analyst_ratings": ["yfinance"],
     "get_earnings_surprises": ["fmp", "yfinance"],  # FMP has revenue+EPS; yfinance is EPS-only
     "get_earnings_calendar": ["fmp", "finnhub"],
     "get_peers": ["finnhub"],
@@ -114,6 +118,7 @@ US_CHAINS: dict[str, list[str]] = {
     "get_analyst_recommendation_trends": ["finnhub"],
     "get_ratios_ttm": ["fmp"],  # not on the ABC — carried forward from us_equity.py
     "get_filings": [],  # no US equivalent in this ticket's scope (86bbpggr5); empty chain
+    "get_short_interest": ["yfinance"],  # not on the ABC — yfinance .info is the only source
 }
 
 CA_CHAINS: dict[str, list[str]] = {
@@ -135,7 +140,10 @@ CA_CHAINS: dict[str, list[str]] = {
     # fallback that actually has this field for CA tickers (confirmed
     # live, e.g. RY.TO).
     "get_analyst_estimates": ["openbb_tmx", "yfinance"],
-    "get_analyst_ratings": ["yfinance"],
+    # openbb_tmx's TMX consensus row has target + counts + a rating for CA
+    # tickers (obb.equity.estimates.consensus) — the richer CA source, so
+    # it leads; yfinance .info is the fallback (confirmed live for .TO).
+    "get_analyst_ratings": ["openbb_tmx", "yfinance"],
     "get_earnings_surprises": ["yfinance"],  # openbb_tmx has no actual-vs-estimate earnings data
     "get_earnings_calendar": ["openbb_tmx"],
     "get_peers": ["peers_json"],  # static file, not a live provider — Gap 1
@@ -143,6 +151,10 @@ CA_CHAINS: dict[str, list[str]] = {
     "get_analyst_recommendation_trends": ["yfinance_news"],
     "get_ratios_ttm": [],  # no CA equivalent — empty chain resolves to {} via _try_chain
     "get_filings": ["openbb_tmx"],  # 86bbpggr5 — TMX is the only source
+    # yfinance's own shortPercentOfFloat is US-only, but the adapter
+    # derives the CA percent from sharesShort / floatShares and shortRatio
+    # (days_to_cover) is populated for .TO — a real block for CA too.
+    "get_short_interest": ["yfinance"],
 }
 
 
@@ -266,6 +278,8 @@ class Router(StockDataProvider, NewsProvider):
         return result if not _is_empty(result) else {}
 
     async def get_analyst_ratings(self, ticker: str) -> dict:
+        """Chain resolves to a NormalizedAnalystRatings dict or {} (86bbpgrxh).
+        US → yfinance; CA → openbb_tmx then yfinance."""
         result, _ = await self._try_chain("get_analyst_ratings", ticker)
         return result if not _is_empty(result) else {}
 
@@ -310,6 +324,14 @@ class Router(StockDataProvider, NewsProvider):
         form-filtered filings vs. TMX's own CA regulatory-filings feed)."""
         result, _ = await self._try_chain("get_filings", ticker, limit)
         return result if not _is_empty(result) else []
+
+    async def get_short_interest(self, ticker: str) -> dict:
+        """Not on StockDataProvider — yfinance .info is the only source
+        (86bbpgrxh). Resolves to a NormalizedShortInterest dict or {};
+        yfinance on both branches (the adapter derives the CA percent from
+        float since yfinance's own shortPercentOfFloat is US-only)."""
+        result, _ = await self._try_chain("get_short_interest", ticker)
+        return result if not _is_empty(result) else {}
 
     # ---------- NewsProvider ----------
 

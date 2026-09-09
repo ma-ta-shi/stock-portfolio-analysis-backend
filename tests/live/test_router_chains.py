@@ -164,6 +164,42 @@ async def test_ca_quote_chain_always_serves_from_yfinance():
     assert source == "yfinance"
 
 
+# ---------- CA analyst ratings + short interest (86bbpgrxh) ----------
+# CA_CHAINS["get_analyst_ratings"] = ["openbb_tmx", "yfinance"] — openbb-tmx's
+# consensus row is the richer CA source and leads; yfinance is the fallback.
+# get_short_interest is yfinance-only on both branches.
+
+
+async def test_ca_analyst_ratings_served_by_openbb_tmx_with_a_real_target():
+    async with Router(ticker=t.DIVIDEND_PAYER_CA) as router:
+        result, source = await router._try_chain("get_analyst_ratings", t.DIVIDEND_PAYER_CA)
+    assert not _is_empty(result)
+    assert source == "openbb_tmx"
+    assert result["target_mean"] is not None
+
+
+async def test_ca_thin_coverage_ticker_analyst_ratings_falls_back_to_yfinance():
+    """MKO.V has no TMX consensus row (openbb_tmx → {}) but yfinance still
+    has a 1-analyst rating for it — the chain must fall back past the empty
+    first link and serve the yfinance result, not stop at {}."""
+    async with Router(ticker=t.LOW_ANALYST_COVERAGE) as router:
+        result, source = await router._try_chain("get_analyst_ratings", t.LOW_ANALYST_COVERAGE)
+    assert not _is_empty(result)
+    assert source == "yfinance"
+
+
+async def test_short_interest_via_router_us_and_ca():
+    async with Router(ticker=t.US_FMP_GAP) as us_router:
+        us_result, us_source = await us_router._try_chain("get_short_interest", t.US_FMP_GAP)
+    async with Router(ticker=t.DIVIDEND_PAYER_CA) as ca_router:
+        ca_result, ca_source = await ca_router._try_chain("get_short_interest", t.DIVIDEND_PAYER_CA)
+    assert us_source == "yfinance" and us_result["short_interest_pct"] is not None
+    # CA shortPercentOfFloat is None from yfinance but the adapter derives
+    # it from sharesShort / floatShares — so this is a real number, not None.
+    assert ca_source == "yfinance" and ca_result["short_interest_pct"] is not None
+    assert ca_result["days_to_cover"] is not None
+
+
 # ---------- Ambiguous bare-vs-.TO ticker collisions ----------
 # Router-level, not a single-provider concern — is_canadian_ticker()'s
 # suffix check is what decides which chain (and therefore which company)

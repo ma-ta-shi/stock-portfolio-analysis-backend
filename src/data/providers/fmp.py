@@ -8,6 +8,7 @@ import structlog
 from data.providers.base import (
     NewsProvider,
     NormalizedAnalystEstimates,
+    NormalizedAnalystRatings,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
     NormalizedQuote,
@@ -205,11 +206,14 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         forward_eps = nearest.get("epsAvg")
         return {"forward_eps": forward_eps} if forward_eps is not None else {}
 
-    async def get_analyst_ratings(self, ticker: str) -> dict:
-        # Renamed from /rating. A current-period snapshot (letter grade + DCF/ROE/
-        # ROA/D-E/P-E/P-B sub-scores) — not a historical trend.
-        data = await self._request("ratings-snapshot", {"symbol": ticker})
-        return data[0] if data else {}
+    async def get_analyst_ratings(self, ticker: str) -> NormalizedAnalystRatings:
+        """Abstractmethod stub — returns {} without an API call (86bbpgrxh),
+        like openbb_tmx.get_analyst_estimates. FMP's /ratings-snapshot is a
+        letter-grade quality score (DCF/ROE/ROA sub-scores) with no
+        buy/hold/sell, no price target, no analyst count — nothing
+        NormalizedAnalystRatings needs — and FMP is no longer in this
+        method's router chain (US → yfinance)."""
+        return {}
 
     async def get_earnings_surprises(self, ticker: str) -> list[dict]:
         """FMP's /earnings (not /earnings-surprises, confirmed live 404, nor

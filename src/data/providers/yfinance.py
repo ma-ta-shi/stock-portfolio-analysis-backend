@@ -1,17 +1,20 @@
 import yfinance as yf
 import pandas as pd
 import structlog
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas_datareader.data as web
 from data.providers.base import (
     StockDataProvider,
     NewsProvider,
     MacroDataProvider,
     NormalizedAnalystEstimates,
+    NormalizedAnalystRatings,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
     NormalizedFinancials,
     NormalizedQuote,
+    NormalizedShortInterest,
+    canonical_rating,
 )
 import time
 
@@ -82,6 +85,37 @@ def _safe_float(value) -> float | None:
     return None if value is None or pd.isna(value) else float(value)
 
 
+def _safe_int(value) -> int | None:
+    """Like _safe_float but for count fields (sharesShort, floatShares) —
+    guards the same numpy-nan / None leak, returns a plain int."""
+    return None if value is None or pd.isna(value) else int(value)
+
+
+def _epoch_to_iso_date(value) -> str | None:
+    """yfinance's short-interest dates (dateShortInterest,
+    sharesShortPreviousMonthDate) are epoch seconds — to ISO "YYYY-MM-DD"."""
+    if value is None or pd.isna(value):
+        return None
+    return datetime.fromtimestamp(value, tz=timezone.utc).date().isoformat()
+
+
+def _bucket_recommendation_mean(mean: float | None) -> str | None:
+    """yfinance's recommendationMean is a published 1.0-5.0 consensus
+    number (1 = strong buy, 5 = strong sell). Used only when
+    recommendationKey is missing/unrecognised (86bbpgrxh)."""
+    if mean is None:
+        return None
+    if mean < 1.5:
+        return "strong_buy"
+    if mean < 2.5:
+        return "buy"
+    if mean < 3.5:
+        return "hold"
+    if mean < 4.5:
+        return "sell"
+    return "strong_sell"
+
+
 def correct_alignment(df: pd.DataFrame) -> pd.DataFrame:
     """Detect and correct the yfinance one-year column misalignment bug
     (financial-data-api-research.md §2). The most recent column should be
@@ -141,7 +175,9 @@ class YFinanceDataProvider(StockDataProvider):
         income data but no matching cashflow column just gets None for
         those fields, not dropped entirely."""
         raw_income = await self.get_financials(ticker, "income", period)
-        cashflow = _correct_alignment_like(raw_income, await self.get_financials(ticker, "cashflow", period))
+        cashflow = _correct_alignment_like(
+            raw_income, await self.get_financials(ticker, "cashflow", period)
+        )
         income = correct_alignment(raw_income)
         if income.empty:
             return []
@@ -266,38 +302,107 @@ class YFinanceDataProvider(StockDataProvider):
             for period, row in eh.iterrows()
         ]
 
-    async def get_analyst_ratings(self, ticker: str) -> dict:
+    async def get_analyst_ratings(self, ticker: str) -> NormalizedAnalystRatings:
+        """Maps yfinance's raw consensus data onto NormalizedAnalystRatings
+        (86bbpgrxh). Rewritten from a version that returned a fixed 4-key
+        dict even on total failure — that junk-not-{} shape defeats
+        router.py's _is_empty() and would silently kill the CA fallback
+        chain behind this method (same bug class as NormalizedAnalystEstimates,
+        86bbdu04a).
+
+        target_mean / num_analysts / the rating come from .info; the
+        buy/hold/sell distribution from .recommendations row 0 (period
+        '0m'). consensus_rating prefers recommendationKey and falls back to
+        bucketing the published recommendationMean (1.0-5.0). Bare {} when
+        .info yields nothing usable and there is no distribution."""
         stock = yf.Ticker(ticker)
-        # Fetch the overall consensus text from .info safely
         try:
             info = stock.info
-            consensus_text = info.get("recommendationKey", "N/A").lower()
-            current_price = info.get("currentPrice", "N/A")
         except Exception:
-            consensus_text = "N/A"
-            current_price = "N/A"
-        # Fetch the recommendation trend matrix
+            logger.warning("yfinance_analyst_ratings_no_info", ticker=ticker)
+            info = {}
+
+        target_mean = _safe_float(info.get("targetMeanPrice"))
+        num_analysts = _safe_int(info.get("numberOfAnalystOpinions"))
+
+        rating = canonical_rating(info.get("recommendationKey"))
+        if rating is None:
+            rating = _bucket_recommendation_mean(_safe_float(info.get("recommendationMean")))
+
+        buy_count = hold_count = sell_count = None
         recs_df = stock.recommendations
-        breakdown = {}
         if recs_df is not None and not recs_df.empty:
-            # Sort to ensure we get the row for the most recent period ('0m' is current)
-            # Typically yfinance returns rows representing 0m, -1m, -2m, -3m
-            latest_row = recs_df.iloc[0]
-            breakdown = {
-                "strong_buy": int(latest_row.get("strongBuy", 0)),
-                "buy": int(latest_row.get("buy", 0)),
-                "hold": int(latest_row.get("hold", 0)),
-                "sell": int(latest_row.get("sell", 0)),
-                "strong_sell": int(latest_row.get("strongSell", 0)),
-            }
-        # Construct the clean dictionary output
-        ratings_data = {
-            "symbol": ticker.upper(),
-            "current_price": current_price,
-            "consensus": consensus_text,  # e.g., 'buy', 'hold', 'strong_buy'
-            "rating_breakdown": breakdown or "No breakdown data available",
-        }
-        return ratings_data
+            row = recs_df.iloc[0]  # '0m' — current month
+
+            def _n(col: str) -> int:
+                return _safe_int(row.get(col)) or 0
+
+            buy_count = _n("strongBuy") + _n("buy")
+            hold_count = _n("hold")
+            sell_count = _n("sell") + _n("strongSell")
+
+        if rating is None and num_analysts is None and target_mean is None and buy_count is None:
+            return {}
+        return NormalizedAnalystRatings(
+            consensus_rating=rating,
+            num_analysts=num_analysts,
+            target_mean=target_mean,
+            buy_count=buy_count,
+            hold_count=hold_count,
+            sell_count=sell_count,
+        )
+
+    async def get_short_interest(self, ticker: str) -> NormalizedShortInterest:
+        """yfinance .info is the only source (86bbpgrxh). Not on the ABC —
+        a plain method, router-chain-dispatched like get_quote.
+
+        Field mechanics confirmed live 2026-09-08 across 15+ US/CA tickers:
+        - shortPercentOfFloat is a fraction (AAPL 0.008, DDD 0.2719) — × 100
+          for a percent — and is None for every .TO / .V. When it is None
+          but sharesShort and floatShares are both present (they are, for
+          CA), sharesShort / floatShares × 100 reproduces it: cross-checked
+          against AAPL/DDD/ENB.TO/SHOP.TO/BB.TO where both exist, match to
+          two decimals. So short_interest_pct is populated for CA too, by
+          derivation.
+        - shortRatio → days_to_cover: present both markets, no derivation.
+        - dateShortInterest / sharesShortPreviousMonthDate are epoch
+          seconds. The "prior month" count is a genuine ~30-day-earlier
+          FINRA/exchange snapshot (window measured live at 30-31 days, one
+          settlement cycle) — prior_month_date is carried so a caller can
+          confirm the window before computing a 30-day short-interest
+          trend from shares_short vs shares_short_prior_month.
+
+        Bare {} unless at least one of short_interest_pct / days_to_cover
+        is present (both None for ETFs — confirmed SPY/ARKK/XIU.TO)."""
+        stock = yf.Ticker(ticker)
+        try:
+            info = stock.info
+        except Exception:
+            logger.warning("yfinance_short_interest_no_info", ticker=ticker)
+            return {}
+
+        shares_short = _safe_int(info.get("sharesShort"))
+        float_shares = _safe_int(info.get("floatShares"))
+        pct_of_float = _safe_float(info.get("shortPercentOfFloat"))
+        if pct_of_float is not None:
+            short_interest_pct = round(pct_of_float * 100, 2)
+        elif shares_short is not None and float_shares:
+            short_interest_pct = round(shares_short / float_shares * 100, 2)
+        else:
+            short_interest_pct = None
+
+        days_to_cover = _safe_float(info.get("shortRatio"))
+        if short_interest_pct is None and days_to_cover is None:
+            return {}
+
+        return NormalizedShortInterest(
+            short_interest_pct=short_interest_pct,
+            days_to_cover=days_to_cover,
+            shares_short=shares_short,
+            shares_short_prior_month=_safe_int(info.get("sharesShortPriorMonth")),
+            as_of_date=_epoch_to_iso_date(info.get("dateShortInterest")),
+            prior_month_date=_epoch_to_iso_date(info.get("sharesShortPreviousMonthDate")),
+        )
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         """Real, confirmed bug fixed here (found in a later sweep, same
