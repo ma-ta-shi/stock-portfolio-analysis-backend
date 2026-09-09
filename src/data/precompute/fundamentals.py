@@ -56,6 +56,72 @@ _SECTOR_MEDIAN_KEYS = {
     "ev_ebitda": "sector_median_ev_ebitda",
 }
 
+# Peer-median guard (ClickUp 86bbq04wm). The unguarded statistics.median() over
+# whatever survived a None filter was feeding the Fundamental Analyst corrupt
+# sector medians (a -98 P/B median from one peer's negative book equity, a
+# peer-wide D/E of exactly 0.0, a 105% revenue-growth median from a spinoff
+# stub) — used by the model in 3 of 3 live runs as both a key_factor and a
+# risk. Guard here at the source, not the payload renderer: this is a data
+# defect (a median that shouldn't exist), and peer_metrics feeds more than the
+# prompt payload once DataPipeline.prepare() exists.
+
+# Checked per-metric against the count of VALID contributors, not len(peer_data):
+# each median stands on its own evidence. 2 not 3 — real peer sets are ~3
+# tickers and after validity filtering a 3 floor would render N/A almost
+# always (the block must stay useful, not just uncorrupt).
+_MIN_PEERS_FOR_SECTOR_MEDIAN = 2
+
+# Per-metric plausibility ranges (exclusive both ends). The 0.0 lower bound on
+# pe/pb/ev_ebitda/debt_to_equity is a principled sign check — these go negative
+# only on negative earnings/equity/EBITDA, not a meaningful multiple — needing
+# no calibration; the strict `<` also drops an exact-0.0 debt_to_equity (the
+# ticket's named missing-data signature, and — accepted — a genuinely
+# debt-free peer). gross_margin is positive-only for the same reason (a real
+# negative is nearly always COGS concept mis-mapping); operating_margin and roe
+# genuinely go negative and only the magnitude is gated.
+#
+# The outer caps and the growth/margin/roe bands are first-pass, not doc-sourced
+# — same disclosure convention as macro_sources.py's trend thresholds — checked
+# 2026-09-08 against a 20-name multi-sector US basket on deep (yfinance) data:
+# healthy names (AAPL/MSFT/JPM/XOM/NVDA/KO/F/PFE/UNH/HD/CRM/CVX) + loss-makers
+# (PLUG/RIVN/BYND) + the audit's problem set (DELL/SNDK/WDC) + GME/CVNA. Nothing
+# from a healthy name was nulled (real values topped out well inside every
+# band — P/E ~42, ROE ~1.2, worst real revenue decline -40% for MRNA); what
+# these ranges reject is DELL's negative-equity P/B and D/E, RIVN/BYND's
+# negative P/E and EV/EBITDA, PLUG/BYND's tiny-equity ROE blow-ups, and the
+# SNDK/PARA +170% spinoff/restructuring revenue-growth stubs (SNDK's 1.75 is
+# the exact value behind the corrupt 105% median). PLUG's ~-1% gross margin is
+# also excluded — real but not a useful comparable. NaN (if a provider ever
+# leaks one) fails every comparison and is rejected too.
+#
+# revenue_growth_yoy's lower bound is the least adversarially tested — no
+# artifact below -40% appeared in the basket; -0.9 is the "lost nearly all
+# revenue YoY = a corporate action, not organic performance" line.
+_PEER_METRIC_VALID_RANGE: dict[str, tuple[float, float]] = {
+    "pe_ratio": (0.0, 500.0),
+    "pb_ratio": (0.0, 100.0),
+    "ev_ebitda": (0.0, 200.0),
+    "debt_to_equity": (0.0, 50.0),
+    "revenue_growth_yoy": (-0.9, 1.5),  # 1.5 catches SNDK's 1.75 / PARA's 1.69
+    "gross_margin": (0.0, 0.99),
+    "operating_margin": (-1.0, 0.9),
+    "roe": (-2.0, 3.0),  # a real buyback-shrunk-equity ROE reaches ~1.2 (AAPL/HD live)
+}
+# _PEER_METRIC_VALID_RANGE must stay 1:1 with _SECTOR_MEDIAN_KEYS — a missing
+# entry KeyErrors in _valid_peer_value (asserted in test_fundamentals.py).
+
+
+def _valid_peer_value(metric: str, value: float | None) -> float | None:
+    """None (renders N/A downstream) unless value is present AND strictly
+    inside the metric's plausibility range. Per-metric because the metrics
+    fail in different ways — a negative P/B from negative book equity, a D/E
+    of exactly 0.0 as a missing-data signature, a spinoff's absurd first-year
+    revenue growth."""
+    if value is None:
+        return None
+    low, high = _PEER_METRIC_VALID_RANGE[metric]
+    return value if low < value < high else None
+
 
 def _ttm(periods: list[dict], field: str) -> float | None:
     """Trailing-twelve-month sum over the most recent 4 quarters. None if
@@ -230,7 +296,10 @@ def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
     roe = None
     ttm_net_income = _ttm(fin.quarters, "net_income")
     total_equity = fin.balance_sheet.get("total_equity")
-    if ttm_net_income is not None and total_equity:
+    # total_equity > 0, not just truthy: negative book equity makes ROE
+    # meaningless (a net loss over negative equity reads as a positive ROE) —
+    # None is the honest answer for both peers and the subject (86bbq04wm).
+    if ttm_net_income is not None and total_equity is not None and total_equity > 0:
         roe = ttm_net_income / total_equity
 
     fcf_to_net_income = None
@@ -427,13 +496,18 @@ def compute_peer_comparison(
         peer_balance_sheet = compute_balance_sheet_metrics(peer_fin)
         merged = {**peer_valuation, **peer_growth, **peer_profitability, **peer_balance_sheet}
         record = {"ticker": ticker}
-        record.update({key: merged.get(key) for key in _SECTOR_MEDIAN_KEYS})
+        # Sanitize once, here (86bbq04wm): the median loop reads from
+        # peer_records, so this fixes both the medians and the per-peer
+        # {peer_data_block} lines. A rejected value stores None (renders N/A).
+        record.update({key: _valid_peer_value(key, merged.get(key)) for key in _SECTOR_MEDIAN_KEYS})
         peer_records.append(record)
 
     sector_medians = {}
     for key, placeholder_name in _SECTOR_MEDIAN_KEYS.items():
         values = [r[key] for r in peer_records if r[key] is not None]
-        sector_medians[placeholder_name] = statistics.median(values) if values else None
+        sector_medians[placeholder_name] = (
+            statistics.median(values) if len(values) >= _MIN_PEERS_FOR_SECTOR_MEDIAN else None
+        )
 
     return {"sector_medians": sector_medians, "peer_records": peer_records}
 
