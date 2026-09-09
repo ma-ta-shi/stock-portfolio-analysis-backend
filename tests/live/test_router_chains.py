@@ -126,6 +126,26 @@ async def test_us_earnings_calendar_chain_primary_engages():
     assert source == "fmp"
 
 
+async def test_us_smallcap_earnings_calendar_falls_back_to_finnhub():
+    """FMP's bulk feed omits DDD (86bbpgrbz recon: FMP -> []); finnhub is
+    the only working US source for it, once it queries by symbol (86bbpgrjv)."""
+    async with Router(ticker=t.US_FMP_GAP) as router:
+        result, source = await router._try_chain("get_earnings_calendar", t.US_FMP_GAP)
+    assert not _is_empty(result)
+    assert source == "finnhub"
+    assert result[0].get("date")  # the key technicals._earnings_proximity reads
+
+
+async def test_us_smallcap_analyst_estimates_falls_back_to_yfinance():
+    """FMP's free tier 402s /analyst-estimates for non-large-caps; yfinance
+    .info has forwardEps (86bbpgrbz item 2)."""
+    async with Router(ticker=t.US_FMP_GAP) as router:
+        result, source = await router._try_chain("get_analyst_estimates", t.US_FMP_GAP)
+    assert not _is_empty(result)
+    assert source == "yfinance"
+    assert "forward_eps" in result
+
+
 # ---------- CA chains ----------
 # get_price_history: PLAN.V forces openbb_tmx to raise (EmptyDataError,
 # not a clean empty — see test_provider_completeness.py's TSXV test) —
@@ -149,6 +169,21 @@ async def test_ca_price_history_survives_openbb_tmx_exception_and_falls_back():
         )
     assert not _is_empty(result)
     assert source == "yfinance"
+
+
+async def test_ca_earnings_calendar_served_by_yfinance_with_a_date():
+    """CA earnings calendar is yfinance-only (openbb_tmx's TMX feed is a
+    ~2-day-forward window, dropped 86bbpgrbz item 1). The reshaped adapter
+    emits a `date` key so technicals._earnings_proximity can read it —
+    without the reshape this chain would resolve non-empty but be a silent
+    no-op downstream."""
+    ca_ticker = t.CA_CROSSLISTED[1]  # SHOP.TO — reliably has a forward date on yfinance
+    async with Router(ticker=ca_ticker) as router:
+        result, source = await router._try_chain("get_earnings_calendar", ca_ticker)
+    assert not _is_empty(result)
+    assert source == "yfinance"
+    for row in result:
+        pd.Timestamp(row["date"])  # raises if the reshaped adapter emitted an unparseable date
 
 
 async def test_ca_quote_chain_always_serves_from_yfinance():
