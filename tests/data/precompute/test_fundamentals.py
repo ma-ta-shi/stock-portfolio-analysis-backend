@@ -1,6 +1,9 @@
 import pytest
 
 from data.precompute.fundamentals import (
+    _PEER_METRIC_VALID_RANGE,
+    _SECTOR_MEDIAN_KEYS,
+    _valid_peer_value,
     compute_all,
     compute_balance_sheet_metrics,
     compute_dividend_info,
@@ -151,6 +154,16 @@ def test_compute_profitability_metrics_happy_path():
     assert result["fcf_to_net_income"] == pytest.approx((180.0 - 40.0) / 150.0)
     # latest net_margin 0.15 vs quarters[4] net_margin 100/800=0.125 -> +2.5pp -> expanding
     assert result["margin_trend"] == "expanding"
+
+
+def test_compute_profitability_metrics_roe_none_when_book_equity_negative():
+    """Negative book equity makes ROE meaningless — a net loss over negative
+    equity reads as a positive ROE (86bbq04wm)."""
+    result = compute_profitability_metrics(
+        _fin(balance_sheet={**_BALANCE_SHEET, "total_equity": -500.0})
+    )
+
+    assert result["roe"] is None
 
 
 def test_compute_profitability_metrics_empty_quarters_returns_all_none():
@@ -388,6 +401,101 @@ def test_compute_peer_comparison_empty_peers_returns_empty():
     result = compute_peer_comparison([])
 
     assert result == {"sector_medians": {}, "peer_records": []}
+
+
+# --- peer-median guard (86bbq04wm) ---
+
+
+@pytest.mark.parametrize(
+    "metric, in_range, out_of_range",
+    [
+        ("pe_ratio", 20.0, -5.0),
+        ("pb_ratio", 3.0, -1.0),
+        ("ev_ebitda", 12.0, -8.0),
+        ("debt_to_equity", 0.5, -2.0),
+        ("revenue_growth_yoy", 0.15, 1.75),  # SNDK spinoff-stub value
+        ("gross_margin", 0.4, -0.2),
+        ("operating_margin", 0.2, 1.5),
+        ("roe", 0.25, 5.0),
+    ],
+)
+def test_valid_peer_value_bounds(metric, in_range, out_of_range):
+    assert _valid_peer_value(metric, in_range) == in_range
+    assert _valid_peer_value(metric, out_of_range) is None
+    assert _valid_peer_value(metric, None) is None
+
+
+@pytest.mark.parametrize("metric", ["pe_ratio", "pb_ratio", "ev_ebitda", "debt_to_equity"])
+def test_valid_peer_value_rejects_negative_and_exact_zero(metric):
+    assert _valid_peer_value(metric, -1.0) is None
+    assert _valid_peer_value(metric, 0.0) is None
+
+
+def test_peer_metric_valid_range_covers_all_sector_median_keys():
+    assert set(_PEER_METRIC_VALID_RANGE) == set(_SECTOR_MEDIAN_KEYS)
+
+
+def test_compute_peer_comparison_single_peer_yields_no_medians():
+    result = compute_peer_comparison([("SOLO", _fin(), _price_info(current_price=25.0))])
+
+    assert len(result["peer_records"]) == 1
+    assert result["peer_records"][0]["pe_ratio"] is not None  # the real value is kept
+    assert all(v is None for v in result["sector_medians"].values())
+
+
+# revenue 10000 vs 3000 -> revenue_growth_yoy 2.33, past the 1.5 upper bound
+_EXTREME_GROWTH_ANNUAL = [
+    _quarter(10000.0, 500.0, 5.0, period_end="2025-12-31"),
+    _quarter(3000.0, 400.0, 4.0, period_end="2024-12-31"),
+]
+
+
+@pytest.mark.parametrize(
+    "override, metric, median_key",
+    [
+        (
+            {"balance_sheet": {**_BALANCE_SHEET, "total_equity": -500.0}},
+            "pb_ratio",
+            "sector_median_pb",
+        ),
+        (
+            {"balance_sheet": {**_BALANCE_SHEET, "total_equity": -500.0}},
+            "debt_to_equity",
+            "sector_median_de",
+        ),
+        (
+            {"balance_sheet": {**_BALANCE_SHEET, "total_debt": 0.0}},
+            "debt_to_equity",
+            "sector_median_de",
+        ),
+        ({"annual": _EXTREME_GROWTH_ANNUAL}, "revenue_growth_yoy", "sector_median_rev_growth"),
+    ],
+)
+def test_compute_peer_comparison_rejects_implausible_values(override, metric, median_key):
+    price = _price_info(current_price=25.0)
+    peer_data = [("BAD", _fin(**override), price), ("GOOD", _fin(), price)]
+
+    result = compute_peer_comparison(peer_data)
+
+    bad_record = next(r for r in result["peer_records"] if r["ticker"] == "BAD")
+    assert bad_record[metric] is None
+    # GOOD alone leaves 1 valid contributor < _MIN_PEERS_FOR_SECTOR_MEDIAN
+    assert result["sector_medians"][median_key] is None
+
+
+def test_compute_peer_comparison_three_peers_two_valid_yields_median():
+    price = _price_info(current_price=25.0)
+    good = _fin()
+    bad = _fin(balance_sheet={**_BALANCE_SHEET, "total_equity": -500.0})  # negative pb + de
+    peer_data = [("A", good, price), ("B", good, price), ("C", bad, price)]
+
+    result = compute_peer_comparison(peer_data)
+
+    a_pb = result["peer_records"][0]["pb_ratio"]
+    assert a_pb is not None
+    assert result["peer_records"][2]["pb_ratio"] is None  # C rejected (negative pb)
+    assert result["peer_records"][2]["roe"] is None  # C's roe suppressed at source (negative equity)
+    assert result["sector_medians"]["sector_median_pb"] == pytest.approx(a_pb)  # median of A, B
 
 
 # --- compute_all ---
