@@ -52,6 +52,15 @@ _MAX_CONCURRENT = 10  # matches the ticket's own original design parameter - a s
 # local Ollama instance still serializes GPU-bound inference across concurrent requests,
 # even though each individual call is now fast enough that queuing isn't the bottleneck
 # it was with the model this replaced.
+_NUM_CTX = 8192  # Ollama silently truncates context to its own small default if this
+# isn't set explicitly - confirmed live (docs/technical/ollama-num-ctx-finding.md) that
+# a truncated call doesn't error, it makes gpt-oss fabricate a confident, wrong answer
+# instead of reading the (missing, truncated-away) source text. This call's real input
+# (headline + article["text"], which is news_id_assignment.py's article.get("summary",
+# ""), a short snippet, never a full article body) is nowhere near this budget - 8192
+# is headroom, not a tight fit, and stays on the flat part of the latency-vs-num_ctx
+# curve (confirmed live: cost is flat from 2048 through 32768, only jumps at the
+# model's full 131072).
 _VALID_LABELS = ("positive", "negative", "neutral")
 
 _FORMAT_SCHEMA = {
@@ -79,6 +88,7 @@ async def _score_article(session: aiohttp.ClientSession, headline: str, text: st
         "stream": False,
         "think": _THINK,
         "format": _FORMAT_SCHEMA,
+        "options": {"num_ctx": _NUM_CTX},
     }
     try:
         async with session.post(_OLLAMA_URL, json=payload, timeout=_TIMEOUT) as response:
