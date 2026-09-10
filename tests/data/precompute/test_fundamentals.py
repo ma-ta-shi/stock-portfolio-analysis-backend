@@ -1,6 +1,11 @@
 import pytest
 
 from data.precompute.fundamentals import (
+    _PEER_METRIC_VALID_RANGE,
+    _SECTOR_MEDIAN_KEYS,
+    _peg,
+    _ttm_metric,
+    _valid_peer_value,
     compute_all,
     compute_balance_sheet_metrics,
     compute_dividend_info,
@@ -33,13 +38,14 @@ def _quarter(revenue, net_income, eps, operating_income=None, **overrides):
 
 
 # 5 quarters, newest first — revenue/net_income/eps trending up, enough for
-# a 4-quarter TTM sum and a quarters[4] YoY margin_trend comparison.
+# a 4-quarter TTM sum and a quarters[4] YoY margin_trend comparison. capex is
+# negative (a cash outflow), matching both providers' real sign.
 _QUARTERS = [
-    _quarter(1000.0, 150.0, 1.5, 200.0, operating_cash_flow=180.0, capital_expenditures=40.0),
-    _quarter(950.0, 140.0, 1.4, 190.0, operating_cash_flow=170.0, capital_expenditures=38.0),
-    _quarter(900.0, 130.0, 1.3, 180.0, operating_cash_flow=160.0, capital_expenditures=36.0),
-    _quarter(880.0, 120.0, 1.2, 170.0, operating_cash_flow=150.0, capital_expenditures=34.0),
-    _quarter(800.0, 100.0, 1.0, 150.0, operating_cash_flow=140.0, capital_expenditures=30.0),
+    _quarter(1000.0, 150.0, 1.5, 200.0, operating_cash_flow=180.0, capital_expenditures=-40.0),
+    _quarter(950.0, 140.0, 1.4, 190.0, operating_cash_flow=170.0, capital_expenditures=-38.0),
+    _quarter(900.0, 130.0, 1.3, 180.0, operating_cash_flow=160.0, capital_expenditures=-36.0),
+    _quarter(880.0, 120.0, 1.2, 170.0, operating_cash_flow=150.0, capital_expenditures=-34.0),
+    _quarter(800.0, 100.0, 1.0, 150.0, operating_cash_flow=140.0, capital_expenditures=-30.0),
 ]
 
 # 4 years, newest first — for revenue_growth_yoy (annual[0] vs [1]) and
@@ -106,6 +112,30 @@ def test_compute_growth_metrics_happy_path():
     assert "forward_pe" not in result
 
 
+# --- _ttm_metric (86bbxuj9e) ---
+
+
+def test_ttm_metric_prefers_explicit_ttm():
+    """A provider-supplied fin.ttm wins over summing quarters (edgartools,
+    whose quarterly history is too shallow to sum)."""
+    fin = _fin(ttm={"net_income": 999.0})
+    assert _ttm_metric(fin, "net_income") == 999.0
+
+
+def test_ttm_metric_falls_back_to_quarter_sum_when_no_ttm():
+    """yfinance / CA path: fin.ttm is None, sum the trailing 4 quarters —
+    identical to the old _ttm(fin.quarters, field)."""
+    fin = _fin(ttm=None)
+    assert _ttm_metric(fin, "net_income") == pytest.approx(150.0 + 140.0 + 130.0 + 120.0)
+
+
+def test_ttm_metric_falls_back_when_field_absent_from_ttm():
+    """fin.ttm exists but lacks the field (e.g. 'eps' is never in it) — fall
+    through to the quarter sum, which is None on a 2-quarter US frame."""
+    fin = _fin(ttm={"net_income": 500.0}, quarters=_QUARTERS[:2])
+    assert _ttm_metric(fin, "eps") is None
+
+
 def test_compute_growth_metrics_insufficient_annual_data_returns_none():
     result = compute_growth_metrics(_fin(annual=[_ANNUAL[0]]))
 
@@ -143,14 +173,45 @@ def test_compute_growth_metrics_cagr_none_when_base_year_non_positive():
 def test_compute_profitability_metrics_happy_path():
     result = compute_profitability_metrics(_fin())
 
-    assert result["gross_margin"] == pytest.approx((1000.0 - 600.0) / 1000.0)
-    assert result["operating_margin"] == pytest.approx(200.0 / 1000.0)
-    assert result["net_margin"] == pytest.approx(150.0 / 1000.0)
-    ttm_net_income = 150.0 + 140.0 + 130.0 + 120.0
+    # margins are trailing-twelve-month (86bbxuj9e), not one quarter
+    ttm_rev = 1000.0 + 950.0 + 900.0 + 880.0  # 3730
+    ttm_cost = 600.0 + 550.0 + 500.0 + 480.0  # cost_of_revenue = revenue - 400
+    ttm_op = 200.0 + 190.0 + 180.0 + 170.0  # 740
+    ttm_net_income = 150.0 + 140.0 + 130.0 + 120.0  # 540
+    assert result["gross_margin"] == pytest.approx((ttm_rev - ttm_cost) / ttm_rev)
+    assert result["operating_margin"] == pytest.approx(ttm_op / ttm_rev)
+    assert result["net_margin"] == pytest.approx(ttm_net_income / ttm_rev)
     assert result["roe"] == pytest.approx(ttm_net_income / 2000.0)
-    assert result["fcf_to_net_income"] == pytest.approx((180.0 - 40.0) / 150.0)
+    # TTM FCF = ttm(ocf) - |ttm(capex)| = 660 - 148 = 512; over TTM net income
+    ttm_fcf = (180.0 + 170.0 + 160.0 + 150.0) - (40.0 + 38.0 + 36.0 + 34.0)
+    assert result["fcf_to_net_income"] == pytest.approx(ttm_fcf / ttm_net_income)
     # latest net_margin 0.15 vs quarters[4] net_margin 100/800=0.125 -> +2.5pp -> expanding
     assert result["margin_trend"] == "expanding"
+
+
+def test_compute_profitability_metrics_margins_from_ttm_on_thin_quarters():
+    """US / edgartools shape: 2 quarters + a provider ttm dict. Margins still
+    resolve (from ttm), and are the trailing-twelve-month figure."""
+    fin = _fin(
+        quarters=_QUARTERS[:2],
+        ttm={"revenue": 4000.0, "cost_of_revenue": 2400.0, "operating_income": 800.0,
+             "net_income": 500.0},
+    )
+    result = compute_profitability_metrics(fin)
+
+    assert result["gross_margin"] == pytest.approx((4000.0 - 2400.0) / 4000.0)
+    assert result["operating_margin"] == pytest.approx(800.0 / 4000.0)
+    assert result["net_margin"] == pytest.approx(500.0 / 4000.0)
+
+
+def test_compute_profitability_metrics_roe_none_when_book_equity_negative():
+    """Negative book equity makes ROE meaningless — a net loss over negative
+    equity reads as a positive ROE (86bbq04wm)."""
+    result = compute_profitability_metrics(
+        _fin(balance_sheet={**_BALANCE_SHEET, "total_equity": -500.0})
+    )
+
+    assert result["roe"] is None
 
 
 def test_compute_profitability_metrics_empty_quarters_returns_all_none():
@@ -192,7 +253,8 @@ def test_compute_balance_sheet_metrics_happy_path():
         "debt_to_equity": pytest.approx(0.5),
         "current_ratio": pytest.approx(1500.0 / 700.0),
         "interest_coverage": pytest.approx(20.0),
-        "free_cash_flow": pytest.approx(140.0),
+        # TTM: ttm(ocf) - |ttm(capex)| = 660 - 148
+        "free_cash_flow": pytest.approx(512.0),
         "cash_position": 500.0,
     }
     assert "health_rating" not in result
@@ -225,9 +287,20 @@ def test_compute_valuation_metrics_happy_path():
     assert result["pb_ratio"] == pytest.approx(50.0 / (2000.0 / 100.0))
     ttm_revenue = 1000.0 + 950.0 + 900.0 + 880.0
     assert result["ps_ratio"] == pytest.approx(5000.0 / ttm_revenue)
-    assert result["ev_ebitda"] == pytest.approx((5000.0 + 1000.0 - 500.0) / (200.0 + 50.0))
+    # EBITDA is TTM: ttm(operating_income) + ttm(D&A) = 740 + 200 = 940
+    ttm_ebitda = (200.0 + 190.0 + 180.0 + 170.0) + (50.0 * 4)
+    assert result["ev_ebitda"] == pytest.approx((5000.0 + 1000.0 - 500.0) / ttm_ebitda)
     assert result["forward_pe"] is None
     assert result["peg_ratio"] == pytest.approx(result["pe_ratio"] / (growth["eps_growth_yoy"] * 100))
+
+
+def test_peg_none_when_growth_is_a_base_year_artifact():
+    """A prior-year EPS near zero (impairment year, cyclical trough) yields a
+    multi-hundred-percent YoY that collapses PEG toward a meaningless ~0.
+    _peg caps the growth input rather than emitting the garbage ratio."""
+    assert _peg(4.8, 36.7) is None  # BCE.TO-shaped: P/E ~4.8, "growth" ~3670%
+    assert _peg(20.0, 0.25) == pytest.approx(20.0 / 25.0)  # 25% growth still fine
+    assert _peg(20.0, 1.0) == pytest.approx(20.0 / 100.0)  # exactly 100% is the boundary, kept
 
 
 def test_compute_valuation_metrics_forward_pe_with_analyst_estimates():
@@ -275,6 +348,20 @@ def test_compute_valuation_metrics_thin_quarters_pe_ratio_none_not_approximated(
     assert result["ps_ratio"] is None
 
 
+def test_compute_valuation_metrics_uses_explicit_ttm_on_thin_quarters():
+    """The US / edgartools shape: only 2 quarters, but a provider-supplied
+    fin.ttm carries the trailing-twelve-month aggregates (86bbxuj9e). P/E
+    (via net income), P/S and PEG all resolve where the 4-quarter sum can't."""
+    growth = compute_growth_metrics(_fin())
+    fin = _fin(quarters=_QUARTERS[:2], ttm={"revenue": 3800.0, "net_income": 560.0})
+
+    result = compute_valuation_metrics(fin, _price_info(), growth)
+
+    assert result["pe_ratio"] == pytest.approx(5000.0 / 560.0)  # market_cap / ttm net income
+    assert result["ps_ratio"] == pytest.approx(5000.0 / 3800.0)
+    assert result["peg_ratio"] is not None
+
+
 def test_ev_ebitda_always_computed_no_sector_conditional():
     """ev_ebitda is computed unconditionally here — sector-based suppression
     is the payload-template's job, not this module's."""
@@ -282,6 +369,65 @@ def test_ev_ebitda_always_computed_no_sector_conditional():
     result = compute_valuation_metrics(_fin(), _price_info(), growth)
 
     assert result["ev_ebitda"] is not None
+
+
+# yfinance's per-quarter Diluted EPS is sporadically NaN for essentially every
+# Canadian filer, so _ttm("eps") is None sector-wide. pe_ratio then derives from
+# market_cap / TTM net income to common (falling back to total net income).
+_QUARTERS_NO_EPS = [
+    _quarter(1000.0, 150.0, None, 200.0, net_income_common=140.0),
+    _quarter(950.0, 140.0, None, 190.0, net_income_common=130.0),
+    _quarter(900.0, 130.0, None, 180.0, net_income_common=120.0),
+    _quarter(880.0, 120.0, None, 170.0, net_income_common=110.0),
+]
+
+
+def test_compute_valuation_metrics_pe_ratio_derives_from_net_income_common_when_eps_nan():
+    growth = compute_growth_metrics(_fin())
+    fin = _fin(quarters=_QUARTERS_NO_EPS)
+
+    result = compute_valuation_metrics(fin, _price_info(), growth)
+
+    ttm_nic = 140.0 + 130.0 + 120.0 + 110.0  # 500.0
+    assert result["pe_ratio"] == pytest.approx(5000.0 / ttm_nic)
+
+
+def test_compute_valuation_metrics_pe_ratio_falls_back_to_total_net_income():
+    """A filer that doesn't disclose the common split — net_income_common
+    absent — uses total net_income."""
+    growth = compute_growth_metrics(_fin())
+    quarters = [
+        _quarter(q["revenue"], q["net_income"], None, q["operating_income"])
+        for q in _QUARTERS_NO_EPS
+    ]
+
+    result = compute_valuation_metrics(_fin(quarters=quarters), _price_info(), growth)
+
+    ttm_ni = 150.0 + 140.0 + 130.0 + 120.0  # 540.0
+    assert result["pe_ratio"] == pytest.approx(5000.0 / ttm_ni)
+
+
+def test_compute_valuation_metrics_pe_ratio_none_on_ttm_loss():
+    """A real trailing loss leaves pe_ratio None — same as a negative real-EPS
+    P/E — rather than emitting a negative multiple."""
+    growth = compute_growth_metrics(_fin())
+    quarters = [_quarter(1000.0, -50.0, None, -40.0, net_income_common=-55.0) for _ in range(4)]
+
+    result = compute_valuation_metrics(_fin(quarters=quarters), _price_info(), growth)
+
+    assert result["pe_ratio"] is None
+    assert result["peg_ratio"] is None
+
+
+def test_compute_valuation_metrics_peg_ratio_uses_derived_pe_ratio():
+    growth = compute_growth_metrics(_fin())
+    assert growth["eps_growth_yoy"] > 0  # _ANNUAL trends up
+    fin = _fin(quarters=_QUARTERS_NO_EPS)
+
+    result = compute_valuation_metrics(fin, _price_info(), growth)
+
+    expected_pe = 5000.0 / 500.0
+    assert result["peg_ratio"] == pytest.approx(expected_pe / (growth["eps_growth_yoy"] * 100))
 
 
 # --- compute_dividend_info ---
@@ -295,29 +441,49 @@ def test_compute_dividend_info_happy_path():
     ttm_eps = 1.5 + 1.4 + 1.3 + 1.2
     assert result["payout_ratio"] == pytest.approx(trailing_annual_dividend / ttm_eps)
     assert result["dividend_growth_5yr"] == pytest.approx((0.80 / 0.60) ** (1 / 5) - 1)
-    assert result["dividend_type"] == "regular"
+    assert result["dividend_regularity"] == "regular"
     assert result["consecutive_years_paid"] == 6
 
 
-def test_compute_dividend_info_no_history_returns_none_type():
+def test_compute_dividend_info_payout_ratio_derives_from_net_income_when_eps_nan():
+    """CA filers hit the same yfinance quarterly-EPS-NaN problem here — payout
+    falls back to abs(TTM cash dividends paid) / TTM total net income."""
+    quarters = [_quarter(1000.0, 100.0, None, 200.0, dividends_paid=-30.0) for _ in range(4)]
+
+    result = compute_dividend_info(_fin(quarters=quarters), _price_info(), _dividend_history())
+
+    assert result["payout_ratio"] == pytest.approx(120.0 / 400.0)
+
+
+def test_compute_dividend_info_payout_ratio_none_when_no_fallback_inputs():
+    """eps NaN and no dividends_paid on the statements — payout stays None
+    rather than guessing."""
+    quarters = [_quarter(1000.0, 100.0, None, 200.0) for _ in range(4)]
+
+    result = compute_dividend_info(_fin(quarters=quarters), _price_info(), _dividend_history())
+
+    assert result["payout_ratio"] is None
+
+
+def test_compute_dividend_info_no_history_returns_none_regularity():
     result = compute_dividend_info(_fin(), _price_info(), [])
 
     assert result == {
         "dividend_yield": None,
         "payout_ratio": None,
         "dividend_growth_5yr": None,
-        "dividend_type": "none",
+        "dividend_regularity": "none",
         "consecutive_years_paid": 0,
     }
 
 
-def test_compute_dividend_info_irregular_type_from_special_dividend():
+def test_compute_dividend_info_irregular_regularity_from_special_dividend():
     history = [_dividend_record(f"2025-{m:02d}-15", 0.20) for m in (2, 5, 8, 11)]
     history.append(_dividend_record("2025-12-01", 5.00))  # special dividend spike
 
     result = compute_dividend_info(_fin(), _price_info(), history)
 
-    assert result["dividend_type"] == "irregular"
+    assert result["dividend_regularity"] == "irregular"
 
 
 def test_compute_dividend_info_consecutive_years_paid_stops_at_gap():
@@ -357,7 +523,7 @@ def test_compute_dividend_info_unsorted_input_handled_correctly():
     result = compute_dividend_info(_fin(), _price_info(), shuffled)
 
     assert result["consecutive_years_paid"] == 6
-    assert result["dividend_type"] == "regular"
+    assert result["dividend_regularity"] == "regular"
 
 
 # --- compute_peer_comparison ---
@@ -384,10 +550,120 @@ def test_compute_peer_comparison_happy_path():
     }
 
 
+def test_compute_peer_comparison_derived_pe_flows_into_sector_median():
+    """Peers hit the same yfinance EPS-NaN problem as the subject — the derived
+    market_cap / net-income-to-common P/E must flow through so sector_median_pe
+    stays on the same footing as the subject's own derived P/E, not N/A."""
+    peer_fin = _fin(quarters=_QUARTERS_NO_EPS)
+    peer_price = _price_info(current_price=25.0, market_cap=2500.0)
+    peer_data = [("PEER1", peer_fin, peer_price), ("PEER2", peer_fin, peer_price)]
+
+    result = compute_peer_comparison(peer_data)
+
+    ttm_nic = 140.0 + 130.0 + 120.0 + 110.0
+    assert result["peer_records"][0]["pe_ratio"] == pytest.approx(2500.0 / ttm_nic)
+    assert result["sector_medians"]["sector_median_pe"] == pytest.approx(2500.0 / ttm_nic)
+
+
 def test_compute_peer_comparison_empty_peers_returns_empty():
     result = compute_peer_comparison([])
 
     assert result == {"sector_medians": {}, "peer_records": []}
+
+
+# --- peer-median guard (86bbq04wm) ---
+
+
+@pytest.mark.parametrize(
+    "metric, in_range, out_of_range",
+    [
+        ("pe_ratio", 20.0, -5.0),
+        ("pb_ratio", 3.0, -1.0),
+        ("ev_ebitda", 12.0, -8.0),
+        ("debt_to_equity", 0.5, -2.0),
+        ("revenue_growth_yoy", 0.15, 1.75),  # SNDK spinoff-stub value
+        ("gross_margin", 0.4, -0.2),
+        ("operating_margin", 0.2, 1.5),
+        ("roe", 0.25, 5.0),
+    ],
+)
+def test_valid_peer_value_bounds(metric, in_range, out_of_range):
+    assert _valid_peer_value(metric, in_range) == in_range
+    assert _valid_peer_value(metric, out_of_range) is None
+    assert _valid_peer_value(metric, None) is None
+
+
+@pytest.mark.parametrize("metric", ["pe_ratio", "pb_ratio", "ev_ebitda", "debt_to_equity"])
+def test_valid_peer_value_rejects_negative_and_exact_zero(metric):
+    assert _valid_peer_value(metric, -1.0) is None
+    assert _valid_peer_value(metric, 0.0) is None
+
+
+def test_peer_metric_valid_range_covers_all_sector_median_keys():
+    assert set(_PEER_METRIC_VALID_RANGE) == set(_SECTOR_MEDIAN_KEYS)
+
+
+def test_compute_peer_comparison_single_peer_yields_no_medians():
+    result = compute_peer_comparison([("SOLO", _fin(), _price_info(current_price=25.0))])
+
+    assert len(result["peer_records"]) == 1
+    assert result["peer_records"][0]["pe_ratio"] is not None  # the real value is kept
+    assert all(v is None for v in result["sector_medians"].values())
+
+
+# revenue 10000 vs 3000 -> revenue_growth_yoy 2.33, past the 1.5 upper bound
+_EXTREME_GROWTH_ANNUAL = [
+    _quarter(10000.0, 500.0, 5.0, period_end="2025-12-31"),
+    _quarter(3000.0, 400.0, 4.0, period_end="2024-12-31"),
+]
+
+
+@pytest.mark.parametrize(
+    "override, metric, median_key",
+    [
+        (
+            {"balance_sheet": {**_BALANCE_SHEET, "total_equity": -500.0}},
+            "pb_ratio",
+            "sector_median_pb",
+        ),
+        (
+            {"balance_sheet": {**_BALANCE_SHEET, "total_equity": -500.0}},
+            "debt_to_equity",
+            "sector_median_de",
+        ),
+        (
+            {"balance_sheet": {**_BALANCE_SHEET, "total_debt": 0.0}},
+            "debt_to_equity",
+            "sector_median_de",
+        ),
+        ({"annual": _EXTREME_GROWTH_ANNUAL}, "revenue_growth_yoy", "sector_median_rev_growth"),
+    ],
+)
+def test_compute_peer_comparison_rejects_implausible_values(override, metric, median_key):
+    price = _price_info(current_price=25.0)
+    peer_data = [("BAD", _fin(**override), price), ("GOOD", _fin(), price)]
+
+    result = compute_peer_comparison(peer_data)
+
+    bad_record = next(r for r in result["peer_records"] if r["ticker"] == "BAD")
+    assert bad_record[metric] is None
+    # GOOD alone leaves 1 valid contributor < _MIN_PEERS_FOR_SECTOR_MEDIAN
+    assert result["sector_medians"][median_key] is None
+
+
+def test_compute_peer_comparison_three_peers_two_valid_yields_median():
+    price = _price_info(current_price=25.0)
+    good = _fin()
+    bad = _fin(balance_sheet={**_BALANCE_SHEET, "total_equity": -500.0})  # negative pb + de
+    peer_data = [("A", good, price), ("B", good, price), ("C", bad, price)]
+
+    result = compute_peer_comparison(peer_data)
+
+    a_pb = result["peer_records"][0]["pb_ratio"]
+    assert a_pb is not None
+    assert result["peer_records"][2]["pb_ratio"] is None  # C rejected (negative pb)
+    assert result["peer_records"][2]["roe"] is None  # C's roe suppressed at source (negative equity)
+    assert result["sector_medians"]["sector_median_pb"] == pytest.approx(a_pb)  # median of A, B
 
 
 # --- compute_all ---
@@ -399,16 +675,26 @@ def test_compute_all_happy_path_returns_full_shape():
     assert set(result.keys()) == {
         "valuation_metrics", "growth_metrics", "profitability_metrics",
         "balance_sheet_metrics", "dividend_info", "peer_metrics",
-        "quarters_available", "missing_fields",
+        "quarters_available", "missing_fields", "currency_mismatch",
     }
     assert result["quarters_available"] == 5
     assert result["valuation_metrics"]["pe_ratio"] is not None
     assert result["dividend_info"]["dividend_yield"] is not None
+    assert result["currency_mismatch"] is None
 
 
-def test_compute_all_currency_mismatch_raises():
-    with pytest.raises(ValueError, match="Currency mismatch"):
-        compute_all(_fin(currency="CAD"), _price_info(currency="USD"), [], [])
+def test_compute_all_currency_mismatch_is_marked_not_raised():
+    """A Canadian-listed USD-reporter (ATD.TO, NTR.TO, ...) has USD statements
+    and a CAD quote. Coverage first: still emit the metrics, but mark the
+    mismatch so downstream can flag the FX-distorted multiples (86bbxucf0)."""
+    result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], [])
+
+    assert result["currency_mismatch"] == {
+        "financials_currency": "USD",
+        "quote_currency": "CAD",
+    }
+    # metrics still computed (distorted, deliberately)
+    assert result["valuation_metrics"]["pe_ratio"] is not None
 
 
 def test_compute_all_missing_fields_lists_none_valued_keys():
