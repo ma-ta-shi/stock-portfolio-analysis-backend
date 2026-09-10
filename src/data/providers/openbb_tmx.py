@@ -46,6 +46,7 @@ from data.providers.base import (
     NormalizedAnalystEstimates,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
+    period_to_from_date,
 )
 
 logger = structlog.get_logger(__name__)
@@ -68,11 +69,16 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     # ---------- StockDataProvider ----------
 
     async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
+        # `start_date` (not `period`) — the tmx provider ignores `period` and
+        # otherwise caps at ~250 bars (~1y) regardless, which silently starved
+        # weekly_trend and the 3yr drawdown (86bbq7dkv). Confirmed live: with
+        # start_date, RY.TO returns the full requested span (250 -> 753 bars at 3y).
         result = await asyncio.to_thread(
             obb.equity.price.historical,
             symbol=ticker,
             interval=interval,
             provider=self.PROVIDER,
+            start_date=period_to_from_date(period),
         )
         return result.to_df()
 

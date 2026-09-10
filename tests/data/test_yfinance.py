@@ -23,7 +23,10 @@ class FakeTicker:
         insider_transactions: pd.DataFrame | None = None,
         calendar: dict | None = None,
         earnings_history: pd.DataFrame | None = None,
+        price_history: pd.DataFrame | None = None,
     ) -> None:
+        self._price_history = _empty_if_none(price_history)
+        self.history_calls: list[dict] = []
         self.info = info or {}
         self.quarterly_financials = _empty_if_none(quarterly_financials)
         self.financials = _empty_if_none(financials)
@@ -44,6 +47,10 @@ class FakeTicker:
             raise KeyError("quoteType not found")  # real yfinance failure mode
         return self._fast_info
 
+    def history(self, *args, **kwargs) -> pd.DataFrame:
+        self.history_calls.append({"args": args, "kwargs": kwargs})
+        return self._price_history
+
 
 def _empty_if_none(df: pd.DataFrame | None) -> pd.DataFrame:
     return df if df is not None else pd.DataFrame()
@@ -56,6 +63,46 @@ def provider():
 
 def _patch_ticker(monkeypatch, ticker_factory) -> None:
     monkeypatch.setattr("data.providers.yfinance.yf.Ticker", ticker_factory)
+
+
+# --- get_price_history (86bbq7dkv) ---
+
+
+async def test_get_price_history_requests_unadjusted_bar(provider, monkeypatch):
+    """auto_adjust=False so `Close` is the raw split-adjusted, NOT
+    dividend-back-adjusted, price — same basis as openbb-tmx / FMP."""
+    fake = FakeTicker(price_history=pd.DataFrame({"Close": [1.0, 2.0]}))
+    _patch_ticker(monkeypatch, lambda ticker: fake)
+    await provider.get_price_history("AAPL", "5y", "1d")
+    assert fake.history_calls[0]["kwargs"] == {
+        "period": "5y",
+        "interval": "1d",
+        "auto_adjust": False,
+    }
+
+
+async def test_get_price_history_drops_adj_close_column(provider, monkeypatch):
+    """The extra `Adj Close` column auto_adjust=False adds is dropped —
+    the output column set stays what it was before this change."""
+    raw = pd.DataFrame(
+        {
+            "Open": [1.0],
+            "High": [1.0],
+            "Low": [1.0],
+            "Close": [1.0],
+            "Adj Close": [0.95],
+            "Volume": [100],
+            "Dividends": [0.0],
+            "Stock Splits": [0.0],
+        }
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(price_history=raw))
+    result = await provider.get_price_history("AAPL", "1y", "1d")
+    assert "Adj Close" not in result.columns
+    assert list(result.columns) == [
+        "Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"
+    ]
+    assert result["Close"].iloc[0] == 1.0  # the raw close, not the 0.95 adjusted one
 
 
 # --- get_company_info ---

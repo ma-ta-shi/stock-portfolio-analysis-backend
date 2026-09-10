@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from data.providers.base import period_to_from_date
 from data.providers.openbb_tmx import OpenBBTMXProvider
 from openbb_core.app.model.abstract.error import OpenBBError
 import pandas as pd
@@ -96,14 +97,18 @@ async def test_get_price_history_uses_tmx_provider(provider, mock_obb):
 
 
 @pytest.mark.asyncio
-async def test_get_price_history_passes_ticker_and_interval(provider, mock_obb):
-    """Must forward ticker as `symbol` and interval unchanged."""
+async def test_get_price_history_passes_ticker_interval_and_start_date(provider, mock_obb):
+    """Forward ticker as `symbol`, interval unchanged, and `period` mapped to
+    `start_date` — the tmx provider ignores `period` and otherwise caps at
+    ~250 bars (86bbq7dkv)."""
     fake_df = pd.DataFrame({"close": [1.0]})
     mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
     await provider.get_price_history(ticker="RY", period="6mo", interval="1wk")
     _, kwargs = mock_obb.equity.price.historical.call_args
     assert kwargs["symbol"] == "RY"
     assert kwargs["interval"] == "1wk"
+    assert kwargs["start_date"] == period_to_from_date("6mo")
+    assert "period" not in kwargs
 
 
 @pytest.mark.asyncio
