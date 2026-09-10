@@ -448,6 +448,115 @@ async def test_ca_get_analyst_recommendation_trends_uses_yfinance_news():
     assert result == [{"period": "0m"}]
 
 
+# --- CA + US news merge for cross-listed tickers (86bbr4azz) ---
+# SHOP.TO -> SHOP and CNR.TO -> CNI are real entries in the shipped
+# ca_us_crosslisting.json — used as-is rather than mocked, so these also
+# double as a live check that the real map still resolves the way the
+# merge logic assumes. ZZZZ.TO is the file's existing convention for "not
+# in any map" (see test_is_crosslisted_false_for_unmapped_ticker).
+
+
+def _ca_router(**overrides) -> Router:
+    """Not _make_router below: that helper hardcodes ticker="SHOP.TO" for
+    every is_ca=True router, one ticker per branch. These tests need three
+    different real CA tickers (SHOP.TO, ZZZZ.TO, CNR.TO) to exercise three
+    different real crosslisting-map outcomes, so the ticker has to be a
+    per-test override, not a fixed default."""
+    kwargs = {"yfinance": FakeProvider(), "yfinance_news": FakeProvider()}
+    kwargs.update(overrides)
+    return Router(**kwargs)
+
+
+async def test_cross_listed_ca_ticker_merges_ca_and_us_news():
+    router = _ca_router(
+        ticker="SHOP.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "CA wire", "url": "https://ca/1"}])),
+        finnhub=FakeProvider(get_news=_ok([{"headline": "US journalism", "url": "https://us/1"}])),
+    )
+    result = await router.get_news("SHOP.TO", 30)
+    assert {a["headline"] for a in result} == {"CA wire", "US journalism"}
+
+
+async def test_non_cross_listed_ca_ticker_stays_ca_only_and_never_calls_finnhub():
+    calls = []
+
+    async def _tracked_get_news(ticker, days):
+        calls.append(ticker)
+        return [{"headline": "should never be reached"}]
+
+    router = _ca_router(
+        ticker="ZZZZ.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "CA only", "url": "https://ca/1"}])),
+        finnhub=FakeProvider(get_news=_tracked_get_news),
+    )
+    result = await router.get_news("ZZZZ.TO", 30)
+    assert [a["headline"] for a in result] == ["CA only"]
+    assert calls == [], "a non-cross-listed CA ticker must never call Finnhub"
+
+
+async def test_merge_dedupes_on_overlapping_url():
+    router = _ca_router(
+        ticker="SHOP.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "Story", "url": "https://shared/1"}])),
+        finnhub=FakeProvider(
+            get_news=_ok([{"headline": "Same story via Finnhub", "url": "https://shared/1"}])
+        ),
+    )
+    result = await router.get_news("SHOP.TO", 30)
+    assert len(result) == 1
+
+
+async def test_merge_does_not_collide_articles_with_no_url():
+    """The house news shape defaults url to "" when a provider has none —
+    two unrelated articles that both lack one must not dedupe together."""
+    router = _ca_router(
+        ticker="SHOP.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "CA, no url", "url": ""}])),
+        finnhub=FakeProvider(get_news=_ok([{"headline": "US, no url", "url": ""}])),
+    )
+    result = await router.get_news("SHOP.TO", 30)
+    assert len(result) == 2
+
+
+async def test_finnhub_failure_degrades_to_ca_only_no_exception():
+    router = _ca_router(
+        ticker="SHOP.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "CA only", "url": "https://ca/1"}])),
+        finnhub=FakeProvider(get_news=_raises(RuntimeError("SP_FINNHUB_API_KEY is not set"))),
+    )
+    result = await router.get_news("SHOP.TO", 30)
+    assert [a["headline"] for a in result] == ["CA only"]
+
+
+async def test_merge_resolves_the_real_us_ticker_not_a_suffix_strip():
+    """CNR.TO's real US symbol is CNI — bare "CNR" is Core Natural
+    Resources, an unrelated company."""
+    calls = []
+
+    async def _tracked_get_news(us_ticker, days):
+        calls.append(us_ticker)
+        return [{"headline": "CNI news", "url": "https://us/1"}]
+
+    router = _ca_router(
+        ticker="CNR.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "CA wire", "url": "https://ca/1"}])),
+        finnhub=FakeProvider(get_news=_tracked_get_news),
+    )
+    await router.get_news("CNR.TO", 30)
+    assert calls == ["CNI"]
+
+
+async def test_us_ticker_get_news_unaffected_by_ca_merge_logic():
+    router = Router(
+        ticker="AAPL",
+        fmp=FakeProvider(),
+        edgartools=FakeProvider(),
+        finnhub=FakeProvider(get_news=_ok([{"headline": "US news", "url": "https://us/1"}])),
+    )
+    result = await router.get_news("AAPL", 7)
+    assert result == [{"headline": "US news", "url": "https://us/1"}]
+
+
 # --- __aenter__/__aexit__ propagate to session-owning providers only ---
 
 
@@ -564,6 +673,13 @@ def _values_equal(a, b) -> bool:
 # DataFrame — the generic loop's isinstance(result, _METHOD_EMPTY_TYPE[method])
 # check doesn't fit its richer contract; covered by its own dedicated tests
 # instead (see "get_financials: source exposure" below).
+# get_news stays in this generic table and still exercises _try_chain
+# correctly, but its 86bbr4azz CA/US merge behavior is NOT covered here:
+# _METHOD_ARGS uses "AAPL" for every method regardless of branch, and
+# "AAPL" is never a crosslisting-map key, so the merge branch is always a
+# no-op below. That's exercised by the dedicated tests above instead — if
+# _METHOD_ARGS["get_news"] ever changes to a real cross-listed CA ticker,
+# these generic tests would start depending on the real crosslisting map.
 _CA_CHAIN_METHODS = [m for m in CA_CHAINS if m not in ("get_peers", "get_financials")]
 _US_CHAIN_METHODS = [m for m in US_CHAINS if m != "get_financials"]
 

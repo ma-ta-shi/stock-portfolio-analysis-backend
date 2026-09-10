@@ -176,6 +176,52 @@ async def test_ca_news_house_shape_survives_id_assignment():
     assert all(s["date"] is not None and s["headline"] for s in survivors)
 
 
+# --- CA + US news merge for cross-listed tickers (86bbr4azz) ---
+# Uses router.get_news() itself, not _try_chain — this is what exercises
+# the merge, unlike the single-provider check above.
+
+_WIRE_KEYWORDS = ("newswire", "quotemedia", "business wire")
+
+
+def _is_wire(article: dict) -> bool:
+    return any(k in article["source"].lower() for k in _WIRE_KEYWORDS)
+
+
+async def test_ca_news_merge_ry_has_both_wire_and_independent_journalism():
+    async with Router(ticker="RY.TO") as router:
+        result = await router.get_news("RY.TO", 30)
+    assert any(_is_wire(a) for a in result), "expected CA wire coverage to survive the merge"
+    assert any(not _is_wire(a) for a in result), (
+        "expected independent (non-wire) journalism from the Finnhub side of the merge"
+    )
+
+
+async def test_ca_news_merge_shop_gets_real_coverage_where_tmx_has_none():
+    """SHOP.TO returns 0 articles from openbb-tmx alone (no TMX news
+    coverage for this name, confirmed live) — the sharpest before/after
+    case for this ticket. Post-merge it must have real, non-wire
+    (Finnhub-sourced) articles."""
+    async with Router(ticker="SHOP.TO") as router:
+        result = await router.get_news("SHOP.TO", 30)
+    assert result, "SHOP.TO should have real news via the Finnhub merge even with 0 TMX coverage"
+    assert any(not _is_wire(a) for a in result)
+
+
+async def test_ca_news_merge_cnr_resolves_to_the_real_us_ticker():
+    """CNR.TO's US symbol is CNI (Canadian National Railway) — a naive
+    suffix strip would query Finnhub for "CNR" (Core Natural Resources,
+    an unrelated company). Confirms the merge fetched the right company's
+    news, not just that it fetched something."""
+    async with Router(ticker="CNR.TO") as router:
+        result = await router.get_news("CNR.TO", 30)
+    non_wire = [a for a in result if not _is_wire(a)]
+    assert non_wire, "expected Finnhub-sourced articles in the CNR.TO merge"
+    combined_text = " ".join(a["headline"] + " " + a["summary"] for a in non_wire).lower()
+    assert "canadian national" in combined_text or "cn rail" in combined_text or " cni" in (
+        " " + combined_text
+    ), "merged articles should be about Canadian National Railway, not a different CNR company"
+
+
 async def test_ca_quote_chain_always_serves_from_yfinance():
     """Real finding 2026-08-04: OpenBBTMXProvider has no get_quote method
     at all (confirmed via hasattr) — CA_CHAINS used to list it as the
