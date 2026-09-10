@@ -382,6 +382,19 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         `.to_df()`'s default columns, so this reads `.results` directly
         (pydantic models) rather than going through the DataFrame.
 
+        Returns the house news shape — `headline` / `summary` / `source` /
+        `url` / `published_at` — matching `finnhub.py::get_news`, not
+        OpenBB's raw `title` / `excerpt` / `date` field names. The only
+        consumer, `precompute/news_id_assignment.py::assign_news_ids()`,
+        keys off `published_at`; before this mapping every Canadian article
+        was silently dropped (86bbqh23f). `summary` is `""` in practice:
+        `excerpt` and `body` are `None` on every Canadian article
+        (headline-only — a QuoteMedia/TMX limitation, not a bug here; it
+        belongs in the reliability discount). `published_at` carries
+        OpenBB's `America/New_York`-local wall clock with tz stripped —
+        consistent within this CA-only list; a CA+US merge (86bbr4azz) must
+        reconcile it against Finnhub's box-local strings.
+
         `limit` is required — confirmed live TMX returns zero results
         without it, `start_date` is silently ignored (accepted by the
         shared OpenBB signature but not honored by the tmx provider) — so
@@ -402,7 +415,17 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             article_date = item.date.replace(tzinfo=None) if item.date else None
             if article_date is not None and article_date < cutoff:
                 continue
-            articles.append(item.model_dump())
+            articles.append(
+                {
+                    "headline": item.title or "",
+                    "summary": item.excerpt or "",
+                    "source": item.source or "",
+                    "url": item.url or "",
+                    "published_at": (
+                        article_date.strftime("%Y-%m-%d %H:%M:%S") if article_date else None
+                    ),
+                }
+            )
         return articles
 
     async def get_analyst_recommendation_trends(self, ticker: str) -> list[dict]:

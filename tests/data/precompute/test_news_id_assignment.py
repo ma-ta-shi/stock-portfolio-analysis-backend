@@ -36,6 +36,15 @@ def test_classify_quality_tier_matches_substring_not_exact():
     assert classify_quality_tier("GlobeNewswire Inc.") == "primary"
 
 
+def test_classify_quality_tier_canada_newswire_is_primary():
+    """86bbqh23f: "Canada Newswire via QuoteMedia" is openbb-tmx's dominant
+    Canadian wire (~80% of RY.TO's feed, confirmed live). It is the same
+    primary-source class as PR Newswire / Business Wire / GlobeNewswire and
+    must tier the same, not fall to "low"."""
+    assert classify_quality_tier("Canada Newswire via QuoteMedia") == "primary"
+    assert classify_quality_tier("PR Newswire via QuoteMedia") == "primary"
+
+
 def test_classify_quality_tier_secondary_source():
     assert classify_quality_tier("CNBC") == "secondary"
     assert classify_quality_tier("Yahoo Finance") == "secondary"
@@ -107,6 +116,29 @@ def test_output_carries_text_for_sentiment_scoring():
 
 def test_missing_summary_defaults_text_to_empty_string_not_raise():
     result = assign_news_ids([_article()])
+    assert result[0]["text"] == ""
+
+
+def test_openbb_tmx_house_shape_article_survives():
+    """Regression guard for 86bbqh23f: before openbb_tmx.get_news() was
+    mapped to the house shape, every CA article carried OpenBB's `date`/
+    `title`/`excerpt` keys, so `_parse_published_at` returned None and
+    100% of CA news was dropped here. A post-fix openbb-tmx row — house
+    shape, empty summary (CA is headline-only), CA wire source — must
+    survive with an id, a real date, and the primary tier."""
+    ca_article = {
+        "headline": "Enbridge announces bought-deal offering",
+        "summary": "",
+        "source": "Canada Newswire via QuoteMedia",
+        "url": "https://money.tmx.com/quote/ENB/news/1",
+        "published_at": "2026-09-09 16:17:00",
+    }
+    result = assign_news_ids([ca_article])
+    assert len(result) == 1
+    assert result[0]["id"] == "N1"
+    assert result[0]["date"] == datetime(2026, 9, 9, 16, 17, 0)
+    assert result[0]["headline"] == "Enbridge announces bought-deal offering"
+    assert result[0]["quality_tier"] == "primary"
     assert result[0]["text"] == ""
 
 
