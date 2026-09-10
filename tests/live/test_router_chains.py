@@ -19,6 +19,7 @@ than in test_provider_completeness.py.
 import pandas as pd
 import pytest
 
+from data.precompute.news_id_assignment import assign_news_ids
 from data.providers.router import Router
 
 import tickers as t
@@ -149,6 +150,30 @@ async def test_ca_price_history_survives_openbb_tmx_exception_and_falls_back():
         )
     assert not _is_empty(result)
     assert source == "yfinance"
+
+
+async def test_ca_news_house_shape_survives_id_assignment():
+    """86bbqh23f: openbb_tmx.get_news() used to return OpenBB's raw
+    `date`/`title`/`excerpt` shape, so assign_news_ids() (which keys off
+    `published_at`) silently dropped 100% of Canadian articles. This is
+    the end-to-end guard: real openbb-tmx CA news → real house shape →
+    non-zero survivors. RY.TO, not SHOP.TO — SHOP has no TMX news
+    coverage (tracked on 86bbr4azz)."""
+    async with Router(ticker="RY.TO") as router:
+        raw, source = await router._try_chain("get_news", "RY.TO", 30)
+    assert source == "openbb_tmx"
+    assert not _is_empty(raw), "RY.TO should have real openbb-tmx news coverage"
+    assert all(
+        set(row) == {"headline", "summary", "source", "url", "published_at"} for row in raw
+    ), f"get_news must return the house shape, got keys {sorted(raw[0])}"
+
+    survivors = assign_news_ids(raw)
+    # The bug was a 100% wipeout; > 0 is the real guard. Exact 1:1 survival is
+    # covered deterministically by test_openbb_tmx_house_shape_article_survives —
+    # asserting it here too would make this live test flaky on a single
+    # malformed upstream date.
+    assert len(survivors) > 0, "every CA article was dropped by assign_news_ids — the 86bbqh23f bug"
+    assert all(s["date"] is not None and s["headline"] for s in survivors)
 
 
 async def test_ca_quote_chain_always_serves_from_yfinance():

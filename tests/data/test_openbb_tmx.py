@@ -1,5 +1,7 @@
 import asyncio
+import re
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from data.providers.openbb_tmx import OpenBBTMXProvider
 from openbb_core.app.model.abstract.error import OpenBBError
@@ -702,14 +704,22 @@ async def test_get_earnings_calendar_no_match_returns_empty_list(provider, mock_
 
 
 def _fake_news_result(articles: list[dict]) -> MagicMock:
+    """`.results` is a list of OpenBB news models. get_news reads
+    `item.title` / `item.excerpt` / `item.source` / `item.url` / `item.date`
+    directly (not `model_dump()`), so this uses SimpleNamespace, not
+    MagicMock — a MagicMock auto-creates a truthy child mock for an unset
+    attribute, which would mask the empty-summary case."""
     result = MagicMock()
-    items = []
-    for article in articles:
-        item = MagicMock()
-        item.date = article.get("date")
-        item.model_dump.return_value = article
-        items.append(item)
-    result.results = items
+    result.results = [
+        SimpleNamespace(
+            title=a.get("title"),
+            excerpt=a.get("excerpt"),
+            source=a.get("source"),
+            url=a.get("url"),
+            date=a.get("date"),
+        )
+        for a in articles
+    ]
     return result
 
 
@@ -730,7 +740,51 @@ async def test_get_news_filters_by_days(provider, mock_obb):
     mock_obb.news.company.return_value = _fake_news_result([recent, old])
     result = await provider.get_news(ticker="RY.TO", days=90)
     assert len(result) == 1
-    assert result[0]["title"] == "Recent"
+    assert result[0]["headline"] == "Recent"
+
+
+@pytest.mark.asyncio
+async def test_get_news_maps_to_house_shape(provider, mock_obb):
+    """Output keys and names match finnhub.py::get_news, not OpenBB's raw
+    title/excerpt/date — the mismatch that dropped 100% of CA news
+    downstream (86bbqh23f)."""
+    now = datetime.now()
+    article = {
+        "date": now - timedelta(days=2),
+        "title": "Bank reports Q3 results",
+        "excerpt": "Summary text.",
+        "source": "PR Newswire via QuoteMedia",
+        "url": "https://money.tmx.com/quote/RY/news/1",
+    }
+    mock_obb.news.company.return_value = _fake_news_result([article])
+    result = await provider.get_news(ticker="RY.TO", days=30)
+    assert len(result) == 1
+    row = result[0]
+    assert set(row) == {"headline", "summary", "source", "url", "published_at"}
+    assert row["headline"] == "Bank reports Q3 results"
+    assert row["summary"] == "Summary text."
+    assert row["source"] == "PR Newswire via QuoteMedia"
+    assert row["url"] == "https://money.tmx.com/quote/RY/news/1"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", row["published_at"])
+
+
+@pytest.mark.asyncio
+async def test_get_news_empty_excerpt_yields_empty_summary(provider, mock_obb):
+    """Every Canadian article has excerpt=None (headline-only, confirmed
+    live) — it must map to "" and the article must NOT be dropped."""
+    now = datetime.now()
+    article = {
+        "date": now - timedelta(days=1),
+        "title": "Canadian headline only",
+        "excerpt": None,
+        "source": "Canada Newswire via QuoteMedia",
+        "url": "https://money.tmx.com/quote/RY/news/2",
+    }
+    mock_obb.news.company.return_value = _fake_news_result([article])
+    result = await provider.get_news(ticker="RY.TO", days=30)
+    assert len(result) == 1
+    assert result[0]["summary"] == ""
+    assert result[0]["headline"] == "Canadian headline only"
 
 
 @pytest.mark.asyncio
