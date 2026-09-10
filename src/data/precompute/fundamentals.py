@@ -136,6 +136,19 @@ def _ttm(periods: list[dict], field: str) -> float | None:
     return sum(values)
 
 
+def _ttm_metric(fin: NormalizedFinancials, field: str) -> float | None:
+    """Trailing-twelve-month value for a field. Prefers fin.ttm — an explicit
+    TTM the provider computed because its quarterly history is too shallow to
+    sum (edgartools, 86bbxuj9e; computed there by YTD algebra). Falls back to
+    summing the trailing 4 quarters (yfinance, which has real deep quarters).
+    `eps` is never in fin.ttm, so it always takes the 4-quarter path — which
+    yields None on the 2-quarter US path, correctly forcing P/E onto the
+    net-income route."""
+    if fin.ttm is not None and fin.ttm.get(field) is not None:
+        return fin.ttm[field]
+    return _ttm(fin.quarters, field)
+
+
 def _cagr(annual: list[dict], field: str, years: int = 3) -> float | None:
     """Undefined when the base year is negative or zero (common for
     turnaround names with a loss year several years back) — return None
@@ -148,23 +161,31 @@ def _cagr(annual: list[dict], field: str, years: int = 3) -> float | None:
     return (end / start) ** (1 / years) - 1
 
 
-def _ebitda(quarter: dict) -> float | None:
-    """EBITDA isn't a raw line item — derive it."""
-    operating_income = quarter.get("operating_income")
-    depreciation = quarter.get("depreciation_amortization")
-    if operating_income is None or depreciation is None:
+def _fcf(fin: NormalizedFinancials) -> float | None:
+    """Trailing-twelve-month free cash flow = TTM operating cash flow minus
+    capital expenditure. Both providers report capex as a negative outflow, so
+    subtract its magnitude (86bbxuj9e — the prior `ocf - capex` added it back,
+    overstating FCF by 2x capex on the CA path)."""
+    ocf = _ttm_metric(fin, "operating_cash_flow")
+    capex = _ttm_metric(fin, "capital_expenditures")
+    if ocf is None or capex is None:
         return None
-    return operating_income + depreciation
+    return ocf - abs(capex)
 
 
 def _ev_ebitda(fin: NormalizedFinancials, price_info: NormalizedQuote) -> float | None:
     """Always computed when data allows, not conditionally skipped for
     non-capital-intensive sectors — the live prompt's own CAPITAL_INTENSIVE
     sector conditional is a payload-template/orchestrator rendering
-    decision, not a data-computation concern."""
-    if not fin.quarters:
+    decision, not a data-computation concern.
+
+    EBITDA is a trailing-twelve-month figure (86bbxuj9e — was one quarter,
+    which made EV/EBITDA ~4x too high on both paths)."""
+    operating_income = _ttm_metric(fin, "operating_income")
+    depreciation = _ttm_metric(fin, "depreciation_amortization")
+    if operating_income is None or depreciation is None:
         return None
-    ebitda = _ebitda(fin.quarters[0])
+    ebitda = operating_income + depreciation
     if not ebitda:
         return None
     market_cap = price_info.get("market_cap")
@@ -317,7 +338,7 @@ def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
     net_margin = _net_margin(latest)
 
     roe = None
-    ttm_net_income = _ttm(fin.quarters, "net_income")
+    ttm_net_income = _ttm_metric(fin, "net_income")
     total_equity = fin.balance_sheet.get("total_equity")
     # total_equity > 0, not just truthy: negative book equity makes ROE
     # meaningless (a net loss over negative equity reads as a positive ROE) —
@@ -326,13 +347,9 @@ def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
         roe = ttm_net_income / total_equity
 
     fcf_to_net_income = None
-    ocf, capex, net_income = (
-        latest.get("operating_cash_flow"),
-        latest.get("capital_expenditures"),
-        latest.get("net_income"),
-    )
-    if ocf is not None and capex is not None and net_income:
-        fcf_to_net_income = (ocf - capex) / net_income
+    ttm_fcf = _fcf(fin)
+    if ttm_fcf is not None and ttm_net_income:
+        fcf_to_net_income = ttm_fcf / ttm_net_income
 
     return {
         "gross_margin": gross_margin,
@@ -359,7 +376,6 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
     )
 
     interest_coverage = None
-    free_cash_flow = None
     if fin.quarters:
         latest = fin.quarters[0]
         operating_income, interest_expense = latest.get("operating_income"), latest.get(
@@ -367,15 +383,12 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
         )
         if operating_income is not None and interest_expense:
             interest_coverage = operating_income / interest_expense
-        ocf, capex = latest.get("operating_cash_flow"), latest.get("capital_expenditures")
-        if ocf is not None and capex is not None:
-            free_cash_flow = ocf - capex
 
     return {
         "debt_to_equity": debt_to_equity,
         "current_ratio": current_ratio,
         "interest_coverage": interest_coverage,
-        "free_cash_flow": free_cash_flow,
+        "free_cash_flow": _fcf(fin),
         "cash_position": bs.get("cash_and_equivalents"),
     }
 
@@ -389,11 +402,12 @@ def compute_valuation_metrics(
     current_price = price_info.get("current_price")
     market_cap = price_info.get("market_cap")
 
-    ttm_eps = _ttm(fin.quarters, "eps")
+    ttm_eps = _ttm_metric(fin, "eps")
     pe_ratio = current_price / ttm_eps if current_price is not None and ttm_eps else None
     if pe_ratio is None:
         # yfinance's per-quarter Diluted EPS is sporadically NaN for essentially
-        # every Canadian filer, so _ttm("eps") is None sector-wide. price / EPS
+        # every Canadian filer, and the US path only ever has 2 quarters, so
+        # _ttm_metric("eps") is None on both. price / EPS
         # is identically market_cap / net income to common, and net income is
         # reliably present per quarter. Income to common (not total) because P/E
         # is a per-common-share metric: this tracks .info trailingPE within ~2%
@@ -402,18 +416,28 @@ def compute_valuation_metrics(
         # split (identical for names with no preferred). A real TTM loss leaves
         # pe_ratio None, same as a negative real-EPS P/E. compute_peer_comparison
         # runs this per peer, so sector_median_pe is derived the same way.
-        ttm_ni = _ttm(fin.quarters, "net_income_common") or _ttm(fin.quarters, "net_income")
+        ttm_ni = _ttm_metric(fin, "net_income_common") or _ttm_metric(fin, "net_income")
         if ttm_ni is not None and ttm_ni > 0 and market_cap is not None:
             pe_ratio = market_cap / ttm_ni
 
-    shares_outstanding = fin.quarters[0].get("shares_outstanding") if fin.quarters else None
     total_equity = fin.balance_sheet.get("total_equity")
     pb_ratio = None
-    if current_price is not None and total_equity is not None and shares_outstanding:
-        book_value_per_share = total_equity / shares_outstanding
-        pb_ratio = current_price / book_value_per_share if book_value_per_share else None
+    if total_equity is not None and total_equity > 0:
+        # market_cap / book equity — the direct form, no per-share round trip.
+        # Robust to a missing shares_outstanding line (US filers often don't tag
+        # weighted-average shares on the balance-sheet-bearing statement).
+        # Negative book equity (buybacks) -> None, matching the ROE guard.
+        if market_cap is not None:
+            pb_ratio = market_cap / total_equity
+        else:
+            shares_outstanding = (
+                fin.quarters[0].get("shares_outstanding") if fin.quarters else None
+            )
+            if current_price is not None and shares_outstanding:
+                bvps = total_equity / shares_outstanding
+                pb_ratio = current_price / bvps if bvps else None
 
-    ttm_revenue = _ttm(fin.quarters, "revenue")
+    ttm_revenue = _ttm_metric(fin, "revenue")
     ps_ratio = market_cap / ttm_revenue if market_cap is not None and ttm_revenue else None
 
     # forward_pe (86bbdu04a) mirrors pe_ratio's own guard style exactly —
@@ -491,18 +515,18 @@ def compute_dividend_info(
         if reference_total and reference_total > 0:
             dividend_growth_5yr = (trailing_annual_dividend / reference_total) ** (1 / 5) - 1
 
-    ttm_eps = _ttm(fin.quarters, "eps")
+    ttm_eps = _ttm_metric(fin, "eps")
     payout_ratio = trailing_annual_dividend / ttm_eps if ttm_eps else None
     if payout_ratio is None:
-        # Same yfinance quarterly-EPS-NaN problem as compute_valuation_metrics:
-        # for CA filers the per-share path never resolves. Fall back to total
-        # cash dividends paid / total net income. Total net_income here (not
-        # net income to common, unlike the P/E path) because "Cash Dividends
-        # Paid" is total cash dividends including preferred, so the consistent
-        # denominator is total net income — this also matches how .info
-        # payoutRatio is computed (verified within 0.1pp for RY.TO / SU.TO).
-        ttm_ni = _ttm(fin.quarters, "net_income")
-        ttm_dividends_paid = _ttm(fin.quarters, "dividends_paid")
+        # The per-share path never resolves for CA (quarterly EPS NaN) or US
+        # (only 2 quarters). Fall back to total cash dividends paid / total net
+        # income. Total net_income here (not net income to common, unlike the
+        # P/E path) because "Cash Dividends Paid" is total cash dividends
+        # including preferred, so the consistent denominator is total net
+        # income — matches how .info payoutRatio is computed (verified within
+        # 0.1pp for RY.TO / SU.TO).
+        ttm_ni = _ttm_metric(fin, "net_income")
+        ttm_dividends_paid = _ttm_metric(fin, "dividends_paid")
         if ttm_ni is not None and ttm_ni > 0 and ttm_dividends_paid is not None:
             payout_ratio = abs(ttm_dividends_paid) / ttm_ni
 

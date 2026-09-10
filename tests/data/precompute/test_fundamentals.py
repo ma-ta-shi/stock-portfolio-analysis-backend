@@ -4,6 +4,7 @@ from data.precompute.fundamentals import (
     _PEER_METRIC_VALID_RANGE,
     _SECTOR_MEDIAN_KEYS,
     _peg,
+    _ttm_metric,
     _valid_peer_value,
     compute_all,
     compute_balance_sheet_metrics,
@@ -37,13 +38,14 @@ def _quarter(revenue, net_income, eps, operating_income=None, **overrides):
 
 
 # 5 quarters, newest first — revenue/net_income/eps trending up, enough for
-# a 4-quarter TTM sum and a quarters[4] YoY margin_trend comparison.
+# a 4-quarter TTM sum and a quarters[4] YoY margin_trend comparison. capex is
+# negative (a cash outflow), matching both providers' real sign.
 _QUARTERS = [
-    _quarter(1000.0, 150.0, 1.5, 200.0, operating_cash_flow=180.0, capital_expenditures=40.0),
-    _quarter(950.0, 140.0, 1.4, 190.0, operating_cash_flow=170.0, capital_expenditures=38.0),
-    _quarter(900.0, 130.0, 1.3, 180.0, operating_cash_flow=160.0, capital_expenditures=36.0),
-    _quarter(880.0, 120.0, 1.2, 170.0, operating_cash_flow=150.0, capital_expenditures=34.0),
-    _quarter(800.0, 100.0, 1.0, 150.0, operating_cash_flow=140.0, capital_expenditures=30.0),
+    _quarter(1000.0, 150.0, 1.5, 200.0, operating_cash_flow=180.0, capital_expenditures=-40.0),
+    _quarter(950.0, 140.0, 1.4, 190.0, operating_cash_flow=170.0, capital_expenditures=-38.0),
+    _quarter(900.0, 130.0, 1.3, 180.0, operating_cash_flow=160.0, capital_expenditures=-36.0),
+    _quarter(880.0, 120.0, 1.2, 170.0, operating_cash_flow=150.0, capital_expenditures=-34.0),
+    _quarter(800.0, 100.0, 1.0, 150.0, operating_cash_flow=140.0, capital_expenditures=-30.0),
 ]
 
 # 4 years, newest first — for revenue_growth_yoy (annual[0] vs [1]) and
@@ -110,6 +112,30 @@ def test_compute_growth_metrics_happy_path():
     assert "forward_pe" not in result
 
 
+# --- _ttm_metric (86bbxuj9e) ---
+
+
+def test_ttm_metric_prefers_explicit_ttm():
+    """A provider-supplied fin.ttm wins over summing quarters (edgartools,
+    whose quarterly history is too shallow to sum)."""
+    fin = _fin(ttm={"net_income": 999.0})
+    assert _ttm_metric(fin, "net_income") == 999.0
+
+
+def test_ttm_metric_falls_back_to_quarter_sum_when_no_ttm():
+    """yfinance / CA path: fin.ttm is None, sum the trailing 4 quarters —
+    identical to the old _ttm(fin.quarters, field)."""
+    fin = _fin(ttm=None)
+    assert _ttm_metric(fin, "net_income") == pytest.approx(150.0 + 140.0 + 130.0 + 120.0)
+
+
+def test_ttm_metric_falls_back_when_field_absent_from_ttm():
+    """fin.ttm exists but lacks the field (e.g. 'eps' is never in it) — fall
+    through to the quarter sum, which is None on a 2-quarter US frame."""
+    fin = _fin(ttm={"net_income": 500.0}, quarters=_QUARTERS[:2])
+    assert _ttm_metric(fin, "eps") is None
+
+
 def test_compute_growth_metrics_insufficient_annual_data_returns_none():
     result = compute_growth_metrics(_fin(annual=[_ANNUAL[0]]))
 
@@ -150,9 +176,11 @@ def test_compute_profitability_metrics_happy_path():
     assert result["gross_margin"] == pytest.approx((1000.0 - 600.0) / 1000.0)
     assert result["operating_margin"] == pytest.approx(200.0 / 1000.0)
     assert result["net_margin"] == pytest.approx(150.0 / 1000.0)
-    ttm_net_income = 150.0 + 140.0 + 130.0 + 120.0
+    ttm_net_income = 150.0 + 140.0 + 130.0 + 120.0  # 540
     assert result["roe"] == pytest.approx(ttm_net_income / 2000.0)
-    assert result["fcf_to_net_income"] == pytest.approx((180.0 - 40.0) / 150.0)
+    # TTM FCF = ttm(ocf) - |ttm(capex)| = 660 - 148 = 512; over TTM net income
+    ttm_fcf = (180.0 + 170.0 + 160.0 + 150.0) - (40.0 + 38.0 + 36.0 + 34.0)
+    assert result["fcf_to_net_income"] == pytest.approx(ttm_fcf / ttm_net_income)
     # latest net_margin 0.15 vs quarters[4] net_margin 100/800=0.125 -> +2.5pp -> expanding
     assert result["margin_trend"] == "expanding"
 
@@ -206,7 +234,8 @@ def test_compute_balance_sheet_metrics_happy_path():
         "debt_to_equity": pytest.approx(0.5),
         "current_ratio": pytest.approx(1500.0 / 700.0),
         "interest_coverage": pytest.approx(20.0),
-        "free_cash_flow": pytest.approx(140.0),
+        # TTM: ttm(ocf) - |ttm(capex)| = 660 - 148
+        "free_cash_flow": pytest.approx(512.0),
         "cash_position": 500.0,
     }
     assert "health_rating" not in result
@@ -239,7 +268,9 @@ def test_compute_valuation_metrics_happy_path():
     assert result["pb_ratio"] == pytest.approx(50.0 / (2000.0 / 100.0))
     ttm_revenue = 1000.0 + 950.0 + 900.0 + 880.0
     assert result["ps_ratio"] == pytest.approx(5000.0 / ttm_revenue)
-    assert result["ev_ebitda"] == pytest.approx((5000.0 + 1000.0 - 500.0) / (200.0 + 50.0))
+    # EBITDA is TTM: ttm(operating_income) + ttm(D&A) = 740 + 200 = 940
+    ttm_ebitda = (200.0 + 190.0 + 180.0 + 170.0) + (50.0 * 4)
+    assert result["ev_ebitda"] == pytest.approx((5000.0 + 1000.0 - 500.0) / ttm_ebitda)
     assert result["forward_pe"] is None
     assert result["peg_ratio"] == pytest.approx(result["pe_ratio"] / (growth["eps_growth_yoy"] * 100))
 
@@ -296,6 +327,20 @@ def test_compute_valuation_metrics_thin_quarters_pe_ratio_none_not_approximated(
 
     assert result["pe_ratio"] is None
     assert result["ps_ratio"] is None
+
+
+def test_compute_valuation_metrics_uses_explicit_ttm_on_thin_quarters():
+    """The US / edgartools shape: only 2 quarters, but a provider-supplied
+    fin.ttm carries the trailing-twelve-month aggregates (86bbxuj9e). P/E
+    (via net income), P/S and PEG all resolve where the 4-quarter sum can't."""
+    growth = compute_growth_metrics(_fin())
+    fin = _fin(quarters=_QUARTERS[:2], ttm={"revenue": 3800.0, "net_income": 560.0})
+
+    result = compute_valuation_metrics(fin, _price_info(), growth)
+
+    assert result["pe_ratio"] == pytest.approx(5000.0 / 560.0)  # market_cap / ttm net income
+    assert result["ps_ratio"] == pytest.approx(5000.0 / 3800.0)
+    assert result["peg_ratio"] is not None
 
 
 def test_ev_ebitda_always_computed_no_sector_conditional():

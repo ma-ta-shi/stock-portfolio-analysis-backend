@@ -64,11 +64,17 @@ class FakeCompany:
         self,
         annual=None,
         quarterly=None,
+        annual_income_df=None,
+        annual_cashflow_df=None,
+        fiscal_year_end="1231",
         filings: list[FakeFiling] | None = None,
         filings_by_form: dict[str, list] | None = None,
     ) -> None:
-        self._annual = annual
-        self._quarterly = quarterly
+        self._annual = annual  # FakeFinancials for the latest 10-K (FY totals -> ttm)
+        self._quarterly = quarterly  # FakeFinancials for the latest 10-Q
+        self._annual_income_df = annual_income_df  # high-level multi-period frame
+        self._annual_cashflow_df = annual_cashflow_df
+        self.fiscal_year_end = fiscal_year_end
         self._filings = filings or []
         self._filings_by_form = filings_by_form or {}
 
@@ -78,10 +84,26 @@ class FakeCompany:
     def get_quarterly_financials(self) -> FakeFinancials | None:
         return self._quarterly
 
+    def income_statement(self, periods=4, period="annual", as_dataframe=False):
+        return self._annual_income_df
+
+    def cashflow_statement(self, periods=4, period="annual", as_dataframe=False):
+        return self._annual_cashflow_df
+
     def get_filings(self, form: str | None = None, amendments: bool = True) -> FakeFilingsResult:
         if form is not None and form in self._filings_by_form:
             return FakeFilingsResult(self._filings_by_form[form])
         return FakeFilingsResult(self._filings)
+
+
+def _highlevel_df(rows: list[tuple[str, float | list[float]]], columns: list[str]) -> pd.DataFrame:
+    """Concept-INDEXED frame, as Company.income_statement(as_dataframe=True)
+    returns it: bare concept names (no 'us-gaap_' prefix), one row per concept,
+    no 'dimension' column, one value column per fiscal period ('FY 2025')."""
+    data = {}
+    for i, col in enumerate(columns):
+        data[col] = [(v[i] if isinstance(v, list) else v) for _, v in rows]
+    return pd.DataFrame(data, index=[r[0] for r in rows])
 
 
 # --- Fixtures ---
@@ -212,11 +234,10 @@ def _concept_df(rows: list[tuple[str, str, bool, float]], period_col: str) -> pd
 async def test_normalize_financials_uses_consolidated_row_not_segment_breakdown(
     provider, monkeypatch
 ):
-    """Real, confirmed finding: edgartools repeats a concept once for the
+    """The raw 10-Q frame (quarters[]) repeats a concept once for the
     consolidated total and again per segment/product breakdown — dimension
-    == False is the consolidated row. A naive first-match-by-concept
-    lookup with rows ordered breakdown-first would silently pick a segment
-    slice instead of total revenue."""
+    == False is the consolidated row. A naive first-match-by-concept lookup
+    with rows ordered breakdown-first would pick a segment slice instead."""
     income = _concept_df(
         [
             ("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "iPhone", True, 500.0),
@@ -227,14 +248,14 @@ async def test_normalize_financials_uses_consolidated_row_not_segment_breakdown(
                 1000.0,
             ),
         ],
-        "2026-06-27 (FY)",
+        "2026-06-27 (Q3)",
     )
-    fake = FakeCompany(annual=FakeFinancials(income_df=income))
+    fake = FakeCompany(quarterly=FakeFinancials(income_df=income))
     _patch_company(monkeypatch, lambda ticker: fake)
 
     result = await provider.normalize_financials("AAPL")
 
-    assert result.annual[0]["revenue"] == 1000.0
+    assert result.quarters[0]["revenue"] == 1000.0
 
 
 async def test_normalize_financials_period_end_strips_quarter_annotation(provider, monkeypatch):
@@ -297,23 +318,39 @@ async def test_normalize_financials_quarterly_cashflow_fields_are_none(provider,
     assert result.quarters[0]["operating_cash_flow"] is None
 
 
-async def test_normalize_financials_annual_populates_cashflow_fields(provider, monkeypatch):
-    """Annual columns are uniformly "(FY)" — no YTD-vs-quarter ambiguity —
-    so cashflow-derived fields ARE populated at the annual grain."""
-    income = _concept_df(
-        [("us-gaap_RevenueFromContractWithCustomerExcludingAssessedTax", "Net sales", False, 1000.0)],
-        "2025-09-27 (FY)",
+async def test_normalize_financials_annual_from_highlevel_multiperiod_api(provider, monkeypatch):
+    """annual[] comes from Company.income_statement(period='annual') — the
+    high-level multi-period frame (concept-indexed, bare names, one row per
+    concept). Deep enough for _cagr; income and cash-flow both populate;
+    trimmed at the first fiscal-year gap."""
+    cols = ["FY 2025", "FY 2024", "FY 2023", "FY 2022"]
+    inc = _highlevel_df(
+        [
+            ("Revenues", [1000.0, 900.0, 800.0, 700.0]),
+            ("NetIncomeLoss", [120.0, 100.0, 90.0, 80.0]),
+        ],
+        cols,
     )
-    cashflow = _concept_df(
-        [("us-gaap_PaymentsOfDividends", "Dividends paid", False, -60.0)],
-        "2025-09-27 (FY)",
-    )
-    fake = FakeCompany(annual=FakeFinancials(income_df=income, cashflow_df=cashflow))
+    cf = _highlevel_df([("PaymentsOfDividendsCommonStock", [-60.0, -55.0, -50.0, -45.0])], cols)
+    fake = FakeCompany(annual_income_df=inc, annual_cashflow_df=cf)
     _patch_company(monkeypatch, lambda ticker: fake)
 
     result = await provider.normalize_financials("AAPL")
 
+    assert [a["period_end"][:4] for a in result.annual] == ["2025", "2024", "2023", "2022"]
+    assert result.annual[0]["revenue"] == 1000.0
     assert result.annual[0]["dividends_paid"] == -60.0
+
+
+async def test_normalize_financials_annual_trims_at_fiscal_year_gap(provider, monkeypatch):
+    cols = ["FY 2025", "FY 2024", "FY 2022"]  # 2023 missing
+    inc = _highlevel_df([("Revenues", [1000.0, 900.0, 700.0])], cols)
+    fake = FakeCompany(annual_income_df=inc)
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert [a["period_end"][:4] for a in result.annual] == ["2025", "2024"]
 
 
 async def test_normalize_financials_total_debt_sums_current_and_noncurrent(provider, monkeypatch):
@@ -346,6 +383,129 @@ async def test_normalize_financials_none_financials_returns_empty_periods(provid
     assert result.annual == []
     assert result.balance_sheet == {}
     assert result.currency == "USD"
+    assert result.ttm is None
+
+
+# --- ttm via YTD algebra (86bbxuj9e) ---
+
+
+def _q_income_with_ytd(concept_ytds: list[tuple[str, float, float]]) -> pd.DataFrame:
+    """A 10-Q income frame with a discrete (Q3) column plus current and
+    prior-year (YTD) columns. concept_ytds: (concept, ytd_current, ytd_prior)."""
+    return pd.DataFrame(
+        {
+            "concept": [c for c, _, _ in concept_ytds],
+            "label": [c for c, _, _ in concept_ytds],
+            "dimension": [False] * len(concept_ytds),
+            "2026-06-27 (Q3)": [cur / 3 for _, cur, _ in concept_ytds],  # rough per-quarter
+            "2026-06-27 (YTD)": [cur for _, cur, _ in concept_ytds],
+            "2025-06-28 (YTD)": [pri for _, _, pri in concept_ytds],
+        }
+    )
+
+
+async def test_compute_ttm_ytd_algebra(provider, monkeypatch):
+    """ttm[field] = FY_prior_full + YTD_current - YTD_prior, from the latest
+    10-K's FY column and the latest 10-Q's two YTD columns."""
+    fy = _concept_df(
+        [
+            ("us-gaap_NetIncomeLoss", "Net income", False, 1000.0),
+            ("us-gaap_Revenues", "Revenue", False, 4000.0),
+        ],
+        "2025-09-27 (FY)",
+    )
+    q_income = _q_income_with_ytd([("us-gaap_NetIncomeLoss", 600.0, 550.0), ("us-gaap_Revenues", 2400.0, 2200.0)])
+    fake = FakeCompany(
+        annual=FakeFinancials(income_df=fy),
+        quarterly=FakeFinancials(income_df=q_income),
+    )
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.ttm["net_income"] == pytest.approx(1000.0 + 600.0 - 550.0)
+    assert result.ttm["revenue"] == pytest.approx(4000.0 + 2400.0 - 2200.0)
+
+
+async def test_compute_ttm_falls_to_fy_when_no_newer_10q(provider, monkeypatch):
+    """No latest 10-Q -> the 10-K's FY total IS the trailing twelve months."""
+    fy = _concept_df([("us-gaap_NetIncomeLoss", "Net income", False, 1000.0)], "2025-09-27 (FY)")
+    fake = FakeCompany(annual=FakeFinancials(income_df=fy), quarterly=None)
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.ttm["net_income"] == 1000.0
+
+
+async def test_compute_ttm_field_none_when_a_component_missing(provider, monkeypatch):
+    """With a 10-Q present, a field needs all three of FY / YTD_cur / YTD_prior
+    to resolve — a partial set gives None for that field, not a guess."""
+    fy = _concept_df(
+        [
+            ("us-gaap_NetIncomeLoss", "Net income", False, 1000.0),
+            ("us-gaap_Revenues", "Revenue", False, 4000.0),
+        ],
+        "2025-09-27 (FY)",
+    )
+    # 10-Q YTD has net income but NOT revenue
+    q_income = _q_income_with_ytd([("us-gaap_NetIncomeLoss", 600.0, 550.0)])
+    fake = FakeCompany(
+        annual=FakeFinancials(income_df=fy), quarterly=FakeFinancials(income_df=q_income)
+    )
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.ttm["net_income"] == pytest.approx(1000.0 + 600.0 - 550.0)
+    assert result.ttm["revenue"] is None  # FY revenue exists but no YTD revenue to roll it forward
+
+
+# --- concept fallback lists (86bbxuj9e / 86bbq04wm) ---
+
+
+async def test_normalize_financials_revenue_concept_fallback(provider, monkeypatch):
+    """XOM/JPM tag revenue as 'Revenues', not 'RevenueFromContract...' — the
+    fallback list resolves it (both quarters[] and the high-level annual)."""
+    q_income = _concept_df(
+        [("us-gaap_Revenues", "Total revenues", False, 300.0)], "2026-06-27 (Q3)"
+    )
+    ann = _highlevel_df([("Revenues", [1200.0, 1100.0])], ["FY 2025", "FY 2024"])
+    fake = FakeCompany(quarterly=FakeFinancials(income_df=q_income), annual_income_df=ann)
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("XOM")
+
+    assert result.quarters[0]["revenue"] == 300.0
+    assert result.annual[0]["revenue"] == 1200.0
+
+
+async def test_normalize_financials_net_income_common_picked_up_for_banks(provider, monkeypatch):
+    q_income = _concept_df(
+        [
+            ("us-gaap_NetIncomeLoss", "Net income", False, 100.0),
+            ("us-gaap_NetIncomeLossAvailableToCommonStockholdersBasic", "NI to common", False, 94.0),
+        ],
+        "2026-06-27 (Q3)",
+    )
+    fake = FakeCompany(quarterly=FakeFinancials(income_df=q_income))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("JPM")
+
+    assert result.quarters[0]["net_income_common"] == 94.0
+
+
+async def test_normalize_financials_no_net_income_common_concept_is_none(provider, monkeypatch):
+    q_income = _concept_df(
+        [("us-gaap_NetIncomeLoss", "Net income", False, 100.0)], "2026-06-27 (Q3)"
+    )
+    fake = FakeCompany(quarterly=FakeFinancials(income_df=q_income))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.quarters[0]["net_income_common"] is None
 
 
 # --- get_insider_trading ---

@@ -119,6 +119,15 @@ class NormalizedFinancials:
     # for a Canadian-listed USD-reporter (ATD.TO, NTR.TO, ...) is NOT the quote
     # currency; compute_all() flags that mismatch as currency_mismatch (86bbxucf0)
 
+    ttm: dict | None = None  # trailing-twelve-month aggregates, keyed like
+    # quarters[] (revenue, net_income, net_income_common, operating_income,
+    # operating_cash_flow, capital_expenditures, depreciation_amortization,
+    # dividends_paid — NOT eps). None means "no explicit TTM, derive from
+    # quarters[:4]" (the yfinance path). edgartools sets it (86bbxuj9e) because
+    # its quarterly history is too shallow/gapped for a 4-quarter sum — it is
+    # computed by YTD algebra: latest-10-K FY total + latest-10-Q YTD minus the
+    # prior-year YTD. fundamentals.py reads it via _ttm_metric().
+
 
 class StockDataProvider(ABC):
     """Abstract base for stock-centric financial data (FMP, yfinance)."""
