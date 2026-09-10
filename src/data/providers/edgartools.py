@@ -90,24 +90,28 @@ _BALANCE_CONCEPTS = {
     "current_assets": ["AssetsCurrent"],
     "current_liabilities": ["LiabilitiesCurrent"],
 }
-# total_debt has no single XBRL concept — sum whichever term-debt lines the filer
-# tags (AAPL: LongTermDebtCurrent + LongTermDebtNoncurrent; KO: the CapitalLease
-# variants; XOM: a single LongTermDebt line).
-_DEBT_CONCEPTS = (
+# total_debt has no single XBRL concept and the tags overlap (a filer can tag
+# both a noncurrent portion AND a combined total), so _total_debt() buckets
+# them: (noncurrent + current), else a combined-total tag, plus short-term
+# borrowings on top. First match within each bucket — never sum across.
+_DEBT_NONCURRENT = ("LongTermDebtNoncurrent", "LongTermDebtAndCapitalLeaseObligations")
+_DEBT_CURRENT = (
     "LongTermDebtCurrent",
-    "LongTermDebtNoncurrent",
     "LongTermDebtAndCapitalLeaseObligationsCurrent",
-    "LongTermDebtAndCapitalLeaseObligations",
-    "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
-    "LongTermDebt",
     "DebtCurrent",
-    "ShortTermBorrowings",
 )
+_DEBT_COMBINED_TOTAL = (
+    "LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+    "DebtLongtermAndShorttermCombinedAmount",
+    "LongTermDebt",  # taxonomy: includes both current and noncurrent
+)
+_DEBT_SHORT_TERM = ("ShortTermBorrowings",)
 
 # Fields carried on NormalizedFinancials.ttm (86bbxuj9e). No eps — see finding 5
 # in the plan: US per-quarter/Q4 EPS is unreliable, so P/E takes the net-income path.
 _TTM_FIELDS = (
     "revenue",
+    "cost_of_revenue",
     "net_income",
     "net_income_common",
     "operating_income",
@@ -227,12 +231,150 @@ def _extract_concept(df: pd.DataFrame, concepts, column) -> float | None:
     return None
 
 
-def _sum_concepts(df: pd.DataFrame, concepts: tuple[str, ...], column) -> float | None:
-    """Sums whichever of several concepts the filer tags (e.g. current +
-    non-current term debt) into one derived total. None only when every
-    component is missing."""
-    values = [v for c in concepts if (v := _extract_concept(df, [c], column)) is not None]
-    return sum(values) if values else None
+def _total_debt(df: pd.DataFrame, column) -> float | None:
+    """Total debt, avoiding the double-count that a flat sum over overlapping
+    XBRL debt tags would cause. Base = (noncurrent + current), or a
+    combined-total tag when a filer only reports one; plus short-term
+    borrowings. None only when the filer tags no debt at all."""
+    noncurrent = _extract_concept(df, list(_DEBT_NONCURRENT), column)
+    current = _extract_concept(df, list(_DEBT_CURRENT), column)
+    if noncurrent is not None or current is not None:
+        base = (noncurrent or 0.0) + (current or 0.0)
+    else:
+        base = _extract_concept(df, list(_DEBT_COMBINED_TOTAL), column)
+    short_term = _extract_concept(df, list(_DEBT_SHORT_TERM), column)
+    if base is None:
+        return short_term
+    return base + (short_term or 0.0)
+
+
+def _fy_columns(df: pd.DataFrame) -> list:
+    """A raw 10-K statement's (FY) value columns, most recent fiscal-year end
+    first — don't trust to_dataframe() column order for the [0] pick."""
+    if df is None or df.empty:
+        return []
+    fy = [c for c in df.columns if c not in _META_COLUMNS and "(FY)" in str(c)]
+    return sorted(fy, key=lambda c: _column_date(c) or pd.Timestamp.min, reverse=True)
+
+
+def _quarters_from(income: pd.DataFrame) -> list[dict]:
+    """quarters[] from the latest 10-Q's income statement: the discrete
+    single-quarter column(s), never the YTD ones. Cash-flow fields stay None —
+    edgartools' quarterly cash-flow statement is YTD-only, no per-quarter
+    column. Newest first."""
+    if income is None or income.empty:
+        return []
+    rows = []
+    for column in _period_columns(income, exclude_ytd=True):
+        row = {"period_end": str(column).split(" ")[0]}
+        for field, concepts in _INCOME_CONCEPTS.items():
+            row[field] = _extract_concept(income, concepts, column)
+        for field in _CASHFLOW_CONCEPTS:
+            row[field] = None
+        rows.append(row)
+    return rows
+
+
+def _annual_periods(inc: pd.DataFrame, cf: pd.DataFrame, fiscal_end: tuple[int, int]) -> list[dict]:
+    """annual[] from the high-level multi-period frame, most recent fiscal year
+    first, trimmed at the first fiscal-year gap so _cagr's fixed offset stays
+    honest. period_end is an approximate date from the fiscal-year-end month/day
+    — nothing computes on it."""
+    if inc is None or inc.empty:
+        return []
+    mm, dd = fiscal_end
+    fy_cols = sorted(
+        (c for c in inc.columns if str(c).startswith("FY ")),
+        key=lambda c: int(str(c).split()[1]),
+        reverse=True,
+    )
+    rows, prev_year = [], None
+    for column in fy_cols:
+        year = int(str(column).split()[1])
+        if prev_year is not None and year != prev_year - 1:
+            break
+        prev_year = year
+        row = {"period_end": f"{year:04d}-{mm:02d}-{dd:02d}"}
+        for field, concepts in _INCOME_CONCEPTS.items():
+            row[field] = _extract_concept(inc, concepts, column)
+        for field, concepts in _CASHFLOW_CONCEPTS.items():
+            row[field] = _extract_concept(cf, concepts, column)
+        rows.append(row)
+    return rows
+
+
+def _latest_balance(balance: pd.DataFrame) -> dict:
+    """balance_sheet dict from the latest 10-Q's raw-XBRL balance sheet (the
+    high-level canonical view drops debt line items)."""
+    out: dict = {}
+    if balance is None or balance.empty:
+        return out
+    columns = _period_columns(balance, exclude_ytd=False)
+    if not columns:
+        return out
+    column = columns[0]
+    for field, concepts in _BALANCE_CONCEPTS.items():
+        out[field] = _extract_concept(balance, concepts, column)
+    out["total_debt"] = _total_debt(balance, column)
+    # not every filer tags us-gaap_Liabilities; assets - equity is exact
+    assets, equity = out.get("total_assets"), out.get("total_equity")
+    if out.get("total_liabilities") is None and assets is not None and equity is not None:
+        out["total_liabilities"] = assets - equity
+    return out
+
+
+def _compute_ttm(
+    ki: pd.DataFrame, kc: pd.DataFrame, qi: pd.DataFrame, qc: pd.DataFrame
+) -> dict | None:
+    """Trailing-twelve-month aggregates by YTD algebra:
+
+        ttm[field] = FY_prior_full + YTD_current - YTD_prior_year
+
+    FY_prior_full is the latest 10-K's own (FY) column (from the 10-K
+    directly, not a labelled multi-period frame, to dodge edgartools'
+    fiscal-year label ambiguity). YTD_current / YTD_prior are the latest
+    10-Q's two "(YTD)" columns (the 10-Q carries the prior-year YTD as its
+    comparative). Per field, None unless all three resolve.
+
+    The algebra is only used when the 10-Q's YTD provably extends past the
+    10-K's fiscal-year end; otherwise (no 10-Q, a stale 10-Q, Q4 season, or
+    unparseable dates) ttm = FY directly. Returns None when neither filing
+    yields anything."""
+    if (ki is None or ki.empty) and (qi is None or qi.empty):
+        return None
+
+    fy_i_col = next(iter(_fy_columns(ki)), None)
+    fy_c_col = next(iter(_fy_columns(kc)), None)
+    ytd_i = _sorted_ytd_columns(qi)
+    ytd_c = _sorted_ytd_columns(qc)
+
+    fy_end = _column_date(fy_i_col)
+    ytd_end = _column_date(ytd_i[0]) if ytd_i else None
+    can_roll_forward = bool(len(ytd_i) >= 2 and fy_end and ytd_end and ytd_end > fy_end)
+
+    ttm: dict = {}
+    for field in _TTM_FIELDS:
+        in_income = field in _INCOME_CONCEPTS
+        concepts = (_INCOME_CONCEPTS if in_income else _CASHFLOW_CONCEPTS)[field]
+        fy_df, fy_col = (ki, fy_i_col) if in_income else (kc, fy_c_col)
+        q_df, q_ytd = (qi, ytd_i) if in_income else (qc, ytd_c)
+
+        fy_val = _extract_concept(fy_df, concepts, fy_col) if fy_col else None
+        # dividends_paid is cash-timing sensitive — a payment that shifts across
+        # a quarter boundary breaks the YTD subtraction (KO: 2 payments in the
+        # current YTD, 1 in the prior). It's also the slowest-changing line, so
+        # the last full fiscal year is the better estimate.
+        if field == "dividends_paid" or not can_roll_forward or len(q_ytd) < 2:
+            ttm[field] = fy_val
+            continue
+        cur = _extract_concept(q_df, concepts, q_ytd[0])
+        prior = _extract_concept(q_df, concepts, q_ytd[1])
+        ttm[field] = (
+            fy_val + cur - prior
+            if fy_val is not None and cur is not None and prior is not None
+            else None
+        )
+    return ttm if any(v is not None for v in ttm.values()) else None
 
 # Gap 5b (financial-data-api-research.md) describes a "fewer than 5 key line items"
 # XBRL-quality check for small-caps. Deliberately not implemented: live-tested
@@ -302,140 +444,53 @@ class EdgarToolsDataProvider(StockDataProvider):
         qf = await asyncio.to_thread(company.get_quarterly_financials)  # latest 10-Q
         kf = await asyncio.to_thread(company.get_financials)  # latest 10-K
 
-        quarters = await self._quarters_from(qf)
-        annual = await self._annual_periods(company)
-        balance_sheet = await self._latest_balance(qf)
-        ttm = await self._compute_ttm(qf, kf)
+        # Fetch each statement DataFrame once (cheap to reuse, not to re-parse).
+        qi = await self._statement_df(qf, "income")
+        qc = await self._statement_df(qf, "cashflow")
+        qb = await self._statement_df(qf, "balance")
+        ki = await self._statement_df(kf, "income")
+        kc = await self._statement_df(kf, "cashflow")
+        annual_inc, annual_cf = await self._highlevel_annual(company)
 
         return NormalizedFinancials(
-            quarters=quarters,
-            annual=annual,
-            balance_sheet=balance_sheet,
+            quarters=_quarters_from(qi),
+            annual=_annual_periods(annual_inc, annual_cf, _fiscal_month_day(company)),
+            balance_sheet=_latest_balance(qb),
             currency="USD",  # edgartools/SEC EDGAR covers US filers only
-            ttm=ttm,
+            ttm=_compute_ttm(ki, kc, qi, qc),
         )
 
     @staticmethod
     async def _statement_df(financials, key: str) -> pd.DataFrame:
         """(financials.income_statement | balance_sheet | cashflow_statement)()
-        .to_dataframe(), off the event loop, None -> empty (a Financials
+        .to_dataframe(), off the event loop, None/error -> empty (a Financials
         container can exist while one statement isn't XBRL-tagged)."""
         if financials is None:
             return pd.DataFrame()
-        accessor = STATEMENT_MAP[key](financials)
-        df = await asyncio.to_thread(lambda: accessor().to_dataframe())
+        try:
+            accessor = STATEMENT_MAP[key](financials)
+            df = await asyncio.to_thread(lambda: accessor().to_dataframe())
+        except Exception:
+            logger.warning("edgar_statement_df_failed", statement=key, exc_info=True)
+            return pd.DataFrame()
         return df if df is not None else pd.DataFrame()
 
-    async def _quarters_from(self, qf) -> list[dict]:
-        income = await self._statement_df(qf, "income")
-        if income.empty:
-            return []
-        rows = []
-        for column in _period_columns(income, exclude_ytd=True):
-            row = {"period_end": str(column).split(" ")[0]}
-            for field, concepts in _INCOME_CONCEPTS.items():
-                row[field] = _extract_concept(income, concepts, column)
-            for field in _CASHFLOW_CONCEPTS:
-                row[field] = None  # quarterly cash flow is YTD-only, not per-quarter
-            rows.append(row)
-        return rows
-
-    async def _annual_periods(self, company) -> list[dict]:
-        """Deep annual history from the high-level multi-period API. Trimmed at
-        the first fiscal-year gap so _cagr's fixed offset stays honest."""
-        inc = await asyncio.to_thread(
-            lambda: company.income_statement(periods=8, period="annual", as_dataframe=True)
-        )
-        if inc is None or inc.empty:
-            return []
-        cf = await asyncio.to_thread(
-            lambda: company.cashflow_statement(periods=8, period="annual", as_dataframe=True)
-        )
-        fiscal_end = _fiscal_month_day(company)
-        rows, prev_year = [], None
-        for column in [c for c in inc.columns if str(c).startswith("FY ")]:
-            year = int(str(column).split()[1])
-            if prev_year is not None and year != prev_year - 1:
-                break
-            prev_year = year
-            mm, dd = fiscal_end
-            row = {"period_end": f"{year:04d}-{mm:02d}-{dd:02d}"}
-            for field, concepts in _INCOME_CONCEPTS.items():
-                row[field] = _extract_concept(inc, concepts, column)
-            for field, concepts in _CASHFLOW_CONCEPTS.items():
-                row[field] = _extract_concept(cf, concepts, column) if cf is not None else None
-            rows.append(row)
-        return rows
-
-    async def _latest_balance(self, qf) -> dict:
-        balance = await self._statement_df(qf, "balance")
-        out: dict = {}
-        if balance.empty:
-            return out
-        columns = _period_columns(balance, exclude_ytd=False)
-        if not columns:
-            return out
-        column = columns[0]
-        for field, concepts in _BALANCE_CONCEPTS.items():
-            out[field] = _extract_concept(balance, concepts, column)
-        out["total_debt"] = _sum_concepts(balance, _DEBT_CONCEPTS, column)
-        # not every filer tags us-gaap_Liabilities; assets - equity is exact
-        assets, equity = out.get("total_assets"), out.get("total_equity")
-        if out.get("total_liabilities") is None and assets is not None and equity is not None:
-            out["total_liabilities"] = assets - equity
-        return out
-
-    async def _compute_ttm(self, qf, kf) -> dict | None:
-        """Trailing-twelve-month aggregates by YTD algebra:
-
-            ttm[field] = FY_prior_full + YTD_current - YTD_prior_year
-
-        FY_prior_full is the latest 10-K's own single (FY) column (sourced
-        from the 10-K directly, not a labelled multi-period frame, to dodge
-        edgartools' fiscal-year label ambiguity). YTD_current / YTD_prior are
-        the latest 10-Q's two "(YTD)" columns (the 10-Q carries the prior-year
-        YTD as its comparative). Per field, None unless all three resolve.
-
-        If there is no newer 10-Q, or the 10-Q's YTD does not extend past the
-        10-K's fiscal-year end (a stale 10-Q, or Q4 season), ttm = FY directly.
-        Returns None only when neither filing yields anything."""
-        ki = await self._statement_df(kf, "income")
-        kc = await self._statement_df(kf, "cashflow")
-        qi = await self._statement_df(qf, "income")
-        qc = await self._statement_df(qf, "cashflow")
-        if ki.empty and qi.empty:
-            return None
-
-        fy_i = _period_columns(ki, exclude_ytd=False)
-        fy_c = _period_columns(kc, exclude_ytd=False)
-        fy_i_col = fy_i[0] if fy_i else None
-        fy_c_col = fy_c[0] if fy_c else None
-
-        ytd_i = _sorted_ytd_columns(qi)
-        ytd_c = _sorted_ytd_columns(qc)
-        fy_end = _column_date(fy_i_col)
-        ytd_end = _column_date(ytd_i[0]) if ytd_i else None
-        use_fy_only = not ytd_i or (fy_end and ytd_end and ytd_end <= fy_end)
-
-        ttm: dict = {}
-        for field in _TTM_FIELDS:
-            in_income = field in _INCOME_CONCEPTS
-            concepts = (_INCOME_CONCEPTS if in_income else _CASHFLOW_CONCEPTS)[field]
-            fy_df, fy_col = (ki, fy_i_col) if in_income else (kc, fy_c_col)
-            q_df, q_ytd = (qi, ytd_i) if in_income else (qc, ytd_c)
-
-            fy_val = _extract_concept(fy_df, concepts, fy_col) if fy_col else None
-            if use_fy_only or len(q_ytd) < 2:
-                ttm[field] = fy_val
-                continue
-            cur = _extract_concept(q_df, concepts, q_ytd[0])
-            prior = _extract_concept(q_df, concepts, q_ytd[1])
-            ttm[field] = (
-                fy_val + cur - prior
-                if fy_val is not None and cur is not None and prior is not None
-                else None
+    @staticmethod
+    async def _highlevel_annual(company) -> tuple["pd.DataFrame | None", "pd.DataFrame | None"]:
+        """Company.income_statement / cashflow_statement(period='annual') — the
+        multi-period canonical frame. Degrades to (None, None) on any library
+        error rather than failing normalize_financials."""
+        try:
+            inc = await asyncio.to_thread(
+                lambda: company.income_statement(periods=8, period="annual", as_dataframe=True)
             )
-        return ttm if any(v is not None for v in ttm.values()) else None
+            cf = await asyncio.to_thread(
+                lambda: company.cashflow_statement(periods=8, period="annual", as_dataframe=True)
+            )
+        except Exception:
+            logger.warning("edgar_highlevel_annual_failed", exc_info=True)
+            return None, None
+        return inc, cf
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         """Transactional-level Form 4 data (date, shares, price, insider name) —

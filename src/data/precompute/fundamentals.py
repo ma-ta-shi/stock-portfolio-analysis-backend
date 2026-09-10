@@ -322,27 +322,39 @@ def compute_growth_metrics(
 
 
 def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
-    if not fin.quarters:
+    if not fin.quarters and fin.ttm is None:
         return {
             "gross_margin": None, "operating_margin": None, "net_margin": None,
             "roe": None, "margin_trend": None, "fcf_to_net_income": None,
         }
-    latest = fin.quarters[0]
-    revenue = latest.get("revenue")
-    gross_margin = None
-    if revenue and latest.get("cost_of_revenue") is not None:
-        gross_margin = (revenue - latest["cost_of_revenue"]) / revenue
-    operating_margin = None
-    if revenue and latest.get("operating_income") is not None:
-        operating_margin = latest["operating_income"] / revenue
-    net_margin = _net_margin(latest)
+    # Margins over the trailing twelve months, not one (often seasonal) quarter —
+    # keeps them stable and comparable across a peer set with mixed fiscal
+    # calendars. _ttm_metric is the real 4-quarter sum on the CA path, the
+    # provider-supplied TTM on the US path.
+    ttm_revenue = _ttm_metric(fin, "revenue")
+    ttm_cost_of_revenue = _ttm_metric(fin, "cost_of_revenue")
+    ttm_operating_income = _ttm_metric(fin, "operating_income")
+    ttm_net_income = _ttm_metric(fin, "net_income")
+
+    gross_margin = (
+        (ttm_revenue - ttm_cost_of_revenue) / ttm_revenue
+        if ttm_revenue and ttm_cost_of_revenue is not None
+        else None
+    )
+    operating_margin = (
+        ttm_operating_income / ttm_revenue
+        if ttm_revenue and ttm_operating_income is not None
+        else None
+    )
+    net_margin = ttm_net_income / ttm_revenue if ttm_revenue and ttm_net_income is not None else None
 
     roe = None
-    ttm_net_income = _ttm_metric(fin, "net_income")
     total_equity = fin.balance_sheet.get("total_equity")
     # total_equity > 0, not just truthy: negative book equity makes ROE
     # meaningless (a net loss over negative equity reads as a positive ROE) —
     # None is the honest answer for both peers and the subject (86bbq04wm).
+    # Period-end equity (not an average) — standard, and no extra fetch; runs
+    # low for buyback-heavy names whose equity shrank over the year.
     if ttm_net_income is not None and total_equity is not None and total_equity > 0:
         roe = ttm_net_income / total_equity
 

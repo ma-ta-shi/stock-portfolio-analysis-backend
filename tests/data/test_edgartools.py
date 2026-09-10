@@ -354,13 +354,14 @@ async def test_normalize_financials_annual_trims_at_fiscal_year_gap(provider, mo
 
 
 async def test_normalize_financials_total_debt_sums_current_and_noncurrent(provider, monkeypatch):
-    """total_debt has no single XBRL concept — derived by summing current +
-    non-current term debt, confirmed live against AAPL's real balance sheet."""
+    """total_debt has no single XBRL concept — (noncurrent + current) + any
+    short-term borrowings."""
     balance = _concept_df(
         [
             ("us-gaap_Assets", "Total assets", False, 5000.0),
             ("us-gaap_LongTermDebtCurrent", "Term debt, current", False, 100.0),
             ("us-gaap_LongTermDebtNoncurrent", "Term debt, non-current", False, 700.0),
+            ("us-gaap_ShortTermBorrowings", "Commercial paper", False, 50.0),
         ],
         "2026-06-27",
     )
@@ -369,8 +370,48 @@ async def test_normalize_financials_total_debt_sums_current_and_noncurrent(provi
 
     result = await provider.normalize_financials("AAPL")
 
-    assert result.balance_sheet["total_debt"] == 800.0
-    assert result.balance_sheet["total_assets"] == 5000.0
+    assert result.balance_sheet["total_debt"] == 850.0
+
+
+async def test_normalize_financials_total_debt_no_double_count(provider, monkeypatch):
+    """A filer that tags BOTH the noncurrent portion AND a combined total must
+    not have them summed — the combined-total tag is only a fallback."""
+    balance = _concept_df(
+        [
+            ("us-gaap_LongTermDebtNoncurrent", "LT debt, noncurrent", False, 700.0),
+            ("us-gaap_LongTermDebtCurrent", "LT debt, current", False, 100.0),
+            ("us-gaap_LongTermDebt", "LT debt, total", False, 800.0),  # redundant total
+        ],
+        "2026-06-27",
+    )
+    fake = FakeCompany(quarterly=FakeFinancials(balance_df=balance))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.balance_sheet["total_debt"] == 800.0  # not 1600
+
+
+async def test_normalize_financials_total_debt_combined_total_only(provider, monkeypatch):
+    """A filer that only tags a combined total (no current/noncurrent split)."""
+    balance = _concept_df(
+        [
+            (
+                "us-gaap_LongTermDebtAndCapitalLeaseObligationsIncludingCurrentMaturities",
+                "LT debt incl current",
+                False,
+                900.0,
+            ),
+            ("us-gaap_ShortTermBorrowings", "Commercial paper", False, 100.0),
+        ],
+        "2026-06-27",
+    )
+    fake = FakeCompany(quarterly=FakeFinancials(balance_df=balance))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("XOM")
+
+    assert result.balance_sheet["total_debt"] == 1000.0
 
 
 async def test_normalize_financials_none_financials_returns_empty_periods(provider, monkeypatch):
@@ -436,6 +477,32 @@ async def test_compute_ttm_falls_to_fy_when_no_newer_10q(provider, monkeypatch):
     result = await provider.normalize_financials("AAPL")
 
     assert result.ttm["net_income"] == 1000.0
+
+
+async def test_compute_ttm_falls_to_fy_when_10q_predates_the_10k(provider, monkeypatch):
+    """A 10-Q whose YTD ends on/before the 10-K's fiscal-year end (Q4 season,
+    or a stale filing) can't roll the FY total forward — use FY directly, do
+    not do the algebra with a mismatched window."""
+    fy = _concept_df([("us-gaap_NetIncomeLoss", "Net income", False, 1000.0)], "2025-09-27 (FY)")
+    # 10-Q YTD ends 2025-06-28, before the FY end 2025-09-27
+    q_income = pd.DataFrame(
+        {
+            "concept": ["us-gaap_NetIncomeLoss"],
+            "label": ["Net income"],
+            "dimension": [False],
+            "2025-06-28 (Q3)": [200.0],
+            "2025-06-28 (YTD)": [600.0],
+            "2024-06-29 (YTD)": [550.0],
+        }
+    )
+    fake = FakeCompany(
+        annual=FakeFinancials(income_df=fy), quarterly=FakeFinancials(income_df=q_income)
+    )
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert result.ttm["net_income"] == 1000.0  # FY only, not 1000 + 600 - 550
 
 
 async def test_compute_ttm_field_none_when_a_component_missing(provider, monkeypatch):

@@ -173,16 +173,35 @@ def test_compute_growth_metrics_cagr_none_when_base_year_non_positive():
 def test_compute_profitability_metrics_happy_path():
     result = compute_profitability_metrics(_fin())
 
-    assert result["gross_margin"] == pytest.approx((1000.0 - 600.0) / 1000.0)
-    assert result["operating_margin"] == pytest.approx(200.0 / 1000.0)
-    assert result["net_margin"] == pytest.approx(150.0 / 1000.0)
+    # margins are trailing-twelve-month (86bbxuj9e), not one quarter
+    ttm_rev = 1000.0 + 950.0 + 900.0 + 880.0  # 3730
+    ttm_cost = 600.0 + 550.0 + 500.0 + 480.0  # cost_of_revenue = revenue - 400
+    ttm_op = 200.0 + 190.0 + 180.0 + 170.0  # 740
     ttm_net_income = 150.0 + 140.0 + 130.0 + 120.0  # 540
+    assert result["gross_margin"] == pytest.approx((ttm_rev - ttm_cost) / ttm_rev)
+    assert result["operating_margin"] == pytest.approx(ttm_op / ttm_rev)
+    assert result["net_margin"] == pytest.approx(ttm_net_income / ttm_rev)
     assert result["roe"] == pytest.approx(ttm_net_income / 2000.0)
     # TTM FCF = ttm(ocf) - |ttm(capex)| = 660 - 148 = 512; over TTM net income
     ttm_fcf = (180.0 + 170.0 + 160.0 + 150.0) - (40.0 + 38.0 + 36.0 + 34.0)
     assert result["fcf_to_net_income"] == pytest.approx(ttm_fcf / ttm_net_income)
     # latest net_margin 0.15 vs quarters[4] net_margin 100/800=0.125 -> +2.5pp -> expanding
     assert result["margin_trend"] == "expanding"
+
+
+def test_compute_profitability_metrics_margins_from_ttm_on_thin_quarters():
+    """US / edgartools shape: 2 quarters + a provider ttm dict. Margins still
+    resolve (from ttm), and are the trailing-twelve-month figure."""
+    fin = _fin(
+        quarters=_QUARTERS[:2],
+        ttm={"revenue": 4000.0, "cost_of_revenue": 2400.0, "operating_income": 800.0,
+             "net_income": 500.0},
+    )
+    result = compute_profitability_metrics(fin)
+
+    assert result["gross_margin"] == pytest.approx((4000.0 - 2400.0) / 4000.0)
+    assert result["operating_margin"] == pytest.approx(800.0 / 4000.0)
+    assert result["net_margin"] == pytest.approx(500.0 / 4000.0)
 
 
 def test_compute_profitability_metrics_roe_none_when_book_equity_negative():
