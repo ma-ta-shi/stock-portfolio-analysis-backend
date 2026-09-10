@@ -113,6 +113,20 @@ def is_crosslisted(ca_ticker: str) -> bool:
     return _load_crosslisting_map().get(ca_ticker) is not None
 
 
+def get_us_ticker(ca_ticker: str) -> str | None:
+    """The mapped US symbol for a cross-listed CA ticker, or None — same
+    "mapping-only, no I/O beyond the JSON read" contract as is_crosslisted().
+
+    Required for anything routing a Canadian ticker's data to a US-only
+    source (86bbr4azz: CA news merged with the matching Finnhub feed).
+    Never derive this by stripping ".TO"/".V" — the map exists precisely
+    because that guesses wrong for real tickers, e.g. CNR.TO's US symbol
+    is CNI, not "CNR" (Core Natural Resources, an unrelated company —
+    see that entry's own manually_confirmed note)."""
+    entry = _load_crosslisting_map().get(ca_ticker)
+    return entry.get("us_ticker") if entry else None
+
+
 def _normalize(text: str) -> str:
     # Curly apostrophe (’) -> straight: confirmed live that filers' own
     # PDF-to-text conversion uses "Management’s", which a plain ASCII

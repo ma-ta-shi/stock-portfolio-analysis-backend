@@ -33,6 +33,7 @@ import pandas as pd
 import structlog
 
 from data.providers.base import NewsProvider, StockDataProvider
+from data.providers.ca_crosslisting import get_us_ticker
 from data.providers.edgartools import EdgarToolsDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fmp import FMPDataProvider
@@ -94,6 +95,28 @@ def _is_empty(value: Any) -> bool:
     if isinstance(value, (list, dict)):
         return len(value) == 0
     return False
+
+
+def _merge_ca_us_news(ca_articles: list[dict], us_articles: list[dict]) -> list[dict]:
+    """Combine a CA (openbb-tmx) and US (Finnhub) news result for a
+    cross-listed ticker (86bbr4azz), deduped on url. Live-verified across 7
+    cross-listed tickers: zero real overlap (CA is 100% company wire, US is
+    0% wire) — this is a safety net, not an observed necessity, so it stays
+    a plain exact-string url match rather than normalized.
+
+    Only dedupes on a non-empty url: the house news shape defaults url to
+    "" when a provider has none, and two unrelated articles that both lack
+    one must not collide and get merged down to one."""
+    seen: set[str] = set()
+    merged: list[dict] = []
+    for article in ca_articles + us_articles:
+        url = article.get("url")
+        if url:
+            if url in seen:
+                continue
+            seen.add(url)
+        merged.append(article)
+    return merged
 
 
 # Explicit static chains — one list per method, in try-order. Never inferred
@@ -314,8 +337,35 @@ class Router(StockDataProvider, NewsProvider):
     # ---------- NewsProvider ----------
 
     async def get_news(self, ticker: str, days: int) -> list[dict]:
+        """CA tickers get openbb-tmx's wire coverage only, unless the ticker
+        is in the CA/US crosslisting map (86bbr4azz) — then the matching
+        Finnhub feed on the US symbol is fetched too and merged in, deduped
+        on url. openbb-tmx's Canadian feed is ~100% company press releases
+        (Canada/PR/Business/GlobeNewswire); the US feed is independent
+        journalism with zero URL overlap in every case checked live. A
+        missing Finnhub key or a failed fetch degrades to CA-only rather
+        than raising — unlike the pure-US path where Finnhub is the sole
+        source and a bad key fails loud (see _try_chain), here it's an
+        enhancement on top of a result that already exists."""
         result, _ = await self._try_chain("get_news", ticker, days)
-        return result if not _is_empty(result) else []
+        ca_articles = result if not _is_empty(result) else []
+        if not self.is_ca:
+            return ca_articles
+        us_ticker = get_us_ticker(ticker)
+        if us_ticker is None:
+            return ca_articles
+        finnhub = self._providers.get("finnhub")
+        try:
+            if finnhub is None:
+                finnhub = FinnhubDataProvider()
+                self._providers["finnhub"] = finnhub
+            us_articles = await finnhub.get_news(us_ticker, days)
+        except Exception:
+            logger.warning(
+                "ca_news_merge_failed", ticker=ticker, us_ticker=us_ticker, exc_info=True
+            )
+            return ca_articles
+        return _merge_ca_us_news(ca_articles, us_articles)
 
     async def get_analyst_recommendation_trends(self, ticker: str) -> list[dict]:
         result, _ = await self._try_chain("get_analyst_recommendation_trends", ticker)

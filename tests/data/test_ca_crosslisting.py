@@ -8,6 +8,7 @@ from data.providers.ca_crosslisting import (
     get_crosslisted_business_overview,
     get_crosslisted_interim_exhibits,
     get_crosslisted_mda,
+    get_us_ticker,
     is_crosslisted,
 )
 
@@ -85,6 +86,29 @@ def test_is_crosslisted_true_for_mapped_ticker(monkeypatch):
 def test_is_crosslisted_false_for_unmapped_ticker(monkeypatch):
     _patch_crosslisting_map(monkeypatch, {})
     assert is_crosslisted("ZZZZ.TO") is False
+
+
+# --- get_us_ticker (86bbr4azz) ---
+
+
+def test_get_us_ticker_returns_mapped_symbol(monkeypatch):
+    _patch_crosslisting_map(
+        monkeypatch,
+        {"RY.TO": {"us_ticker": "RY", "cik": 1000275, "form_type": "40-F", "company_name": "RBC"}},
+    )
+    assert get_us_ticker("RY.TO") == "RY"
+
+
+def test_get_us_ticker_returns_none_for_unmapped_ticker(monkeypatch):
+    _patch_crosslisting_map(monkeypatch, {})
+    assert get_us_ticker("ZZZZ.TO") is None
+
+
+def test_get_us_ticker_is_not_a_suffix_strip():
+    """CNR.TO's real US symbol is CNI, not "CNR" (Core Natural Resources,
+    an unrelated company) — the whole reason this reads the map instead of
+    stripping .TO. No monkeypatch: exercises the real shipped map."""
+    assert get_us_ticker("CNR.TO") == "CNI"
 
 
 # --- _normalize ---
