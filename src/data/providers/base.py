@@ -1,8 +1,31 @@
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TypedDict
 
 import pandas as pd
+
+_PERIOD_RE = re.compile(r"^(\d+)(d|mo|y)$")
+_PERIOD_UNIT_DAYS = {"d": 1, "mo": 30, "y": 365}
+
+
+def period_to_from_date(period: str) -> str:
+    """Convert a period token ('6mo', '1y', '5y', 'max', ...) to an ISO
+    'YYYY-MM-DD' start date. Providers whose price endpoint takes a date
+    range rather than a yfinance-style period token (openbb-tmx, FMP) use
+    this so the whole StockDataProvider price surface accepts one period
+    vocabulary. The 30-/365-day month/year approximation is ~3 days short
+    at '10y' — immaterial for the indicator/drawdown windows this feeds."""
+    if period.lower() == "max":
+        return "1970-01-01"
+    match = _PERIOD_RE.match(period.strip().lower())
+    if not match:
+        raise ValueError(
+            f"Unsupported period '{period}'. Use e.g. '1mo', '6mo', '1y', '5y', or 'max'."
+        )
+    count, unit = match.groups()
+    days = int(count) * _PERIOD_UNIT_DAYS[unit]
+    return (pd.Timestamp.now().normalize() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 class NormalizedQuote(TypedDict):
@@ -133,7 +156,18 @@ class StockDataProvider(ABC):
     """Abstract base for stock-centric financial data (FMP, yfinance)."""
 
     @abstractmethod
-    async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame: ...
+    async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
+        """Daily/weekly OHLCV, **split-adjusted, dividend-unadjusted** — the
+        series a retail user sees on their broker's chart, and the basis
+        every technical indicator and drawdown metric downstream is written
+        against. openbb-tmx and FMP are natively this; yfinance is forced to
+        it with auto_adjust=False (86bbq7dkv). Total return (price +
+        dividends) is a separate concern, computed from get_dividend_history.
+
+        `period`: the portable vocabulary is `1mo`/`3mo`/`6mo`/`1y`/`2y`/`5y`/
+        `10y`/`max` — valid natively in yfinance and via period_to_from_date
+        in the date-range providers. `interval`: `1d` or `1wk`."""
+        ...
     @abstractmethod
     async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
         """Individual adapters (fmp.py, yfinance.py, edgartools.py, openbb_tmx.py)
