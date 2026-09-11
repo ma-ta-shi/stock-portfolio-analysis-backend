@@ -146,12 +146,18 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         (86bbb001k) — real FMP field names confirmed via openbb_fmp's own
         /profile wrapper (openbb_fmp/models/equity_profile.py's alias dict)
         and cross-checked against a live-observed field in
-        tests/live/test_provider_completeness.py. All 6 canonical fields
-        are present directly, no derivation needed."""
+        tests/live/test_provider_completeness.py. The seven rendered fields
+        are present directly, no derivation needed; asset_type (86bbpk6uf)
+        is derived from FMP's isEtf/isFund booleans."""
         data = await self._request("profile", {"symbol": ticker})
         if not data:
             return {}
         raw = data[0]
+        # asset_type (86bbpk6uf part 1): FMP's /profile carries isEtf/isFund
+        # booleans. isFund covers both mutual funds and closed-end funds
+        # (FMP doesn't distinguish them) -> "other". A US preferred has both
+        # false -> "equity" (a documented gap, rare for this watchlist).
+        asset_type = "etf" if raw.get("isEtf") else ("other" if raw.get("isFund") else "equity")
         # .get(key) or "" (not .get(key, "")) — FMP can return an explicit
         # null for these fields, not just omit the key; .get(key, "") only
         # covers the omitted case and would silently store None in a str field.
@@ -163,6 +169,7 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
             currency=raw.get("currency") or "",
             country=raw.get("country") or "",
             primary_exchange=raw.get("exchange") or "",
+            asset_type=asset_type,
         )
 
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:

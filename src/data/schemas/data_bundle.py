@@ -59,8 +59,10 @@ class DataBundle(ContractModel):
     # --- Stock Researcher (Pass 1) ---
     company_info: (
         dict  # name, sector (GICS), industry (GICS), market_cap, currency, country,
-        # primary_exchange — matches providers.base.NormalizedCompanyInfo (86bbb001k);
-        # was previously documented as "exchange", which no payload template ever used
+        # primary_exchange, asset_type — matches providers.base.NormalizedCompanyInfo
+        # (86bbb001k); was previously documented as "exchange", which no payload
+        # template ever used. asset_type (86bbpk6uf) is routing-only, not rendered
+        # in any agent payload.
     )
     research_sources: ResearchSourcesBundle
 

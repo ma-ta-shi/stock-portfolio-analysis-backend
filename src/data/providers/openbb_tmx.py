@@ -51,6 +51,14 @@ from data.providers.base import (
 
 logger = structlog.get_logger(__name__)
 
+# TMX `issue_type` code -> NormalizedCompanyInfo.asset_type (86bbpk6uf part 1).
+# Confirmed live 2026-09-10 (CS common / RE REIT / LP partnership-unit ->
+# equity, ET -> etf, PS preferred -> other). Seed values only; an unmapped
+# code logs a warning and defaults to "equity". This is the CA company_info
+# path with no fallback, so a TMX schema change would silently misclassify
+# every CA security as equity — the warning is the only signal.
+_TMX_ISSUE_TYPE = {"CS": "equity", "RE": "equity", "LP": "equity", "ET": "etf", "PS": "other"}
+
 
 class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     """OpenBB (TMX extension) provider for Canadian equities.
@@ -98,7 +106,7 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         )
         return result.to_df()
 
-    async def get_company_info(self, ticker: str) -> dict:
+    async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo:
         """Fixed 2026-08-04 (86bb7j0kh) — real bug, confirmed live and
         upstream, in openbb-tmx's own equity_profile.py: its internal
         `symbol_to_index[d["symbol"]]` sort keys the lookup dict off the
@@ -128,7 +136,9 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         API call. industry uses industry_category ("Banking") over the
         finer industry_group ("Diversified Banks") — closer to the
         single-level granularity FMP/yfinance's own `industry` field
-        represents."""
+        represents. asset_type (86bbpk6uf part 1) maps TMX's issue_type
+        code via _TMX_ISSUE_TYPE; an unmapped code warns and falls back to
+        "equity"."""
         bare_symbol = ticker.removesuffix(".TO").removesuffix(".V").replace("-", ".")
         result = await asyncio.to_thread(
             obb.equity.profile, symbol=bare_symbol, provider=self.PROVIDER
@@ -136,6 +146,11 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         if not result.results:
             return {}
         raw = result.results[0].model_dump()
+        # asset_type (86bbpk6uf part 1): map TMX's own issue_type code.
+        issue_type = raw.get("issue_type")
+        asset_type = _TMX_ISSUE_TYPE.get(issue_type, "equity")
+        if issue_type not in _TMX_ISSUE_TYPE:
+            logger.warning("openbb_tmx_unknown_issue_type", issue_type=issue_type, ticker=ticker)
         return NormalizedCompanyInfo(
             name=raw.get("name") or "",
             sector=raw.get("sector") or "",
@@ -144,6 +159,7 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             currency="CAD",
             country=raw.get("hq_country") or raw.get("inc_country") or "",
             primary_exchange=raw.get("stock_exchange") or "",
+            asset_type=asset_type,
         )
 
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
