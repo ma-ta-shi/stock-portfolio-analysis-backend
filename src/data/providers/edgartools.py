@@ -5,7 +5,11 @@ import pandas as pd
 import structlog
 from edgar import Company, set_identity
 
-from data.providers.base import NormalizedFinancials, StockDataProvider
+from data.providers.base import (
+    NormalizedFinancials,
+    NormalizedInsiderTransaction,
+    StockDataProvider,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -492,14 +496,30 @@ class EdgarToolsDataProvider(StockDataProvider):
             return None, None
         return inc, cf
 
-    async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
-        """Transactional-level Form 4 data (date, shares, price, insider name) —
-        not the aggregate-only data openbb-tmx gives for Canadian stocks."""
+    # Form 4 transaction code -> NormalizedInsiderTransaction.transaction_type
+    # (86bbwha5r). Confirmed live (AAPL/MSFT, 180d): real codes seen are
+    # {F, S, G, A, M} — P (open-market purchase) is in the SEC taxonomy but
+    # didn't appear in either sample; mega-cap tech insiders mostly get
+    # compensated in equity, not buying on the open market. A (grant/award)
+    # and F (tax-withholding share delivery) are COMMON, not edge cases —
+    # every row in both live samples fell into this set. Both are
+    # compensation mechanics, not directional market conviction, so mapping
+    # them to "other" (excluded from insider_net_direction_90d, same as
+    # exercise/gift) is deliberate, not an oversight.
+    _FORM4_CODE = {"P": "purchase", "S": "sale", "M": "exercise", "G": "gift"}
+
+    async def get_insider_trading(
+        self, ticker: str, days: int = 90
+    ) -> list[NormalizedInsiderTransaction]:
+        """Transactional-level Form 4 data (date, shares, value, insider name) —
+        not the aggregate-only data openbb-tmx gives for Canadian stocks.
+        is_issuer is always False: Form 4 is filed per insider (a person),
+        never by the issuer itself the way yfinance's CA data can be."""
         company = await asyncio.to_thread(Company, ticker)
         filings = await asyncio.to_thread(lambda: company.get_filings(form="4").head(20))
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=days)
 
-        records: list[dict] = []
+        records: list[NormalizedInsiderTransaction] = []
         for filing in filings:
             try:
                 form4 = await asyncio.to_thread(filing.obj)
@@ -515,15 +535,21 @@ class EdgarToolsDataProvider(StockDataProvider):
             if df is None or df.empty or "Date" not in df.columns:
                 continue
             for _, row in df[df["Date"] >= cutoff].iterrows():
+                shares = float(row["Shares"]) if pd.notna(row["Shares"]) else None
+                price = float(row["Price"]) if pd.notna(row["Price"]) else None
+                insider_name = row.get("Insider")
                 records.append(
-                    {
-                        "date": row["Date"].strftime("%Y-%m-%d"),
-                        "shares": float(row["Shares"]) if pd.notna(row["Shares"]) else None,
-                        "price": float(row["Price"]) if pd.notna(row["Price"]) else None,
-                        "insider_name": row.get("Insider"),
-                        "transaction_type": row.get("Transaction Type"),
-                        "code": row.get("Code"),
-                    }
+                    NormalizedInsiderTransaction(
+                        date=row["Date"].strftime("%Y-%m-%d"),
+                        # `or ""` alone doesn't work here: NaN is truthy in
+                        # Python, unlike None, so a missing Insider cell
+                        # would silently store a float without this check.
+                        insider_name=insider_name if pd.notna(insider_name) else "",
+                        is_issuer=False,
+                        transaction_type=self._FORM4_CODE.get(row.get("Code"), "other"),
+                        shares=shares,
+                        value=shares * price if shares is not None and price is not None else None,
+                    )
                 )
         return records
 
