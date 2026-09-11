@@ -268,6 +268,18 @@ class YFinanceDataProvider(StockDataProvider):
             asset_type=asset_type,
         )
 
+    async def get_business_summary(self, ticker: str) -> str | None:
+        """86ban0x1u part 2a: research_sources.py's peer-block business
+        summary. Confirmed live for both CA and US tickers (5 tickers
+        spanning both markets) — unlike FMP's `description`, which is
+        US-only (empty/paywalled for .TO). No length cap here; truncating
+        to the peer-block token budget is research_sources.py's job, not
+        this adapter's — same "adapters stay dumb" split as everywhere
+        else in this file."""
+        stock = yf.Ticker(ticker)
+        summary = stock.info.get("longBusinessSummary")
+        return summary or None
+
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
         """Maps onto NormalizedAnalystEstimates (86bbdu04a). yfinance
         doesn't expose forward EPS via analyst_price_targets or

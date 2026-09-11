@@ -198,6 +198,11 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     async def get_earnings_surprises(self, ticker: str) -> list[dict]:
         raise NotImplementedError("Earnings-surprise history is not available via openbb-tmx.")
 
+    async def get_business_summary(self, ticker: str) -> str | None:
+        raise NotImplementedError(
+            "Business summary is yfinance.py's job — confirmed live to work for CA tickers too"
+        )
+
     async def get_insider_trading(
         self, ticker: str, days: int = 90
     ) -> list[NormalizedInsiderTransaction]:

@@ -1,15 +1,18 @@
 import asyncio
 import os
+from typing import Literal
 
 import pandas as pd
 import structlog
 from edgar import Company, set_identity
 
 from data.providers.base import (
+    NormalizedFilingSection,
     NormalizedFinancials,
     NormalizedInsiderTransaction,
     StockDataProvider,
 )
+from data.providers.ca_crosslisting import get_native_filing_section
 
 logger = structlog.get_logger(__name__)
 
@@ -553,6 +556,42 @@ class EdgarToolsDataProvider(StockDataProvider):
                 )
         return records
 
+    # FilingDigest.section's own vocabulary ("Business"/"MDA") -> the
+    # attribute name on edgartools' native parsed-filing object. Keeps the
+    # public parameter matching the schema research_sources.py builds,
+    # not a third naming scheme (86ban0x1u/2a).
+    _SECTION_ATTR = {"Business": "business", "MDA": "management_discussion"}
+
+    async def get_filing_section(
+        self, ticker: str, section: Literal["Business", "MDA"]
+    ) -> NormalizedFilingSection | None:
+        """General US filing-section extraction (86ban0x1u/2a) — the
+        capability `ca_crosslisting.py` already proved for the ~176 CA
+        cross-listed names, now reused for a plain US ticker via the same
+        get_native_filing_section() helper. Real, confirmed gap before
+        this: no code path in the repo returned 10-K/20-F Item 1/Item 7
+        text for a ticker outside the CA crosslisting map.
+
+        Tries `10-K` first, then `20-F` — a ticker with no CA suffix and
+        no crosslisting-map entry isn't necessarily a US domestic filer;
+        20-F is the SEC form for foreign private issuers (confirmed live:
+        BABA has zero 10-K filings and a real 20-F). edgartools' `.business`/
+        `.management_discussion` properties work unchanged across both
+        forms — the library abstracts 20-F's different item numbering
+        (Item 4/5 vs. 10-K's Item 1/7) behind the same attribute names, so
+        no per-form branching is needed here beyond the try order.
+
+        Degrades to None on any failure (no 10-K or 20-F filing, section
+        not present, parse error) — same convention as every other method
+        in this file, and the same as get_crosslisted_mda/
+        get_crosslisted_business_overview's contract for the CA path."""
+        attr = self._SECTION_ATTR[section]
+        for form in ("10-K", "20-F"):
+            result = await get_native_filing_section(ticker, form, attr)
+            if result is not None:
+                return result
+        return None
+
     # Out of scope for edgartools — SEC EDGAR has no price, profile, estimates,
     # ratings, peer, earnings-calendar, or dividend data. That's fmp.py's job
     # per the documented routing rule; fake it here rather than fabricating it.
@@ -561,6 +600,11 @@ class EdgarToolsDataProvider(StockDataProvider):
 
     async def get_company_info(self, ticker: str) -> dict:
         raise NotImplementedError("Company info is out of scope for edgartools — use fmp.py")
+
+    async def get_business_summary(self, ticker: str) -> str | None:
+        raise NotImplementedError(
+            "Business summary is out of scope for edgartools — use yfinance.py"
+        )
 
     async def get_analyst_estimates(self, ticker: str) -> dict:
         raise NotImplementedError("Analyst estimates are out of scope for edgartools — use fmp.py")

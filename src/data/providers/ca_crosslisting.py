@@ -8,14 +8,23 @@ of the SEDAR+ scraper originally planned (rejected — no official API,
 confirmed too fragile).
 
 Lives in providers/ but deliberately does not implement StockDataProvider —
-every other file in this directory does. These functions do the same kind
-of work as edgartools.py's other methods (fetch from SEC EDGAR, locate the
-right piece of content, return it), just for a different filing shape (a
-40-F/10-K's MD&A/business exhibit for a Canadian entity) and a fixed,
-CA-only ticker subset — not a general US-stock capability, so it was
-carved out of EdgarToolsDataProvider rather than added to it. Free
-functions, not a class: never on any ABC, nothing calls them through a
-class today.
+every other file in this directory does. get_crosslisted_mda/
+get_crosslisted_business_overview do the same kind of work as
+edgartools.py's other methods (fetch from SEC EDGAR, locate the right
+piece of content, return it), just for a different filing shape (a
+40-F/10-K's MD&A/business exhibit) and gated on a fixed, CA-only ticker
+subset (the crosslisting map) — not a general US-stock capability, so
+they were carved out of EdgarToolsDataProvider rather than added to it.
+Free functions, not a class: never on any ABC, nothing calls them
+through a class today.
+
+get_native_filing_section() (86ban0x1u/2a), the shared retrieval helper
+underneath those two, is NOT CA-only at the mechanism level — it takes a
+raw CIK or ticker, so EdgarToolsDataProvider.get_filing_section() also
+calls it directly, for plain US tickers with no crosslisting-map entry
+at all. Only the CIK-resolution path differs: the CA callers below
+resolve a CIK from ca_us_crosslisting.json first; the US caller passes
+the raw ticker straight through, since edgar.Company() accepts either.
 
 Relationship to sibling files:
 - data/tools/resolve_ca_crosslisting.py — the offline resolver that WRITES
@@ -26,8 +35,10 @@ Relationship to sibling files:
   cleanly verify; not in the mapping, so they resolve to None/[] here,
   same as any other unmapped ticker.
 - precompute/filing_summarizer.py — the consumer: takes a
-  CrosslistedSection's `text` and produces a <=250-token FilingDigest.
+  NormalizedFilingSection's `text` and produces a <=250-token FilingDigest.
   This module does retrieval only, never summarization.
+- edgartools.py — get_filing_section() reuses get_native_filing_section()
+  for plain US tickers outside the crosslisting map (see above).
 """
 
 import asyncio
@@ -36,34 +47,13 @@ import os
 import re
 from datetime import date
 from pathlib import Path
-from typing import TypedDict
 
 from edgar import Company, Filing, set_identity
 import structlog
 
+from data.providers.base import NormalizedFilingSection
+
 logger = structlog.get_logger(__name__)
-
-
-class CrosslistedSection(TypedDict):
-    """A resolved filing-section extraction plus the provenance
-    research_sources.py (86ban0x1u) needs: `accession_no` for the digest
-    cache key `(cik, accession_number, section_id)` and `filing_date` for
-    `ResearchSourcesBundle.latest_filing_age_days`. `source_form` records
-    which retrieval path produced the text — the MDA and Business digests
-    for one ticker can come from different filings with different dates
-    (MDA from a recent 6-K, Business from the annual 40-F AIF), so the
-    caller picks the freshest date across the sections it built.
-
-    TypedDict, not a dataclass: matches the providers layer's other
-    structured returns (NormalizedQuote / NormalizedDividendRecord in
-    base.py) and `filing_date` stays an ISO string like
-    get_crosslisted_interim_exhibits already returns.
-    """
-
-    text: str
-    accession_no: str
-    filing_date: str  # ISO "YYYY-MM-DD"
-    source_form: str  # "6-K" | "40-F" | "10-K" | "20-F"
 
 
 # Written by src/data/tools/resolve_ca_crosslisting.py — never guess this
@@ -183,7 +173,7 @@ def _is_candidate_40f_exhibit(document_name: str, description: str) -> bool:
 
 async def _find_40f_exhibit_text(
     cik: int, description_markers: tuple[str, ...], content_markers: tuple[str, ...]
-) -> CrosslistedSection | None:
+) -> NormalizedFilingSection | None:
     company = await asyncio.to_thread(Company, cik)
     filings = await asyncio.to_thread(
         lambda: company.get_filings(form="40-F", amendments=False).head(1)
@@ -193,7 +183,7 @@ async def _find_40f_exhibit_text(
     filing = filings[0]
     attachments = await asyncio.to_thread(lambda: list(filing.attachments))
 
-    def _section(text: str) -> CrosslistedSection:
+    def _section(text: str) -> NormalizedFilingSection:
         return {
             "text": text,
             "accession_no": filing.accession_no,
@@ -379,7 +369,7 @@ _STALE_40F_DAYS = 550  # an annual filer's current 40-F is at most ~16 months ol
 # before the next one; older means the filer stopped (BAM's / SHOP's last 40-F is 2024)
 
 
-async def _annual_40f_mda(cik: int) -> CrosslistedSection | None:
+async def _annual_40f_mda(cik: int) -> NormalizedFilingSection | None:
     """The 40-F's own MD&A exhibit, front matter skipped. None if the exhibit
     can't be located, if the most recent 40-F is too old to be current, or if
     after skipping the front matter it still doesn't read as MD&A prose (an
@@ -396,7 +386,7 @@ async def _annual_40f_mda(cik: int) -> CrosslistedSection | None:
     return None
 
 
-async def _find_mda_source(cik: int) -> CrosslistedSection | None:
+async def _find_mda_source(cik: int) -> NormalizedFilingSection | None:
     """MD&A text for a 40-F filer: the most recent self-identifying earnings
     6-K, or the 40-F's own MD&A exhibit - whichever is fresher. None if
     neither resolves. See the module comment above."""
@@ -405,7 +395,7 @@ async def _find_mda_source(cik: int) -> CrosslistedSection | None:
         lambda: list(company.get_filings(form="6-K", amendments=False).head(_SIX_K_LOOKBACK))
     )
 
-    candidate: CrosslistedSection | None = None
+    candidate: NormalizedFilingSection | None = None
     for filing in six_ks:  # newest first
         if not _within_days(filing.filing_date, _MAX_6K_AGE_DAYS):
             break  # older filings are only older - stop walking back
@@ -431,7 +421,9 @@ async def _find_mda_source(cik: int) -> CrosslistedSection | None:
     return candidate if candidate["filing_date"] >= annual["filing_date"] else annual
 
 
-async def _get_native_filing_item(cik: int, form: str, attr: str) -> CrosslistedSection | None:
+async def get_native_filing_section(
+    cik_or_ticker: int | str, form: str, attr: str
+) -> NormalizedFilingSection | None:
     """`attr` is a property name on edgartools' native parsed-filing object
     — edgar.company_reports.ten_k.TenK for `form="10-K"`
     ("management_discussion"/"business"), or edgar.company_reports.
@@ -441,8 +433,33 @@ async def _get_native_filing_item(cik: int, form: str, attr: str) -> Crosslisted
     required: an amendment only carries the amended sections (usually just
     Part III exec-comp items for a 10-K), not the full filing — confirmed
     live this drops Item 7 (MD&A) entirely if the amendment is fetched by
-    mistake."""
-    company = await asyncio.to_thread(Company, cik)
+    mistake.
+
+    Public (no leading underscore) and takes `cik_or_ticker`, not just a
+    CIK: edgar.Company() accepts either natively, and edgartools.py's
+    get_filing_section() (86ban0x1u/2a) calls this directly with a plain
+    ticker for non-crosslisted US names — the CA callers below still pass
+    a real CIK resolved from ca_us_crosslisting.json, since guessing a
+    ticker->CIK mapping live is exactly what this module exists to avoid
+    (see the module docstring).
+
+    Real, confirmed gap closed here: the CA callers only ever pass a CIK
+    already verified by the offline resolver, so `Company()` raising
+    "not found" was never a real path for them — but a raw ticker string
+    (the new US caller) can be genuinely invalid, and edgar.Company()
+    raises CompanyNotFoundError rather than returning None for one.
+    Confirmed live with a real invalid ticker before this guard existed:
+    it propagated uncaught, contradicting this function's own "degrades
+    to None on any failure" contract. Catches broadly (like this file's
+    other external-library boundaries, e.g. the filing.obj() parse in
+    edgartools.py's get_insider_trading) rather than importing edgar's
+    exact exception type, since the library can raise more than one
+    thing for "this isn't a real company."""
+    try:
+        company = await asyncio.to_thread(Company, cik_or_ticker)
+    except Exception:
+        logger.info("edgar_company_not_found", cik_or_ticker=cik_or_ticker)
+        return None
     filings = await asyncio.to_thread(
         lambda: company.get_filings(form=form, amendments=False).head(1)
     )
@@ -482,9 +499,9 @@ _NATIVELY_PARSED_FORMS = ("10-K", "20-F")
 _FOREIGN_PRIVATE_ISSUER_FORMS = ("40-F", "20-F")
 
 
-async def get_crosslisted_mda(ca_ticker: str) -> CrosslistedSection | None:
+async def get_crosslisted_mda(ca_ticker: str) -> NormalizedFilingSection | None:
     """MD&A-equivalent narrative plus its filing provenance (see
-    CrosslistedSection). Source depends on the entity's actual SEC filer
+    NormalizedFilingSection). Source depends on the entity's actual SEC filer
     status (data/ca_us_crosslisting.json's `form_type`), which isn't fixed
     (CP's 2021 merger changed it from 40-F to 10-K):
 
@@ -501,15 +518,15 @@ async def get_crosslisted_mda(ca_ticker: str) -> CrosslistedSection | None:
         logger.info("crosslisting_not_mapped", ca_ticker=ca_ticker)
         return None
     if entry["form_type"] in _NATIVELY_PARSED_FORMS:
-        return await _get_native_filing_item(
+        return await get_native_filing_section(
             entry["cik"], entry["form_type"], "management_discussion"
         )
     return await _find_mda_source(entry["cik"])
 
 
-async def get_crosslisted_business_overview(ca_ticker: str) -> CrosslistedSection | None:
+async def get_crosslisted_business_overview(ca_ticker: str) -> NormalizedFilingSection | None:
     """Business-section equivalent plus filing provenance (see
-    CrosslistedSection): a 40-F's "Annual Information Form" exhibit, or the
+    NormalizedFilingSection): a 40-F's "Annual Information Form" exhibit, or the
     native Business item for a 10-K/20-F filer. No quarterly equivalent
     exists for the AIF, so 40-F filers always use the annual exhibit here.
 
@@ -523,7 +540,7 @@ async def get_crosslisted_business_overview(ca_ticker: str) -> CrosslistedSectio
         logger.info("crosslisting_not_mapped", ca_ticker=ca_ticker)
         return None
     if entry["form_type"] in _NATIVELY_PARSED_FORMS:
-        return await _get_native_filing_item(entry["cik"], entry["form_type"], "business")
+        return await get_native_filing_section(entry["cik"], entry["form_type"], "business")
     section = await _find_40f_exhibit_text(
         entry["cik"], _BUSINESS_TITLE_MARKERS, _BUSINESS_TITLE_MARKERS
     )

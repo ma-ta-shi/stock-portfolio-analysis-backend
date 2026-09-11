@@ -2,7 +2,7 @@ import pandas as pd
 import pytest
 import structlog
 
-from data.providers.base import StockDataProvider
+from data.providers.base import NormalizedFilingSection, StockDataProvider
 from data.providers.edgartools import EdgarToolsDataProvider
 
 
@@ -678,6 +678,73 @@ async def test_get_insider_trading_no_filings_returns_empty_list(provider, monke
     result = await provider.get_insider_trading("AAPL", days=90)
 
     assert result == []
+
+
+# --- get_filing_section (86ban0x1u/2a) ---
+# get_native_filing_section() itself (the shared helper, promoted to
+# ca_crosslisting.py) already has its own thorough test coverage in
+# test_ca_crosslisting.py — these tests mock that one call rather than
+# rebuilding the whole Company/Filing fake chain, since what's actually
+# new here is the attr mapping, the 10-K->20-F try order, and the
+# degrade-to-None behavior, not the extraction itself.
+
+
+def _fake_section(form: str) -> NormalizedFilingSection:
+    return {
+        "text": f"real {form} text",
+        "accession_no": "0001-1",
+        "filing_date": "2026-01-01",
+        "source_form": form,
+    }
+
+
+@pytest.mark.parametrize(
+    "section,expected_attr",
+    [("Business", "business"), ("MDA", "management_discussion")],
+)
+async def test_get_filing_section_maps_section_to_attr(
+    provider, monkeypatch, section, expected_attr
+):
+    calls = []
+
+    async def fake_get_native(cik_or_ticker, form, attr):
+        calls.append((cik_or_ticker, form, attr))
+        return _fake_section(form) if form == "10-K" else None
+
+    monkeypatch.setattr("data.providers.edgartools.get_native_filing_section", fake_get_native)
+
+    result = await provider.get_filing_section("AAPL", section)
+
+    assert result["text"] == "real 10-K text"
+    assert calls[0] == ("AAPL", "10-K", expected_attr)
+
+
+async def test_get_filing_section_falls_back_to_20f_when_no_10k(provider, monkeypatch):
+    """Confirmed live (BABA): zero 10-K filings, one real 20-F — this
+    isn't a hypothetical case."""
+    calls = []
+
+    async def fake_get_native(cik_or_ticker, form, attr):
+        calls.append(form)
+        return None if form == "10-K" else _fake_section("20-F")
+
+    monkeypatch.setattr("data.providers.edgartools.get_native_filing_section", fake_get_native)
+
+    result = await provider.get_filing_section("BABA", "Business")
+
+    assert result["source_form"] == "20-F"
+    assert calls == ["10-K", "20-F"]
+
+
+async def test_get_filing_section_no_10k_or_20f_returns_none(provider, monkeypatch):
+    async def fake_get_native(cik_or_ticker, form, attr):
+        return None
+
+    monkeypatch.setattr("data.providers.edgartools.get_native_filing_section", fake_get_native)
+
+    result = await provider.get_filing_section("ZZZZINVALID", "MDA")
+
+    assert result is None
 
 
 # --- 5 US stocks of varying market cap, per ticket's unit-test requirement ---
