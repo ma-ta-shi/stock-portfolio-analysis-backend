@@ -1,6 +1,7 @@
 from datetime import date, timedelta
 
 import pytest
+import structlog
 
 from data.providers.ca_crosslisting import (
     _MDA_CONTENT_MARKERS,
@@ -9,7 +10,6 @@ from data.providers.ca_crosslisting import (
     _find_40f_exhibit_text,
     _find_mda_source,
     _first_self_identifying_exhibit,
-    _get_native_filing_item,
     _is_candidate_40f_exhibit,
     _looks_like_mda_or_earnings_release,
     _normalize,
@@ -17,10 +17,10 @@ from data.providers.ca_crosslisting import (
     get_crosslisted_business_overview,
     get_crosslisted_interim_exhibits,
     get_crosslisted_mda,
+    get_native_filing_section,
     get_us_ticker,
     is_crosslisted,
 )
-
 
 # --- Fakes standing in for the edgar (edgartools) library's object graph ---
 
@@ -293,23 +293,23 @@ async def test_find_40f_exhibit_skips_certification_without_fetching_text(monkey
     assert calls == []
 
 
-# --- _get_native_filing_item ---
+# --- get_native_filing_section ---
 
 
-async def test_get_native_filing_item_returns_requested_attribute(monkeypatch):
+async def test_get_native_filing_section_returns_requested_attribute(monkeypatch):
     obj = FakeTenKObj(management_discussion="MDA text", business="Business text")
     fake = FakeCompany(filings_by_form={"10-K": [Fake10KFiling(obj)]})
     monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
 
-    mda = await _get_native_filing_item(16875, "10-K", "management_discussion")
-    biz = await _get_native_filing_item(16875, "10-K", "business")
+    mda = await get_native_filing_section(16875, "10-K", "management_discussion")
+    biz = await get_native_filing_section(16875, "10-K", "business")
 
     assert mda["text"] == "MDA text"
     assert mda["source_form"] == "10-K"
     assert biz["text"] == "Business text"
 
 
-async def test_get_native_filing_item_uses_the_given_form(monkeypatch):
+async def test_get_native_filing_section_uses_the_given_form(monkeypatch):
     """20-F filers parse natively too (confirmed live 2026-08-03 against
     Canada Goose/Celestica/Lithium Americas) — must query the form the
     caller actually asked for, not hardcode 10-K."""
@@ -317,29 +317,48 @@ async def test_get_native_filing_item_uses_the_given_form(monkeypatch):
     fake = FakeCompany(filings_by_form={"20-F": [Fake10KFiling(obj)]})
     monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
 
-    result = await _get_native_filing_item(1690511, "20-F", "management_discussion")
+    result = await get_native_filing_section(1690511, "20-F", "management_discussion")
 
     assert result["text"] == "20-F MDA text"
     assert result["source_form"] == "20-F"
 
 
-async def test_get_native_filing_item_no_filings_returns_none(monkeypatch):
+async def test_get_native_filing_section_no_filings_returns_none(monkeypatch):
     fake = FakeCompany(filings_by_form={"10-K": []})
     monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
 
-    result = await _get_native_filing_item(16875, "10-K", "management_discussion")
+    result = await get_native_filing_section(16875, "10-K", "management_discussion")
 
     assert result is None
 
 
-async def test_get_native_filing_item_missing_attr_returns_none(monkeypatch):
+async def test_get_native_filing_section_missing_attr_returns_none(monkeypatch):
     obj = FakeTenKObj(management_discussion=None)
     fake = FakeCompany(filings_by_form={"10-K": [Fake10KFiling(obj)]})
     monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
 
-    result = await _get_native_filing_item(16875, "10-K", "management_discussion")
+    result = await get_native_filing_section(16875, "10-K", "management_discussion")
 
     assert result is None
+
+
+async def test_get_native_filing_section_unknown_company_returns_none(monkeypatch):
+    """86ban0x1u/2a: real gap caught live before this guard existed — the
+    CA callers only ever pass a pre-verified CIK, so Company() raising
+    "not found" was never exercised until a raw, unverified ticker string
+    (the new US caller) made it a real path. Confirmed live with a real
+    invalid ticker: this raised uncaught before the fix."""
+
+    def _raise(cik_or_ticker):
+        raise ValueError("Company not found: 'ZZZZINVALID'")
+
+    monkeypatch.setattr("data.providers.ca_crosslisting.Company", _raise)
+
+    with structlog.testing.capture_logs() as logs:
+        result = await get_native_filing_section("ZZZZINVALID", "10-K", "business")
+
+    assert result is None
+    assert any(log["event"] == "edgar_company_not_found" for log in logs)
 
 
 # --- get_crosslisted_mda / get_crosslisted_business_overview ---

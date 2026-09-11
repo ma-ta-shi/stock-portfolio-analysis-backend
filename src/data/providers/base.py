@@ -112,6 +112,30 @@ class NormalizedInsiderTransaction(TypedDict):
     value: float | None  # trade value in local currency; None when the source doesn't report it
 
 
+class NormalizedFilingSection(TypedDict):
+    """A resolved SEC filing-section extraction plus the provenance
+    research_sources.py (86ban0x1u) needs: `accession_no` for the digest
+    cache key `(cik, accession_number, section_id)` and `filing_date` for
+    `ResearchSourcesBundle.latest_filing_age_days`. `source_form` records
+    which retrieval path produced the text — the MDA and Business digests
+    for one ticker can come from different filings with different dates,
+    so the caller picks the freshest date across the sections it built.
+
+    Promoted here from providers/ca_crosslisting.py (86bbu1j02), where it
+    was originally named `CrosslistedSection` and scoped to the ~176-name
+    CA cross-listing map. The extraction mechanism underneath was always
+    market-agnostic (edgartools' native 10-K/20-F parser takes a CIK, not
+    a CA-specific object) — only the CALLER was CA-only. Now
+    edgartools.py's get_filing_section() (86ban0x1u/2a) uses this same
+    shape for plain US tickers, so the type moved to where shared
+    Normalized* shapes live rather than staying under a CA-only name."""
+
+    text: str
+    accession_no: str
+    filing_date: str  # ISO "YYYY-MM-DD"
+    source_form: str  # "6-K" | "40-F" | "10-K" | "20-F"
+
+
 class NormalizedCompanyInfo(TypedDict):
     """Canonical get_company_info() shape, confirmed by grepping every agent
     prompt that references DataBundle.company_info (86bbb001k) — all 10
@@ -238,6 +262,19 @@ class StockDataProvider(ABC):
         ...
     @abstractmethod
     async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo: ...
+    @abstractmethod
+    async def get_business_summary(self, ticker: str) -> str | None:
+        """A short, human-written business description (86ban0x1u part 2a)
+        — for research_sources.py's peer blocks, which the live Stock
+        Researcher prompt renders as one plain-text `business_summary`
+        per peer, not a structured field. Only yfinance serves this for
+        real (`.info["longBusinessSummary"]`, confirmed live for both CA
+        and US tickers); every other adapter raises NotImplementedError.
+        Not on NormalizedCompanyInfo — that type is grepped against all
+        10 agent prompts and none of them render a description; this is
+        a narrow, single-consumer field, deliberately its own method
+        rather than growing a shared 8-consumer-prompt contract."""
+        ...
     @abstractmethod
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates: ...
     @abstractmethod
