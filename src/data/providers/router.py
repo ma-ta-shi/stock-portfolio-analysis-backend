@@ -150,7 +150,11 @@ CA_CHAINS: dict[str, list[str]] = {
     "get_quote": ["yfinance"],
     "get_company_info": ["openbb_tmx"],
     "get_financials": ["yfinance"],
-    "get_insider_trading": ["openbb_tmx"],
+    # yfinance first (86bbwha5r): real per-transaction rows with dates,
+    # vs. openbb_tmx's quarterly per-owner aggregate with no date at all.
+    # openbb_tmx stays as the fallback — yfinance returns empty for real
+    # names (confirmed live: AEM.TO, BCE.TO), not just a hypothetical gap.
+    "get_insider_trading": ["yfinance", "openbb_tmx"],
     # openbb_tmx's TMX consensus has no forward-EPS field at all —
     # get_analyst_estimates() returns {} unconditionally, no API call
     # (86bbdu04a). Stays first anyway since that costs nothing, so a

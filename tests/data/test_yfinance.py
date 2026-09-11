@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import structlog
 
 from data.providers.yfinance import YFinanceDataProvider
 
@@ -563,25 +564,138 @@ async def test_get_quote_null_currency_defaults_to_empty_string_not_none(provide
 # --- get_insider_trading ---
 
 
-async def test_get_insider_trading_returns_list_of_dicts_within_window(provider, monkeypatch):
-    """Real, confirmed bug fixed here: declared -> list[dict] but every
-    code path actually returned a pd.DataFrame."""
+def _insider_df(rows: list[dict]) -> pd.DataFrame:
+    """Builds a frame with yfinance's real column set (86bbwha5r) — every
+    row gets a default for columns the test doesn't care about, matching
+    real .insider_transactions shape (Shares/Value/Text/Insider/Position/
+    Transaction/Start Date/Ownership)."""
     now = pd.Timestamp.now()
-    df = pd.DataFrame(
-        {
-            "Start Date": [now - pd.Timedelta(days=5), now - pd.Timedelta(days=400)],
-            "Insider": ["Jane Doe", "Old Insider"],
-            "Shares": [100, 50],
-        }
+    defaults = {
+        "Shares": 100,
+        "Value": 1000.0,
+        "Text": "",
+        "Insider": "Jane Doe",
+        "Position": "Director of Issuer",
+        "Transaction": "",  # real yfinance data: always empty, never the phrase field
+        "Start Date": now - pd.Timedelta(days=5),
+        "Ownership": "D",
+    }
+    return pd.DataFrame([{**defaults, **row} for row in rows])
+
+
+async def test_get_insider_trading_maps_normalized_fields_within_window(provider, monkeypatch):
+    """Real, confirmed bug fixed here: declared -> list[dict] but every
+    code path actually returned a pd.DataFrame. 86bbwha5r: now normalizes
+    into NormalizedInsiderTransaction, classifying `Text` (not the always-
+    empty `Transaction` column — a real mix-up caught before shipping)."""
+    now = pd.Timestamp.now()
+    df = _insider_df(
+        [
+            {
+                "Text": "Disposition in the public market at price 199.35 per share.",
+                "Insider": "Jane Doe",
+                "Shares": 100,
+                "Value": 19935.0,
+                "Start Date": now - pd.Timedelta(days=5),
+            },
+            {
+                "Text": "Disposition in the public market at price 100.00 per share.",
+                "Insider": "Old Insider",
+                "Start Date": now - pd.Timedelta(days=400),
+            },
+        ]
     )
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
 
     result = await provider.get_insider_trading("AAPL", days=90)
 
-    assert isinstance(result, list)
-    assert all(isinstance(row, dict) for row in result)
     assert len(result) == 1
-    assert result[0]["Insider"] == "Jane Doe"
+    assert result[0] == {
+        "date": (now - pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
+        "insider_name": "Jane Doe",
+        "is_issuer": False,
+        "transaction_type": "sale",
+        "shares": 100.0,
+        "value": 19935.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Exercise of options at price 72.08 per share.", "exercise"),
+        ("Disposition in the public market at price 1.00 per share.", "sale"),
+        ("Disposition under a purchase/ownership plan at price 1.00 per share.", "sale"),
+        ("Sale at price 170.00 per share.", "sale"),  # WCN.TO's distinct phrasing, same meaning
+        ("Purchase at price 152.24 per share.", "purchase"),  # WCN.TO's counterpart, caught live
+        ("Acquisition in the public market at price 1.00 per share.", "purchase"),
+        ("Acquisition under a purchase/ownership plan at price 1.00 per share.", "purchase"),
+        ("Redemption, retraction, cancelation, repurchase at price 1.00 per share.", "buyback"),
+        ("Stock Gift at price 0.00 per share.", "gift"),
+        ("Grant of rights at price 1.00 per share.", "other"),  # not a market transaction
+        ("Change in nature of ownership at price 1.00 per share.", "other"),
+    ],
+)
+async def test_get_insider_trading_classifies_real_text_phrases(
+    provider, monkeypatch, text, expected
+):
+    """Every phrase here was observed live across 8 real CA tickers spanning
+    6 sectors (86bbwha5r) — not invented."""
+    df = _insider_df([{"Text": text}])
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    result = await provider.get_insider_trading("RY.TO")
+
+    assert result[0]["transaction_type"] == expected
+
+
+async def test_get_insider_trading_unrecognized_nonempty_text_logs_and_lands_other(
+    provider, monkeypatch
+):
+    df = _insider_df([{"Text": "Some brand new phrase never seen before."}])
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_insider_trading("RY.TO")
+
+    assert result[0]["transaction_type"] == "other"
+    assert any(log["event"] == "yfinance_unrecognized_insider_text" for log in logs)
+
+
+async def test_get_insider_trading_blank_text_lands_other_without_logging(provider, monkeypatch):
+    """86bbwha5r: confirmed live that a blank Text is common (often the
+    majority of real rows, e.g. RY.TO/SHOP.TO/WCN.TO), not rare filler —
+    it must still appear in the output, just uncounted as "unrecognized"
+    since there was never a phrase to fail to recognize."""
+    df = _insider_df([{"Text": "", "Shares": 350000, "Position": "Issuer", "Value": None}])
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_insider_trading("RY.TO")
+
+    assert len(result) == 1
+    assert result[0]["transaction_type"] == "other"
+    assert result[0]["shares"] == 350000.0
+    assert result[0]["value"] is None
+    assert not any(log["event"] == "yfinance_unrecognized_insider_text" for log in logs)
+
+
+async def test_get_insider_trading_is_issuer_flags_buybacks(provider, monkeypatch):
+    df = _insider_df(
+        [
+            {
+                "Text": "Redemption, retraction, cancelation, repurchase at price 1.00 per share.",
+                "Insider": "Royal Bank of Canada",
+                "Position": "Issuer",
+            }
+        ]
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    result = await provider.get_insider_trading("RY.TO")
+
+    assert result[0]["is_issuer"] is True
+    assert result[0]["transaction_type"] == "buyback"
 
 
 async def test_get_insider_trading_no_data_returns_empty_list(provider, monkeypatch):
@@ -592,14 +706,17 @@ async def test_get_insider_trading_no_data_returns_empty_list(provider, monkeypa
     assert result == []
 
 
-async def test_get_insider_trading_no_date_column_still_returns_list_of_dicts(provider, monkeypatch):
+async def test_get_insider_trading_no_date_column_returns_empty_list(provider, monkeypatch):
+    """Never observed live across 8 real tickers — every real row has
+    Start Date or Date. 86bbwha5r: changed from returning malformed raw
+    dict rows to a clean [] so the router falls back to openbb_tmx instead
+    of serving rows with no `date` field at all."""
     df = pd.DataFrame({"Insider": ["Jane Doe"], "Shares": [100]})
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
 
     result = await provider.get_insider_trading("AAPL")
 
-    assert isinstance(result, list)
-    assert result == [{"Insider": "Jane Doe", "Shares": 100}]
+    assert result == []
 
 
 # --- get_earnings_calendar ---
