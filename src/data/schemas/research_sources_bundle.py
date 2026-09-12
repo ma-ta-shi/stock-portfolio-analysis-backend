@@ -51,9 +51,19 @@ class ManagementSignals(ContractModel):
     c_suite_changes_12mo is NonNegativeInt, not bool (changed 2026-08-07,
     contract-vs-consumer audit) — the live Stock Researcher Agent Prompt.md
     renders and reasons about this as a count ("c_suite_changes_12mo=3" in
-    its own worked example), not a flag."""
+    its own worked example), not a flag.
 
-    c_suite_changes_12mo: NonNegativeInt
+    Widened to NonNegativeInt | None (86ban0x1u/2b): no provider exposes
+    structured executive-change data anywhere in this codebase, and a
+    prior version of this exact field once had a roster size rendered
+    into it by mistake — the agent reported "10 C-suite changes in 12
+    months — instability" from that, and the fabricated signal reached
+    the CIO's evidence base verbatim. A plausible-looking number in a
+    field named for a different quantity is worse than a null, because
+    nothing downstream can detect it. research_sources.py always emits
+    None here until a real, grounded derivation exists — do not guess."""
+
+    c_suite_changes_12mo: NonNegativeInt | None
     changes_detail: str
     insider_net_direction_90d: Literal["buying", "neutral", "selling"] | None
     buyback_activity: str
