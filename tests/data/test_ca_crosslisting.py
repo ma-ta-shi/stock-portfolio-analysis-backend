@@ -17,6 +17,7 @@ from data.providers.ca_crosslisting import (
     get_crosslisted_business_overview,
     get_crosslisted_interim_exhibits,
     get_crosslisted_mda,
+    get_expected_cik,
     get_native_filing_section,
     get_us_ticker,
     is_crosslisted,
@@ -146,6 +147,28 @@ def test_get_us_ticker_is_not_a_suffix_strip():
     an unrelated company) — the whole reason this reads the map instead of
     stripping .TO. No monkeypatch: exercises the real shipped map."""
     assert get_us_ticker("CNR.TO") == "CNI"
+
+
+# --- get_expected_cik (86ban0x1u/2b) ---
+
+
+def test_get_expected_cik_returns_mapped_cik(monkeypatch):
+    _patch_crosslisting_map(
+        monkeypatch,
+        {"RY.TO": {"us_ticker": "RY", "cik": 1000275, "form_type": "40-F", "company_name": "RBC"}},
+    )
+    assert get_expected_cik("RY.TO") == 1000275
+
+
+def test_get_expected_cik_returns_none_for_unmapped_ticker(monkeypatch):
+    _patch_crosslisting_map(monkeypatch, {})
+    assert get_expected_cik("ZZZZ.TO") is None
+
+
+def test_get_expected_cik_matches_real_shipped_map():
+    """No monkeypatch: exercises the real shipped map, same discipline as
+    test_get_us_ticker_is_not_a_suffix_strip above."""
+    assert get_expected_cik("RY.TO") == 1000275
 
 
 # --- _normalize ---
