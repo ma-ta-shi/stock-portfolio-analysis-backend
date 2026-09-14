@@ -21,6 +21,7 @@ import pytest
 
 from data.precompute.news_id_assignment import assign_news_ids
 from data.providers.router import Router
+from data.providers.yfinance import YFinanceDataProvider
 
 import tickers as t
 
@@ -150,6 +151,38 @@ async def test_ca_price_history_survives_openbb_tmx_exception_and_falls_back():
         )
     assert not _is_empty(result)
     assert source == "yfinance"
+
+
+async def test_ca_price_history_honors_period_not_the_250_bar_default():
+    """86bbq7dkv: openbb_tmx.get_price_history() used to ignore `period` and
+    return OpenBB's ~250-bar default regardless, silently starving
+    weekly_trend and the 3yr drawdown. A 5y request must now return the
+    full span."""
+    async with Router(ticker="RY.TO") as router:
+        result, source = await router._try_chain("get_price_history", "RY.TO", "5y", "1d")
+    assert source == "openbb_tmx"
+    assert len(result) > 500, f"5y request returned only {len(result)} bars — the old 250-cap bug"
+    span_days = (result.index.max() - result.index.min()).days
+    assert span_days > 365 * 3, f"5y request spans only {span_days} days"
+
+
+async def test_price_history_cross_provider_close_alignment():
+    """86bbq7dkv: after aligning yfinance to auto_adjust=False, openbb-tmx
+    and the yfinance adapter return the same (split-adjusted,
+    dividend-unadjusted) close for a CA name."""
+    async with Router(ticker="RY.TO") as router:
+        tmx, _ = await router._try_chain("get_price_history", "RY.TO", "1y", "1d")
+    yf_df = await YFinanceDataProvider().get_price_history("RY.TO", "1y", "1d")
+
+    tmx_close = {
+        (d.date() if hasattr(d, "date") else d): v for d, v in tmx["close"].items()
+    }
+    yf_close = {d.date(): v for d, v in yf_df["Close"].items()}
+    shared = sorted(set(tmx_close) & set(yf_close))
+    assert len(shared) > 100
+    for day in (shared[0], shared[len(shared) // 2], shared[-1]):
+        a, b = tmx_close[day], yf_close[day]
+        assert abs(a - b) / a < 0.005, f"{day}: openbb-tmx {a} vs yfinance {b} — adjustment mismatch"
 
 
 async def test_ca_news_house_shape_survives_id_assignment():

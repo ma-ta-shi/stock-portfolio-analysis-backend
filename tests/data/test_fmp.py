@@ -4,8 +4,8 @@ import pandas as pd
 import pytest
 import structlog
 
-from data.providers.base import NewsProvider, StockDataProvider
-from data.providers.fmp import FMPDataProvider, _period_to_from_date
+from data.providers.base import NewsProvider, StockDataProvider, period_to_from_date
+from data.providers.fmp import FMPDataProvider
 
 
 # --- Fakes standing in for aiohttp's response/session objects ---
@@ -139,7 +139,8 @@ async def test_request_attaches_api_key_to_query(provider):
     assert params["symbol"] == "AAPL"
 
 
-# --- _period_to_from_date ---
+# --- period_to_from_date (moved to base.py in 86bbq7dkv; still exercised here,
+#     and it's what FMP's get_price_history from-date is built on) ---
 
 
 @pytest.mark.parametrize(
@@ -148,23 +149,24 @@ async def test_request_attaches_api_key_to_query(provider):
         ("1mo", 30),
         ("6mo", 180),
         ("1y", 365),
+        ("3y", 1095),
         ("5y", 1825),
         ("10d", 10),
     ],
 )
 def test_period_to_from_date_valid_periods(period, expected_days_ago):
-    result = pd.Timestamp(_period_to_from_date(period))
+    result = pd.Timestamp(period_to_from_date(period))
     expected = pd.Timestamp.now().normalize() - pd.Timedelta(days=expected_days_ago)
     assert result == expected
 
 
 def test_period_to_from_date_max_returns_epoch():
-    assert _period_to_from_date("max") == "1970-01-01"
+    assert period_to_from_date("max") == "1970-01-01"
 
 
 def test_period_to_from_date_invalid_raises():
     with pytest.raises(ValueError, match="Unsupported period"):
-        _period_to_from_date("banana")
+        period_to_from_date("banana")
 
 
 # --- get_price_history ---

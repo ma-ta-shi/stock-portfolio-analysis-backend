@@ -123,9 +123,14 @@ class YFinanceDataProvider(StockDataProvider):
     """Abstract base for stock-centric financial data yfinance."""
 
     async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
+        # auto_adjust=False: keep `Close` the raw (split-adjusted, NOT
+        # dividend-back-adjusted) price, matching openbb-tmx and FMP so a CA
+        # name and a US name are on the same basis (86bbq7dkv). Drop the
+        # `Adj Close` column it adds — we've settled on unadjusted, and this
+        # keeps the column set identical to before.
         stock = yf.Ticker(ticker)
-        history = stock.history(period, interval)
-        return history  # histroy hould be a panda data frame already
+        history = stock.history(period=period, interval=interval, auto_adjust=False)
+        return history.drop(columns=["Adj Close"], errors="ignore")
 
     async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
         stock = yf.Ticker(ticker)
