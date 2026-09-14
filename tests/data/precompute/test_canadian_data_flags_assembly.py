@@ -26,6 +26,7 @@ def _research_bundle(
         transcript_excerpts=[],
         news_items=news_items,
         peer_blocks=[],
+        peer_names={},
         management_signals=ManagementSignals(
             c_suite_changes_12mo=None,
             changes_detail="",

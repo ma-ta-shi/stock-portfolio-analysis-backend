@@ -31,6 +31,7 @@ def _empty_research_sources() -> ResearchSourcesBundle:
         transcript_excerpts=[],
         news_items=[],
         peer_blocks=[],
+        peer_names={},
         management_signals=ManagementSignals(
             c_suite_changes_12mo=0,
             changes_detail="",
