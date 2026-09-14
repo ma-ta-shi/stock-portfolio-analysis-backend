@@ -147,6 +147,18 @@ def get_us_ticker(ca_ticker: str) -> str | None:
     return entry.get("us_ticker") if entry else None
 
 
+def get_expected_cik(ca_ticker: str) -> int | None:
+    """The mapped CIK for a cross-listed CA ticker, or None — same
+    "mapping-only, no I/O beyond the JSON read" contract as
+    is_crosslisted()/get_us_ticker(). Named "expected" (not just
+    get_cik()) because this module never fetches a filing to confirm it
+    live — it's the static map's own stored value, for a caller (86ban0x1u/
+    2b's cik_verified) that wants to cross-check it against a fresh, live
+    CIK resolution to catch a stale map entry."""
+    entry = _load_crosslisting_map().get(ca_ticker)
+    return entry.get("cik") if entry else None
+
+
 def _normalize(text: str) -> str:
     # Curly apostrophe (’) -> straight: confirmed live that filers' own
     # PDF-to-text conversion uses "Management’s", which a plain ASCII

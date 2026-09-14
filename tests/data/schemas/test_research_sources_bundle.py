@@ -103,6 +103,16 @@ def test_c_suite_changes_12mo_accepts_zero():
     assert signals.c_suite_changes_12mo == 0
 
 
+def test_c_suite_changes_12mo_accepts_none():
+    """86ban0x1u/2b: widened to nullable because no provider exposes real
+    executive-change data - research_sources.py always emits None here
+    rather than guess. A roster size mistakenly rendered into this field
+    once reached the CIO's evidence base as a fabricated instability
+    signal; None must stay constructible, not just a real count."""
+    signals = _signals(c_suite_changes_12mo=None)
+    assert signals.c_suite_changes_12mo is None
+
+
 # ---------- ResearchSourcesBundle: valid construction ----------
 
 
@@ -226,6 +236,11 @@ def test_management_signals_round_trips_through_model_dump():
 
 def test_management_signals_round_trips_with_none_insider_direction():
     signals = _signals(insider_net_direction_90d=None)
+    assert ManagementSignals.model_validate(signals.model_dump()) == signals
+
+
+def test_management_signals_round_trips_with_none_c_suite_changes():
+    signals = _signals(c_suite_changes_12mo=None)
     assert ManagementSignals.model_validate(signals.model_dump()) == signals
 
 
