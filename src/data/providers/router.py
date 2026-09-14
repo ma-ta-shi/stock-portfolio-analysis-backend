@@ -126,6 +126,10 @@ US_CHAINS: dict[str, list[str]] = {
     "get_dividend_history": ["fmp", "yfinance"],
     "get_quote": ["fmp", "yfinance"],
     "get_company_info": ["fmp", "yfinance"],
+    # yfinance only (86ban0x1u/2a): the only adapter that serves this for
+    # real — confirmed live to work for both CA and US tickers, so no
+    # fallback needed on either chain.
+    "get_business_summary": ["yfinance"],
     "get_financials": ["edgartools", "yfinance"],
     "get_insider_trading": ["edgartools"],  # never FMP — CLAUDE.md hard rule
     "get_analyst_estimates": ["fmp"],
@@ -149,6 +153,8 @@ CA_CHAINS: dict[str, list[str]] = {
     # NotImplementedError would — misleading, not a real fallback.
     "get_quote": ["yfinance"],
     "get_company_info": ["openbb_tmx"],
+    # see US_CHAINS — same reasoning, confirmed live for CA too
+    "get_business_summary": ["yfinance"],
     "get_financials": ["yfinance"],
     # yfinance first (86bbwha5r): real per-transaction rows with dates,
     # vs. openbb_tmx's quarterly per-owner aggregate with no date at all.
@@ -287,6 +293,10 @@ class Router(StockDataProvider, NewsProvider):
     async def get_company_info(self, ticker: str) -> dict:
         result, _ = await self._try_chain("get_company_info", ticker)
         return result if not _is_empty(result) else {}
+
+    async def get_business_summary(self, ticker: str) -> str | None:
+        result, _ = await self._try_chain("get_business_summary", ticker)
+        return result if not _is_empty(result) else None
 
     async def get_analyst_estimates(self, ticker: str) -> dict:
         result, _ = await self._try_chain("get_analyst_estimates", ticker)

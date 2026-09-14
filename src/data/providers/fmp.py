@@ -311,6 +311,12 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         raise NotImplementedError("Insider trading (Form 4) is edgartools.py's job")
 
+    async def get_business_summary(self, ticker: str) -> str | None:
+        raise NotImplementedError(
+            "Business summary is yfinance.py's job — FMP's description field is "
+            "US-only (confirmed live, empty for .TO tickers) where yfinance covers both markets"
+        )
+
     async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
         raise NotImplementedError("Peers are Finnhub's job — GET /stock/peers")
 

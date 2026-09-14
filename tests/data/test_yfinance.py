@@ -190,6 +190,39 @@ async def test_get_company_info_missing_secondary_fields_default_gracefully(prov
     assert result["asset_type"] == "equity"  # no quoteType in .info -> equity
 
 
+# --- get_business_summary ---
+
+
+async def test_get_business_summary_returns_real_text(provider, monkeypatch):
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(info={"longBusinessSummary": "A leading widget maker."}),
+    )
+
+    result = await provider.get_business_summary("WDGT")
+
+    assert result == "A leading widget maker."
+
+
+async def test_get_business_summary_missing_field_returns_none(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={}))
+
+    result = await provider.get_business_summary("ZZZZ")
+
+    assert result is None
+
+
+async def test_get_business_summary_blank_field_returns_none(provider, monkeypatch):
+    """`or None` normalization: an empty string is treated the same as a
+    missing key, not returned as-is — matches how the Router's _is_empty()
+    check expects "no data" to look for this method."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={"longBusinessSummary": ""}))
+
+    result = await provider.get_business_summary("ZZZZ")
+
+    assert result is None
+
+
 # --- normalize_financials ---
 
 
