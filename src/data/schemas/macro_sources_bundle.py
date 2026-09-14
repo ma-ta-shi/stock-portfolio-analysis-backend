@@ -136,20 +136,23 @@ class MacroSourcesBundle(ContractModel):
     cb_stance_note: str | None
 
     # --- Series age fields for reliability scoring ---
-    # Note: sector_commodity_age_days_reliability is a DIFFERENT field from
-    # sector_commodity_age_days above, despite the near-identical name — the
-    # doc lists both separately (one under "sector-commodity relevance," one
-    # under "series age fields for reliability scoring"). Kept distinct per
-    # the doc rather than assumed to be a duplicate/typo.
     # Optional alongside their corresponding series above — an age in days
     # only means something for a value that actually resolved.
+    #
+    # sector_commodity_age_days_reliability removed (86bawptxa, 2026-09-13):
+    # an earlier version of this comment argued it was a deliberately
+    # distinct field from sector_commodity_age_days above, based on the
+    # design doc listing them in two different sections - but the real
+    # precompute/macro_sources.py construction call sets both from the
+    # exact same dict key, every time, with no divergent code path. They
+    # were never actually two facts, just one fact under two names. Use
+    # sector_commodity_age_days (above) for both purposes.
     policy_rate_age_days: NonNegativeInt | None
     cpi_age_days: NonNegativeInt | None
     gdp_age_days: NonNegativeInt | None
     unemployment_age_days: NonNegativeInt | None
     cad_usd_age_days: NonNegativeInt | None
     vix_age_days: NonNegativeInt | None
-    sector_commodity_age_days_reliability: NonNegativeInt | None
 
     # --- Statistics Canada supplementary fields ---
     # All Optional — None if fetch fails or the stock isn't Canadian.

@@ -106,7 +106,12 @@ class DataBundle(ContractModel):
     canadian_data_flags: CanadianDataFlags | None
 
     # --- Macro Economist (Pass 1) ---
-    macro_sources: MacroSourcesBundle
+    macro_sources: (
+        MacroSourcesBundle  # 86bawptxa: precompute/macro_sources.py::compute_macro_sources()
+        # is already the complete builder - a caller just passes its output straight through,
+        # no further assembly logic needed here (unlike research_sources/canadian_data_flags,
+        # which combine multiple inputs at this layer)
+    )
 
     # --- Risk Advisor (Pass 2) ---
     risk_metrics: dict
