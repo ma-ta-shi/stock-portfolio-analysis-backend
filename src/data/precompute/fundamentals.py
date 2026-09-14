@@ -56,6 +56,72 @@ _SECTOR_MEDIAN_KEYS = {
     "ev_ebitda": "sector_median_ev_ebitda",
 }
 
+# Peer-median guard (ClickUp 86bbq04wm). The unguarded statistics.median() over
+# whatever survived a None filter was feeding the Fundamental Analyst corrupt
+# sector medians (a -98 P/B median from one peer's negative book equity, a
+# peer-wide D/E of exactly 0.0, a 105% revenue-growth median from a spinoff
+# stub) — used by the model in 3 of 3 live runs as both a key_factor and a
+# risk. Guard here at the source, not the payload renderer: this is a data
+# defect (a median that shouldn't exist), and peer_metrics feeds more than the
+# prompt payload once DataPipeline.prepare() exists.
+
+# Checked per-metric against the count of VALID contributors, not len(peer_data):
+# each median stands on its own evidence. 2 not 3 — real peer sets are ~3
+# tickers and after validity filtering a 3 floor would render N/A almost
+# always (the block must stay useful, not just uncorrupt).
+_MIN_PEERS_FOR_SECTOR_MEDIAN = 2
+
+# Per-metric plausibility ranges (exclusive both ends). The 0.0 lower bound on
+# pe/pb/ev_ebitda/debt_to_equity is a principled sign check — these go negative
+# only on negative earnings/equity/EBITDA, not a meaningful multiple — needing
+# no calibration; the strict `<` also drops an exact-0.0 debt_to_equity (the
+# ticket's named missing-data signature, and — accepted — a genuinely
+# debt-free peer). gross_margin is positive-only for the same reason (a real
+# negative is nearly always COGS concept mis-mapping); operating_margin and roe
+# genuinely go negative and only the magnitude is gated.
+#
+# The outer caps and the growth/margin/roe bands are first-pass, not doc-sourced
+# — same disclosure convention as macro_sources.py's trend thresholds — checked
+# 2026-09-08 against a 20-name multi-sector US basket on deep (yfinance) data:
+# healthy names (AAPL/MSFT/JPM/XOM/NVDA/KO/F/PFE/UNH/HD/CRM/CVX) + loss-makers
+# (PLUG/RIVN/BYND) + the audit's problem set (DELL/SNDK/WDC) + GME/CVNA. Nothing
+# from a healthy name was nulled (real values topped out well inside every
+# band — P/E ~42, ROE ~1.2, worst real revenue decline -40% for MRNA); what
+# these ranges reject is DELL's negative-equity P/B and D/E, RIVN/BYND's
+# negative P/E and EV/EBITDA, PLUG/BYND's tiny-equity ROE blow-ups, and the
+# SNDK/PARA +170% spinoff/restructuring revenue-growth stubs (SNDK's 1.75 is
+# the exact value behind the corrupt 105% median). PLUG's ~-1% gross margin is
+# also excluded — real but not a useful comparable. NaN (if a provider ever
+# leaks one) fails every comparison and is rejected too.
+#
+# revenue_growth_yoy's lower bound is the least adversarially tested — no
+# artifact below -40% appeared in the basket; -0.9 is the "lost nearly all
+# revenue YoY = a corporate action, not organic performance" line.
+_PEER_METRIC_VALID_RANGE: dict[str, tuple[float, float]] = {
+    "pe_ratio": (0.0, 500.0),
+    "pb_ratio": (0.0, 100.0),
+    "ev_ebitda": (0.0, 200.0),
+    "debt_to_equity": (0.0, 50.0),
+    "revenue_growth_yoy": (-0.9, 1.5),  # 1.5 catches SNDK's 1.75 / PARA's 1.69
+    "gross_margin": (0.0, 0.99),
+    "operating_margin": (-1.0, 0.9),
+    "roe": (-2.0, 3.0),  # a real buyback-shrunk-equity ROE reaches ~1.2 (AAPL/HD live)
+}
+# _PEER_METRIC_VALID_RANGE must stay 1:1 with _SECTOR_MEDIAN_KEYS — a missing
+# entry KeyErrors in _valid_peer_value (asserted in test_fundamentals.py).
+
+
+def _valid_peer_value(metric: str, value: float | None) -> float | None:
+    """None (renders N/A downstream) unless value is present AND strictly
+    inside the metric's plausibility range. Per-metric because the metrics
+    fail in different ways — a negative P/B from negative book equity, a D/E
+    of exactly 0.0 as a missing-data signature, a spinoff's absurd first-year
+    revenue growth."""
+    if value is None:
+        return None
+    low, high = _PEER_METRIC_VALID_RANGE[metric]
+    return value if low < value < high else None
+
 
 def _ttm(periods: list[dict], field: str) -> float | None:
     """Trailing-twelve-month sum over the most recent 4 quarters. None if
@@ -70,6 +136,19 @@ def _ttm(periods: list[dict], field: str) -> float | None:
     return sum(values)
 
 
+def _ttm_metric(fin: NormalizedFinancials, field: str) -> float | None:
+    """Trailing-twelve-month value for a field. Prefers fin.ttm — an explicit
+    TTM the provider computed because its quarterly history is too shallow to
+    sum (edgartools, 86bbxuj9e; computed there by YTD algebra). Falls back to
+    summing the trailing 4 quarters (yfinance, which has real deep quarters).
+    `eps` is never in fin.ttm, so it always takes the 4-quarter path — which
+    yields None on the 2-quarter US path, correctly forcing P/E onto the
+    net-income route."""
+    if fin.ttm is not None and fin.ttm.get(field) is not None:
+        return fin.ttm[field]
+    return _ttm(fin.quarters, field)
+
+
 def _cagr(annual: list[dict], field: str, years: int = 3) -> float | None:
     """Undefined when the base year is negative or zero (common for
     turnaround names with a loss year several years back) — return None
@@ -82,23 +161,31 @@ def _cagr(annual: list[dict], field: str, years: int = 3) -> float | None:
     return (end / start) ** (1 / years) - 1
 
 
-def _ebitda(quarter: dict) -> float | None:
-    """EBITDA isn't a raw line item — derive it."""
-    operating_income = quarter.get("operating_income")
-    depreciation = quarter.get("depreciation_amortization")
-    if operating_income is None or depreciation is None:
+def _fcf(fin: NormalizedFinancials) -> float | None:
+    """Trailing-twelve-month free cash flow = TTM operating cash flow minus
+    capital expenditure. Both providers report capex as a negative outflow, so
+    subtract its magnitude (86bbxuj9e — the prior `ocf - capex` added it back,
+    overstating FCF by 2x capex on the CA path)."""
+    ocf = _ttm_metric(fin, "operating_cash_flow")
+    capex = _ttm_metric(fin, "capital_expenditures")
+    if ocf is None or capex is None:
         return None
-    return operating_income + depreciation
+    return ocf - abs(capex)
 
 
 def _ev_ebitda(fin: NormalizedFinancials, price_info: NormalizedQuote) -> float | None:
     """Always computed when data allows, not conditionally skipped for
     non-capital-intensive sectors — the live prompt's own CAPITAL_INTENSIVE
     sector conditional is a payload-template/orchestrator rendering
-    decision, not a data-computation concern."""
-    if not fin.quarters:
+    decision, not a data-computation concern.
+
+    EBITDA is a trailing-twelve-month figure (86bbxuj9e — was one quarter,
+    which made EV/EBITDA ~4x too high on both paths)."""
+    operating_income = _ttm_metric(fin, "operating_income")
+    depreciation = _ttm_metric(fin, "depreciation_amortization")
+    if operating_income is None or depreciation is None:
         return None
-    ebitda = _ebitda(fin.quarters[0])
+    ebitda = operating_income + depreciation
     if not ebitda:
         return None
     market_cap = price_info.get("market_cap")
@@ -110,9 +197,25 @@ def _ev_ebitda(fin: NormalizedFinancials, price_info: NormalizedQuote) -> float 
     return enterprise_value / ebitda
 
 
+_PEG_MAX_GROWTH = 1.0  # 100% YoY EPS growth
+
+
 def _peg(pe_ratio: float | None, eps_growth_yoy: float | None) -> float | None:
-    """PEG undefined for negative/zero growth."""
-    if pe_ratio is None or not eps_growth_yoy or eps_growth_yoy <= 0:
+    """PEG undefined for negative/zero growth, and meaningless when the YoY
+    rate is a base-year artifact (a prior-year EPS near zero — an impairment
+    year, a cyclical trough) rather than a sustainable rate: that produces a
+    multi-hundred-percent "growth" and collapses PEG toward zero. Cap at
+    _PEG_MAX_GROWTH — above it the denominator isn't the growth PEG is meant
+    to normalise against. First-pass bound, same disclosure convention as
+    _PEER_METRIC_VALID_RANGE. Guarding eps_growth_yoy itself (and
+    revenue_growth_yoy) in compute_growth_metrics is a separate, pre-existing
+    concern this doesn't try to solve."""
+    if (
+        pe_ratio is None
+        or not eps_growth_yoy
+        or eps_growth_yoy <= 0
+        or eps_growth_yoy > _PEG_MAX_GROWTH
+    ):
         return None
     return pe_ratio / (eps_growth_yoy * 100)
 
@@ -149,10 +252,17 @@ def _net_margin(quarter: dict) -> float | None:
     return net_income / revenue
 
 
-def _dividend_type(dividend_history: list[NormalizedDividendRecord]) -> str:
-    """Flags special/irregular payouts so the agent doesn't treat them as
-    sustainable yield. Assumes newest-last (ascending) ordering — callers
-    must sort first, see compute_dividend_info()."""
+def _dividend_regularity(dividend_history: list[NormalizedDividendRecord]) -> str:
+    """Classifies payout *regularity* ("regular" | "irregular" | "none") so the
+    agent doesn't treat a lumpy/special-heavy history as sustainable yield.
+
+    Named for what it measures: this is NOT the dividend's tax character
+    (eligible Canadian / US-qualified / foreign / return-of-capital) — that
+    classification has no provider source and is security-tax-classification.py's
+    job. The Fundamental prompt's DIV block reads this as {dividend_regularity}.
+
+    Assumes newest-last (ascending) ordering — callers must sort first, see
+    compute_dividend_info()."""
     if not dividend_history:
         return "none"
     amounts = [d["amount_per_share"] for d in dividend_history[-8:]]  # ~2yrs quarterly
@@ -212,35 +322,46 @@ def compute_growth_metrics(
 
 
 def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
-    if not fin.quarters:
+    if not fin.quarters and fin.ttm is None:
         return {
             "gross_margin": None, "operating_margin": None, "net_margin": None,
             "roe": None, "margin_trend": None, "fcf_to_net_income": None,
         }
-    latest = fin.quarters[0]
-    revenue = latest.get("revenue")
-    gross_margin = None
-    if revenue and latest.get("cost_of_revenue") is not None:
-        gross_margin = (revenue - latest["cost_of_revenue"]) / revenue
-    operating_margin = None
-    if revenue and latest.get("operating_income") is not None:
-        operating_margin = latest["operating_income"] / revenue
-    net_margin = _net_margin(latest)
+    # Margins over the trailing twelve months, not one (often seasonal) quarter —
+    # keeps them stable and comparable across a peer set with mixed fiscal
+    # calendars. _ttm_metric is the real 4-quarter sum on the CA path, the
+    # provider-supplied TTM on the US path.
+    ttm_revenue = _ttm_metric(fin, "revenue")
+    ttm_cost_of_revenue = _ttm_metric(fin, "cost_of_revenue")
+    ttm_operating_income = _ttm_metric(fin, "operating_income")
+    ttm_net_income = _ttm_metric(fin, "net_income")
+
+    gross_margin = (
+        (ttm_revenue - ttm_cost_of_revenue) / ttm_revenue
+        if ttm_revenue and ttm_cost_of_revenue is not None
+        else None
+    )
+    operating_margin = (
+        ttm_operating_income / ttm_revenue
+        if ttm_revenue and ttm_operating_income is not None
+        else None
+    )
+    net_margin = ttm_net_income / ttm_revenue if ttm_revenue and ttm_net_income is not None else None
 
     roe = None
-    ttm_net_income = _ttm(fin.quarters, "net_income")
     total_equity = fin.balance_sheet.get("total_equity")
-    if ttm_net_income is not None and total_equity:
+    # total_equity > 0, not just truthy: negative book equity makes ROE
+    # meaningless (a net loss over negative equity reads as a positive ROE) —
+    # None is the honest answer for both peers and the subject (86bbq04wm).
+    # Period-end equity (not an average) — standard, and no extra fetch; runs
+    # low for buyback-heavy names whose equity shrank over the year.
+    if ttm_net_income is not None and total_equity is not None and total_equity > 0:
         roe = ttm_net_income / total_equity
 
     fcf_to_net_income = None
-    ocf, capex, net_income = (
-        latest.get("operating_cash_flow"),
-        latest.get("capital_expenditures"),
-        latest.get("net_income"),
-    )
-    if ocf is not None and capex is not None and net_income:
-        fcf_to_net_income = (ocf - capex) / net_income
+    ttm_fcf = _fcf(fin)
+    if ttm_fcf is not None and ttm_net_income:
+        fcf_to_net_income = ttm_fcf / ttm_net_income
 
     return {
         "gross_margin": gross_margin,
@@ -267,7 +388,6 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
     )
 
     interest_coverage = None
-    free_cash_flow = None
     if fin.quarters:
         latest = fin.quarters[0]
         operating_income, interest_expense = latest.get("operating_income"), latest.get(
@@ -275,15 +395,12 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
         )
         if operating_income is not None and interest_expense:
             interest_coverage = operating_income / interest_expense
-        ocf, capex = latest.get("operating_cash_flow"), latest.get("capital_expenditures")
-        if ocf is not None and capex is not None:
-            free_cash_flow = ocf - capex
 
     return {
         "debt_to_equity": debt_to_equity,
         "current_ratio": current_ratio,
         "interest_coverage": interest_coverage,
-        "free_cash_flow": free_cash_flow,
+        "free_cash_flow": _fcf(fin),
         "cash_position": bs.get("cash_and_equivalents"),
     }
 
@@ -295,19 +412,44 @@ def compute_valuation_metrics(
     analyst_estimates: NormalizedAnalystEstimates | None = None,
 ) -> dict:
     current_price = price_info.get("current_price")
+    market_cap = price_info.get("market_cap")
 
-    ttm_eps = _ttm(fin.quarters, "eps")
+    ttm_eps = _ttm_metric(fin, "eps")
     pe_ratio = current_price / ttm_eps if current_price is not None and ttm_eps else None
+    if pe_ratio is None:
+        # yfinance's per-quarter Diluted EPS is sporadically NaN for essentially
+        # every Canadian filer, and the US path only ever has 2 quarters, so
+        # _ttm_metric("eps") is None on both. price / EPS
+        # is identically market_cap / net income to common, and net income is
+        # reliably present per quarter. Income to common (not total) because P/E
+        # is a per-common-share metric: this tracks .info trailingPE within ~2%
+        # for preferred-heavy names where total net income runs 5-9% low. Falls
+        # back to total net_income for filers that don't disclose the common
+        # split (identical for names with no preferred). A real TTM loss leaves
+        # pe_ratio None, same as a negative real-EPS P/E. compute_peer_comparison
+        # runs this per peer, so sector_median_pe is derived the same way.
+        ttm_ni = _ttm_metric(fin, "net_income_common") or _ttm_metric(fin, "net_income")
+        if ttm_ni is not None and ttm_ni > 0 and market_cap is not None:
+            pe_ratio = market_cap / ttm_ni
 
-    shares_outstanding = fin.quarters[0].get("shares_outstanding") if fin.quarters else None
     total_equity = fin.balance_sheet.get("total_equity")
     pb_ratio = None
-    if current_price is not None and total_equity is not None and shares_outstanding:
-        book_value_per_share = total_equity / shares_outstanding
-        pb_ratio = current_price / book_value_per_share if book_value_per_share else None
+    if total_equity is not None and total_equity > 0:
+        # market_cap / book equity — the direct form, no per-share round trip.
+        # Robust to a missing shares_outstanding line (US filers often don't tag
+        # weighted-average shares on the balance-sheet-bearing statement).
+        # Negative book equity (buybacks) -> None, matching the ROE guard.
+        if market_cap is not None:
+            pb_ratio = market_cap / total_equity
+        else:
+            shares_outstanding = (
+                fin.quarters[0].get("shares_outstanding") if fin.quarters else None
+            )
+            if current_price is not None and shares_outstanding:
+                bvps = total_equity / shares_outstanding
+                pb_ratio = current_price / bvps if bvps else None
 
-    market_cap = price_info.get("market_cap")
-    ttm_revenue = _ttm(fin.quarters, "revenue")
+    ttm_revenue = _ttm_metric(fin, "revenue")
     ps_ratio = market_cap / ttm_revenue if market_cap is not None and ttm_revenue else None
 
     # forward_pe (86bbdu04a) mirrors pe_ratio's own guard style exactly —
@@ -339,7 +481,7 @@ def compute_dividend_info(
             "dividend_yield": None,
             "payout_ratio": None,
             "dividend_growth_5yr": None,
-            "dividend_type": "none",
+            "dividend_regularity": "none",
             "consecutive_years_paid": 0,
         }
 
@@ -385,14 +527,26 @@ def compute_dividend_info(
         if reference_total and reference_total > 0:
             dividend_growth_5yr = (trailing_annual_dividend / reference_total) ** (1 / 5) - 1
 
-    ttm_eps = _ttm(fin.quarters, "eps")
+    ttm_eps = _ttm_metric(fin, "eps")
     payout_ratio = trailing_annual_dividend / ttm_eps if ttm_eps else None
+    if payout_ratio is None:
+        # The per-share path never resolves for CA (quarterly EPS NaN) or US
+        # (only 2 quarters). Fall back to total cash dividends paid / total net
+        # income. Total net_income here (not net income to common, unlike the
+        # P/E path) because "Cash Dividends Paid" is total cash dividends
+        # including preferred, so the consistent denominator is total net
+        # income — matches how .info payoutRatio is computed (verified within
+        # 0.1pp for RY.TO / SU.TO).
+        ttm_ni = _ttm_metric(fin, "net_income")
+        ttm_dividends_paid = _ttm_metric(fin, "dividends_paid")
+        if ttm_ni is not None and ttm_ni > 0 and ttm_dividends_paid is not None:
+            payout_ratio = abs(ttm_dividends_paid) / ttm_ni
 
     return {
         "dividend_yield": dividend_yield,
         "payout_ratio": payout_ratio,
         "dividend_growth_5yr": dividend_growth_5yr,
-        "dividend_type": _dividend_type(sorted_history),
+        "dividend_regularity": _dividend_regularity(sorted_history),
         "consecutive_years_paid": _consecutive_years_paid(set(years_sorted)),
     }
 
@@ -427,13 +581,18 @@ def compute_peer_comparison(
         peer_balance_sheet = compute_balance_sheet_metrics(peer_fin)
         merged = {**peer_valuation, **peer_growth, **peer_profitability, **peer_balance_sheet}
         record = {"ticker": ticker}
-        record.update({key: merged.get(key) for key in _SECTOR_MEDIAN_KEYS})
+        # Sanitize once, here (86bbq04wm): the median loop reads from
+        # peer_records, so this fixes both the medians and the per-peer
+        # {peer_data_block} lines. A rejected value stores None (renders N/A).
+        record.update({key: _valid_peer_value(key, merged.get(key)) for key in _SECTOR_MEDIAN_KEYS})
         peer_records.append(record)
 
     sector_medians = {}
     for key, placeholder_name in _SECTOR_MEDIAN_KEYS.items():
         values = [r[key] for r in peer_records if r[key] is not None]
-        sector_medians[placeholder_name] = statistics.median(values) if values else None
+        sector_medians[placeholder_name] = (
+            statistics.median(values) if len(values) >= _MIN_PEERS_FOR_SECTOR_MEDIAN else None
+        )
 
     return {"sector_medians": sector_medians, "peer_records": peer_records}
 
@@ -450,13 +609,25 @@ def compute_all(
     needs eps_growth_yoy). analyst_estimates/earnings_surprises (86bbdu04a)
     default to None — an existing caller with no analyst data still works
     unchanged, same graceful-degradation convention as every other input
-    here."""
+    here.
+
+    Returns a `currency_mismatch` key: None when the statement currency and
+    the quote currency agree, else {financials_currency, quote_currency}. The
+    price-vs-statement multiples are still computed in that case but are
+    FX-distorted — see the note below and ClickUp 86bbxucf0."""
+    # A Canadian-listed company that reports in USD (ATD.TO, NTR.TO, BN.TO,
+    # CSU.TO, ...) has USD statements but a CAD quote. Every price-vs-statement
+    # metric below (pe_ratio, pb_ratio, ps_ratio, ev_ebitda, peg_ratio, and the
+    # eps-path payout_ratio) is then off by the CAD/USD rate (~1.37). We still
+    # emit them for now — coverage first — and mark the mismatch so the payload
+    # builder / reliability scorer can flag or suppress the affected multiples.
+    # FX-aware reconciliation is ClickUp 86bbxucf0.
+    currency_mismatch = None
     if fin.currency != price_info.get("currency"):
-        raise ValueError(
-            f"Currency mismatch: financials are {fin.currency!r}, "
-            f"price_info is {price_info.get('currency')!r} — should not happen "
-            "if the adapter is correct."
-        )
+        currency_mismatch = {
+            "financials_currency": fin.currency,
+            "quote_currency": price_info.get("currency"),
+        }
 
     growth = compute_growth_metrics(fin, earnings_surprises)
     profitability = compute_profitability_metrics(fin)
@@ -486,4 +657,5 @@ def compute_all(
         "peer_metrics": peer,
         "quarters_available": len(fin.quarters),
         "missing_fields": missing_fields,
+        "currency_mismatch": currency_mismatch,
     }

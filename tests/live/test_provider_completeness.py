@@ -197,6 +197,32 @@ async def test_us_micro_cap_financials_do_not_crash(ticker):
     )
 
 
+# ---------- edgartools statement depth (ClickUp 86bbxuj9e) ----------
+# normalize_financials() must deliver deep annual + a YTD-algebra TTM even
+# though the library's quarterly history is shallow. AAPL is a clean filer;
+# HD's high-level quarterly series is gapped (Q4 missing) so it exercises the
+# TTM path that the quarterly reconstruction can't. Guards against edgartools
+# API drift showing up only in production.
+
+
+@pytest.mark.parametrize("ticker", ["AAPL", "HD"])
+async def test_edgartools_normalize_financials_has_deep_annual_and_ttm(ticker):
+    fin = await EdgarToolsDataProvider().normalize_financials(ticker)
+
+    assert len(fin.annual) >= 6, f"{ticker}: annual history too shallow for CAGR"
+    assert fin.ttm is not None
+    for field in ("revenue", "net_income", "operating_cash_flow"):
+        assert fin.ttm.get(field) is not None, f"{ticker}: ttm[{field}] missing"
+
+    # ttm net income should equal FY + YTD_current - YTD_prior; loosely, it
+    # should be in the same ballpark as the most recent full fiscal year.
+    assert fin.annual[0]["net_income"] is not None
+    ratio = fin.ttm["net_income"] / fin.annual[0]["net_income"]
+    assert 0.5 < ratio < 2.0, f"{ticker}: ttm net income {fin.ttm['net_income']} implausible"
+
+    assert fin.quarters and fin.quarters[0]["period_end"][:4].isdigit()
+
+
 # ---------- US ETF — FMP paywall, confirmed clean (not a crash) at the
 # provider level. Fallback engagement is pass 2's job. ----------
 

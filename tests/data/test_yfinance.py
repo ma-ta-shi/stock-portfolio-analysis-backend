@@ -266,6 +266,134 @@ async def test_normalize_financials_duplicate_row_label_does_not_crash(provider,
     assert result.quarters[0]["revenue"] == 1000.0
 
 
+async def test_normalize_financials_maps_net_income_common(provider, monkeypatch):
+    """net_income_common ("Net Income Common Stockholders") is the P/E
+    denominator fundamentals.py prefers for preferred-heavy names."""
+    period = _period_end()
+    income = pd.DataFrame(
+        {period: [1000.0, 250.0, 235.0]},
+        index=["Total Revenue", "Net Income", "Net Income Common Stockholders"],
+    )
+
+    def fake_ticker(ticker):
+        return FakeTicker(info={"currency": "USD"}, quarterly_financials=income, financials=income)
+
+    _patch_ticker(monkeypatch, fake_ticker)
+
+    result = await provider.normalize_financials("RY.TO")
+
+    assert result.quarters[0]["net_income_common"] == 235.0
+
+
+async def test_normalize_financials_currency_is_financial_currency_not_trading(provider, monkeypatch):
+    """A Canadian-listed, USD-reporting company (ATD.TO, NTR.TO, ...) has
+    info["currency"] == "CAD" but statement line items in USD. NormalizedFinancials
+    must carry the financial currency so compute_all()'s guard catches the
+    mismatch instead of producing FX-distorted ratios."""
+    period = _period_end()
+    income = pd.DataFrame({period: [1000.0, 250.0]}, index=["Total Revenue", "Net Income"])
+
+    def fake_ticker(ticker):
+        return FakeTicker(
+            info={"currency": "CAD", "financialCurrency": "USD"},
+            quarterly_financials=income,
+            financials=income,
+        )
+
+    _patch_ticker(monkeypatch, fake_ticker)
+
+    result = await provider.normalize_financials("ATD.TO")
+
+    assert result.currency == "USD"
+
+
+async def test_normalize_financials_currency_falls_back_when_financial_currency_absent(
+    provider, monkeypatch
+):
+    period = _period_end()
+    income = pd.DataFrame({period: [1000.0, 250.0]}, index=["Total Revenue", "Net Income"])
+
+    def fake_ticker(ticker):
+        return FakeTicker(info={"currency": "CAD"}, quarterly_financials=income, financials=income)
+
+    _patch_ticker(monkeypatch, fake_ticker)
+
+    result = await provider.normalize_financials("RY.TO")
+
+    assert result.currency == "CAD"
+
+
+async def test_normalize_financials_drops_all_none_leading_period(provider, monkeypatch):
+    """yfinance materialises a column for the newest period before the filing
+    data lands — an all-None placeholder that would poison _ttm()'s trailing
+    window. _periods() drops any period with neither revenue nor net income."""
+    newest = pd.Timestamp.now().normalize()
+    older = newest - pd.DateOffset(months=3)
+    income = pd.DataFrame(
+        {newest: [None, None], older: [1000.0, 250.0]},
+        index=["Total Revenue", "Net Income"],
+    )
+
+    def fake_ticker(ticker):
+        return FakeTicker(info={"currency": "USD"}, quarterly_financials=income, financials=income)
+
+    _patch_ticker(monkeypatch, fake_ticker)
+
+    result = await provider.normalize_financials("ENB.TO")
+
+    assert len(result.quarters) == 1
+    assert result.quarters[0]["revenue"] == 1000.0
+
+
+async def test_normalize_financials_keeps_single_real_period(provider, monkeypatch):
+    """The drop-empty guard must not eat a lone genuine period."""
+    period = _period_end()
+    income = pd.DataFrame({period: [1000.0, 250.0]}, index=["Total Revenue", "Net Income"])
+
+    def fake_ticker(ticker):
+        return FakeTicker(info={"currency": "USD"}, quarterly_financials=income, financials=income)
+
+    _patch_ticker(monkeypatch, fake_ticker)
+
+    result = await provider.normalize_financials("AAPL")
+
+    assert len(result.quarters) == 1
+
+
+async def test_normalize_financials_skips_empty_leading_balance_column(provider, monkeypatch):
+    """Same recent-filer lag on the balance sheet — the newest column can be
+    an all-None placeholder while columns[1] carries the real data. Take the
+    newest column that actually has equity or assets, not blindly columns[0]."""
+    period = _period_end()
+    newest = period
+    older = period - pd.DateOffset(months=3)
+    balance = pd.DataFrame(
+        {
+            newest: [None, None, None],
+            older: [5000.0, 2000.0, 800.0],
+        },
+        index=["Total Assets", "Stockholders Equity", "Cash And Cash Equivalents"],
+    )
+    income = pd.DataFrame({newest: [1000.0, 250.0]}, index=["Total Revenue", "Net Income"])
+
+    def fake_ticker(ticker):
+        return FakeTicker(
+            info={"currency": "USD"},
+            quarterly_financials=income,
+            financials=income,
+            quarterly_balance_sheet=balance,
+            balance_sheet=balance,
+        )
+
+    _patch_ticker(monkeypatch, fake_ticker)
+
+    result = await provider.normalize_financials("ENB.TO")
+
+    assert result.balance_sheet["total_equity"] == 2000.0
+    assert result.balance_sheet["total_assets"] == 5000.0
+    assert result.balance_sheet["cash_and_equivalents"] == 800.0
+
+
 # --- get_dividend_history ---
 
 
