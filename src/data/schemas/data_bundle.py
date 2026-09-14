@@ -93,12 +93,11 @@ class DataBundle(ContractModel):
     # --- Sentiment Analyst (Pass 1) ---
     news_with_sentiment: list[dict] | None  # precompute/sentiment.py (86ban0wf4); populated
     # for both markets now — no longer Finnhub/US-only, see sentiment_source below
-    sentiment_source: Literal["local_llm"] | None  # 86ban0wf4: market-agnostic companion to
-    # CanadianDataFlags.sentiment_source, which structurally can't cover US stocks (that field
-    # stays None there by DataBundle's own validator). None only when news_with_sentiment is
-    # None/empty — no articles were scored. Single-value literal, not CanadianDataFlags' 3-value
-    # enum, because "finnhub"/"keyword" are confirmed-dead paths for both markets as of this
-    # ticket — flag to whoever owns CanadianDataFlags's schema if those should be removed too.
+    sentiment_source: Literal["local_llm"] | None  # 86ban0wf4: the one real field for this -
+    # CanadianDataFlags.sentiment_source was removed entirely (86bawptx4) rather than kept as a
+    # 3-value duplicate, since it would always hold this exact same value for a CA stock (one
+    # precompute/sentiment.py call scores both markets, no CA-specific branch). None only when
+    # news_with_sentiment is None/empty — no articles were scored.
     analyst_consensus: dict
     analyst_recommendation_trends: list[dict] | None  # Finnhub: US only
     insider_activity: dict
