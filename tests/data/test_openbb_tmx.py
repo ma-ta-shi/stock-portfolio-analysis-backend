@@ -678,13 +678,54 @@ async def test_get_insider_trading_calls_ownership_endpoint(provider, mock_obb):
 
 
 @pytest.mark.asyncio
-async def test_get_insider_trading_returns_list_of_dicts(provider, mock_obb):
-    fake_df = pd.DataFrame([{"owner_name": "Ross, Bruce"}, {"owner_name": "McLaughlin, Neil"}])
+async def test_get_insider_trading_maps_normalized_fields(provider, mock_obb):
+    """86bbwha5r: date is always None (TMX gives no per-transaction date,
+    only a quarterly rollup) — that's the signal callers check, replacing
+    the old days_filter_applied flag."""
+    fake_df = pd.DataFrame(
+        [
+            {
+                "owner_name": "Ross, Bruce",
+                "acquisition_or_disposition": "sell",
+                "securities_transacted": 20085,
+                "trade_value": 5684162.7,
+            },
+            {
+                "owner_name": "McLaughlin, Neil",
+                "acquisition_or_disposition": "buy",
+                "securities_transacted": 500,
+                "trade_value": 12345.0,
+            },
+        ]
+    )
     mock_obb.equity.ownership.insider_trading.return_value = make_obb_result(fake_df)
+
     result = await provider.get_insider_trading(ticker="RY.TO")
-    assert isinstance(result, list)
+
     assert len(result) == 2
-    assert all(isinstance(row, dict) for row in result)
+    assert result[0] == {
+        "date": None,
+        "insider_name": "Ross, Bruce",
+        "is_issuer": False,
+        "transaction_type": "sale",
+        "shares": 20085.0,
+        "value": 5684162.7,
+    }
+    assert result[1]["transaction_type"] == "purchase"
+
+
+@pytest.mark.asyncio
+async def test_get_insider_trading_unknown_direction_lands_other(provider, mock_obb):
+    """Defensive only — both real values ("sell"/"buy") are confirmed live
+    across 8 tickers, no third value ever seen."""
+    fake_df = pd.DataFrame(
+        [{"owner_name": "Someone", "acquisition_or_disposition": "unexpected"}]
+    )
+    mock_obb.equity.ownership.insider_trading.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_insider_trading(ticker="RY.TO")
+
+    assert result[0]["transaction_type"] == "other"
 
 
 @pytest.mark.asyncio

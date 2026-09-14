@@ -293,6 +293,34 @@ async def test_company_info_asset_type_reaches_through_router(ticker, expected):
     )
 
 
+# ---------- CA insider trading: yfinance-first, openbb_tmx fallback (86bbwha5r) ----------
+# openbb-tmx's CA insider data is a quarterly per-owner aggregate with no
+# date and no per-transaction detail; yfinance has real transactional rows
+# for most CA names. CA_CHAINS now tries yfinance first, falling back to
+# openbb_tmx only when yfinance is genuinely empty for a ticker (confirmed
+# live: AEM.TO, BCE.TO — not a hypothetical case).
+
+
+async def test_ca_insider_trading_prefers_yfinance_when_available():
+    async with Router(ticker=t.CA_CROSSLISTED[0]) as router:
+        result, source = await router._try_chain(
+            "get_insider_trading", t.CA_CROSSLISTED[0], 180
+        )
+    assert not _is_empty(result)
+    assert source == "yfinance"
+    assert result[0]["date"] is not None, "yfinance rows carry a real date; openbb_tmx's never do"
+
+
+async def test_ca_insider_trading_falls_back_to_openbb_tmx_when_yfinance_empty():
+    """AEM.TO confirmed live (2026-09) to have zero rows in yfinance's
+    insider_transactions — a real forcing ticker, not a synthetic one."""
+    async with Router(ticker="AEM.TO") as router:
+        result, source = await router._try_chain("get_insider_trading", "AEM.TO", 180)
+    assert not _is_empty(result)
+    assert source == "openbb_tmx"
+    assert result[0]["date"] is None, "openbb_tmx's aggregate never carries a per-transaction date"
+
+
 # ---------- Ambiguous bare-vs-.TO ticker collisions ----------
 # Router-level, not a single-provider concern — is_canadian_ticker()'s
 # suffix check is what decides which chain (and therefore which company)

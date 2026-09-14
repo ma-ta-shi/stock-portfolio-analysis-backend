@@ -583,6 +583,11 @@ def _form4_df(rows: list[dict]) -> pd.DataFrame:
 
 
 async def test_get_insider_trading_filters_by_days_and_maps_fields(provider, monkeypatch):
+    """86bbwha5r: now normalizes into NormalizedInsiderTransaction — Form 4
+    `Code` drives transaction_type (not the free-text `Transaction Type`
+    column, which isn't read), and value is derived as shares * price
+    since the normalized shape carries a total value, not a per-share
+    price."""
     now = pd.Timestamp.now()
     recent_row = {
         "Date": now - pd.Timedelta(days=5),
@@ -600,10 +605,44 @@ async def test_get_insider_trading_filters_by_days_and_maps_fields(provider, mon
     result = await provider.get_insider_trading("AAPL", days=90)
 
     assert len(result) == 1
-    assert result[0]["insider_name"] == "Jane Doe"
-    assert result[0]["shares"] == 100.0
-    assert result[0]["price"] == 25.5
-    assert result[0]["transaction_type"] == "Purchase"
+    assert result[0] == {
+        "date": (now - pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
+        "insider_name": "Jane Doe",
+        "is_issuer": False,
+        "transaction_type": "purchase",
+        "shares": 100.0,
+        "value": 2550.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "code,expected",
+    [
+        ("P", "purchase"),
+        ("S", "sale"),
+        ("M", "exercise"),
+        ("G", "gift"),
+        ("A", "other"),  # grant/award — confirmed common live (AAPL/MSFT), not an edge case
+        ("F", "other"),  # tax-withholding share delivery — same, confirmed common live
+        ("Z", "other"),  # anything else not in the SEC taxonomy this maps
+    ],
+)
+async def test_get_insider_trading_maps_form4_codes(provider, monkeypatch, code, expected):
+    row = {
+        "Date": pd.Timestamp.now(),
+        "Shares": 10,
+        "Price": 1.0,
+        "Insider": "Someone",
+        "Code": code,
+    }
+    filing = FakeFiling("0001-1", form4_df=_form4_df([row]))
+    fake = FakeCompany(filings=[filing])
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.get_insider_trading("AAPL", days=90)
+
+    assert result[0]["transaction_type"] == expected
+    assert result[0]["is_issuer"] is False  # Form 4 is always person-level, never the issuer
 
 
 async def test_get_insider_trading_skips_unparseable_filing_and_logs(provider, monkeypatch):

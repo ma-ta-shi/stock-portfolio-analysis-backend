@@ -46,6 +46,7 @@ from data.providers.base import (
     NormalizedAnalystEstimates,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
+    NormalizedInsiderTransaction,
     period_to_from_date,
 )
 
@@ -197,17 +198,25 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     async def get_earnings_surprises(self, ticker: str) -> list[dict]:
         raise NotImplementedError("Earnings-surprise history is not available via openbb-tmx.")
 
-    async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
+    async def get_insider_trading(
+        self, ticker: str, days: int = 90
+    ) -> list[NormalizedInsiderTransaction]:
         """Live-verified 2026-08-04 (86bb7j0kh): real data, but a quarterly
         aggregate rollup per owner (period="three_months" etc.) — TMX never
         populates the shared schema's transaction_date/filing_date fields,
         unlike edgartools' per-transaction Form 4 data. `days` is NOT
         honored here — there's no date to filter against, unlike the
         method's own signature implies (matching edgartools' `days`-
-        filtered contract). Every record is tagged `days_filter_applied:
-        False` so a future caller can tell from the data itself, not just
-        this docstring, that `days` was silently ignored rather than
-        actually applied."""
+        filtered contract). Every record's `date` is None, which is the
+        signal a caller checks (86bbwha5r) — no separate flag needed.
+
+        86bbwha5r: this is now the CA fallback only — CA_CHAINS tries
+        yfinance first (real per-transaction rows) and only reaches this
+        aggregate when yfinance returns empty for a ticker, which happens
+        for real names (confirmed live: AEM.TO, BCE.TO). `acquisition_or_
+        disposition` takes exactly two values, both confirmed live across
+        8 tickers — "sell" (all 8) and "buy" (5 of 8) — no third value ever
+        seen, so the "other" branch below is defensive, not a known gap."""
         result = await asyncio.to_thread(
             obb.equity.ownership.insider_trading, symbol=ticker, provider=self.PROVIDER
         )
@@ -216,9 +225,28 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         df = result.to_df()
         if df.empty:
             return []
-        records = df.to_dict("records")
-        for record in records:
-            record["days_filter_applied"] = False
+        direction_map = {"sell": "sale", "buy": "purchase"}
+        records: list[NormalizedInsiderTransaction] = []
+        for record in df.to_dict("records"):
+            shares = record.get("securities_transacted")
+            value = record.get("trade_value")
+            owner_name = record.get("owner_name")
+            # pd.notna(), not `is not None`/`or ""`: a missing pandas cell
+            # is NaN, not None, and NaN is neither `is None` nor falsy in
+            # Python — both of those checks would silently let a NaN float
+            # through instead of the documented None/"" sentinel.
+            records.append(
+                NormalizedInsiderTransaction(
+                    date=None,
+                    insider_name=owner_name if pd.notna(owner_name) else "",
+                    is_issuer=False,  # this aggregate is per-owner, never the issuer itself
+                    transaction_type=direction_map.get(
+                        record.get("acquisition_or_disposition"), "other"
+                    ),
+                    shares=float(shares) if pd.notna(shares) else None,
+                    value=float(value) if pd.notna(value) else None,
+                )
+            )
         return records
 
     async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
