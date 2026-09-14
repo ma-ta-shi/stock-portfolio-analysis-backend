@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 
+import pytest
 import structlog
 
 from data.precompute.research_sources import (
@@ -10,16 +11,19 @@ from data.precompute.research_sources import (
     _render_peer_content,
     _truncate_to_tokens,
     anonymize_content,
+    apply_dual_class_caveat,
     build_filing_digests,
+    build_hydrated_developments,
     build_management_signals,
     build_news_items,
     build_peer_blocks,
     build_research_sources,
     compute_cik_verified,
     compute_dual_class_flag,
+    deanonymize_text_fields,
 )
 from data.schemas.common import FilingDigest, NewsItem
-from data.schemas.research_sources_bundle import ResearchSourcesBundle
+from data.schemas.research_sources_bundle import ManagementSignals, ResearchSourcesBundle
 
 
 def _section(text: str = "raw text", filing_date: str = "2026-01-01", form: str = "10-K") -> dict:
@@ -1021,6 +1025,183 @@ def test_anonymize_content_catches_share_class_qualified_name():
     assert "COMPANY_X" in result
 
 
+# --- build_hydrated_developments (86bawptxh) ---
+
+
+def _news_item(item_id: str, headline: str = "Headline", source: str = "Reuters") -> NewsItem:
+    return NewsItem(
+        id=item_id,
+        date=datetime(2026, 8, 1, 9, 0, 0),
+        headline=headline,
+        source=source,
+        quality_tier="primary",
+    )
+
+
+def _minimal_research_sources(news_items: list[NewsItem]) -> ResearchSourcesBundle:
+    return ResearchSourcesBundle(
+        filing_digests=[],
+        transcript_excerpts=[],
+        news_items=news_items,
+        peer_blocks=[],
+        peer_names={},
+        management_signals=ManagementSignals(
+            c_suite_changes_12mo=None,
+            changes_detail="",
+            insider_net_direction_90d=None,
+            buyback_activity="",
+            dividend_activity="",
+        ),
+        dual_class_flag=False,
+        cik_verified=False,
+        sedar_filing_available=False,
+        missing_sources_list=[],
+        latest_filing_age_days=None,
+        latest_transcript_age_days=None,
+        latest_news_age_days=1 if news_items else None,
+        transcript_count=0,
+        news_item_count=len(news_items),
+    )
+
+
+def test_build_hydrated_developments_resolves_real_id_to_real_record():
+    """Live-verified against a real build_research_sources() call for
+    RY.TO before this function existed: a genuine N1 id resolved to its
+    real headline/date/source through exactly this lookup."""
+    sources = _minimal_research_sources(
+        [_news_item("N1", "Earnings beat expectations", "Benzinga")]
+    )
+    result = build_hydrated_developments(
+        sources, [{"news_id": "N1", "significance": "high", "sentiment": "positive"}]
+    )
+    assert result == [
+        {
+            "event": "Earnings beat expectations",
+            "date": "2026-08-01T09:00:00",
+            "source": "Benzinga",
+            "significance": "high",
+            "sentiment": "positive",
+        }
+    ]
+
+
+def test_build_hydrated_developments_resolves_multiple_citations():
+    sources = _minimal_research_sources([_news_item("N1"), _news_item("N2", "Second story")])
+    result = build_hydrated_developments(
+        sources,
+        [
+            {"news_id": "N1", "significance": "high", "sentiment": "positive"},
+            {"news_id": "N2", "significance": "low", "sentiment": "neutral"},
+        ],
+    )
+    assert [r["event"] for r in result] == ["Headline", "Second story"]
+
+
+def test_build_hydrated_developments_raises_on_unrecognized_news_id():
+    sources = _minimal_research_sources([_news_item("N1")])
+    with pytest.raises(ValueError, match="N99"):
+        build_hydrated_developments(
+            sources, [{"news_id": "N99", "significance": "high", "sentiment": "positive"}]
+        )
+
+
+# --- deanonymize_text_fields (86bawptxr) ---
+
+
+def test_deanonymize_text_fields_reverses_company_and_ticker():
+    response = {"narrative": "COMPANY_X (TICKER_X) reported strong results."}
+    result = deanonymize_text_fields(response, "Royal Bank of Canada", "RY", {})
+    assert result == {"narrative": "Royal Bank of Canada (RY) reported strong results."}
+
+
+def test_deanonymize_text_fields_reverses_multiple_peers_in_nested_structured_data():
+    """Multi-peer case, not just the main company/ticker - the original
+    version of this ticket only covered COMPANY_X/TICKER_X and would have
+    left every peer reference anonymized in the final output."""
+    response = {
+        "structured_data": {
+            "peer_comparison_summary": "Larger than PEER_1_COMPANY, smaller than PEER_2_COMPANY.",
+        },
+        "key_factors": [{"evidence": "PEER_1_COMPANY has a smaller deposit base."}],
+    }
+    result = deanonymize_text_fields(
+        response,
+        "x",
+        "x",
+        {"PEER_1": "Toronto-Dominion Bank (The)", "PEER_2": "Bank of Nova Scotia (The)"},
+    )
+    assert result["structured_data"]["peer_comparison_summary"] == (
+        "Larger than Toronto-Dominion Bank (The), smaller than Bank of Nova Scotia (The)."
+    )
+    assert (
+        result["key_factors"][0]["evidence"]
+        == "Toronto-Dominion Bank (The) has a smaller deposit base."
+    )
+
+
+def test_deanonymize_text_fields_is_a_no_op_on_headline_shaped_text():
+    """86bawptxr's own explicit requirement, kept as a defensive test even
+    though the real merge order already prevents this case in practice
+    (hydrated_developments is spliced in after this function runs) - a
+    string with no anonymization tokens must simply pass through."""
+    response = {"headline": "Royal Bank of Canada reports Q3 earnings"}
+    result = deanonymize_text_fields(response, "Royal Bank of Canada", "RY", {})
+    assert result == response
+
+
+def test_deanonymize_text_fields_round_trips_real_anonymized_content():
+    """anonymize_content() then deanonymize_text_fields() against the same
+    real, live-confirmed peer name (RY.TO's real PEER_1). Not a byte-for-
+    byte round trip - anonymize_content() matches short-form variants
+    ("The Toronto-Dominion Bank", reversed word order) via
+    _name_variants(), but deanonymize_text_fields() always substitutes
+    back the one canonical real name it was given, not whatever variant
+    happened to match. The real guarantee is: the canonical name is
+    present and no anonymization token survives - not that the original
+    exact phrasing returns."""
+    original = "The Toronto-Dominion Bank, together with its subsidiaries, provides banking."
+    peer_names = {"PEER_1": "Toronto-Dominion Bank (The)"}
+    anonymized = anonymize_content(original, "x", "x", peer_names)
+    assert "PEER_1_COMPANY" in anonymized
+    restored = deanonymize_text_fields({"content": anonymized}, "x", "x", peer_names)
+    assert "Toronto-Dominion Bank (The)" in restored["content"]
+    assert "PEER_1_COMPANY" not in restored["content"]
+
+
+# --- apply_dual_class_caveat (86bawptxh) ---
+
+
+def test_apply_dual_class_caveat_appends_when_flagged():
+    result = apply_dual_class_caveat(["existing caveat"], dual_class_flag=True)
+    assert result == [
+        "existing caveat",
+        "Dual-class share structure: voting power concentrated; "
+        "consider governance implications before sizing position.",
+    ]
+
+
+def test_apply_dual_class_caveat_no_op_when_not_flagged():
+    result = apply_dual_class_caveat(["existing caveat"], dual_class_flag=False)
+    assert result == ["existing caveat"]
+
+
+def test_dual_class_caveat_and_deanonymization_compose_correctly_in_the_right_order():
+    """Regression for the real ordering bug found in the live prompt's
+    own reference pseudocode (Finding 4): deanonymize FIRST, then apply
+    the dual-class caveat to the already-deanonymized caveats list - not
+    the reverse, which would silently ship an LLM-authored caveat
+    mentioning COMPANY_X un-deanonymized in the final output."""
+    llm_response = {"caveats": ["Regulatory risk in COMPANY_X's home market."]}
+    deanonymized = deanonymize_text_fields(llm_response, "Royal Bank of Canada", "RY", {})
+    final_caveats = apply_dual_class_caveat(deanonymized["caveats"], dual_class_flag=True)
+    assert final_caveats == [
+        "Regulatory risk in Royal Bank of Canada's home market.",
+        "Dual-class share structure: voting power concentrated; "
+        "consider governance implications before sizing position.",
+    ]
+    assert "COMPANY_X" not in final_caveats[0]
+
+
 # --- build_research_sources ---
 
 
@@ -1101,6 +1282,10 @@ async def test_build_research_sources_full_assembly(monkeypatch):
     assert len(bundle.peer_blocks) == 1
     assert "Peer Company" not in bundle.peer_blocks[0].content
     assert "PEER_1_COMPANY" in bundle.peer_blocks[0].content
+    # The real integration point for 86bawptxh/86bawptxr's peer_names fix -
+    # every other peer_names test exercises deanonymize_text_fields() or
+    # ResearchSourcesBundle directly, not this actual wiring line.
+    assert bundle.peer_names == {"PEER_1": "Peer Company"}
     assert bundle.news_item_count == 1
     assert bundle.news_items[0].id == "N1"
     assert bundle.sedar_filing_available is True

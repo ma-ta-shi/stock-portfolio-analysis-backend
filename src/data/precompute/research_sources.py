@@ -725,6 +725,132 @@ def anonymize_content(text: str, company_name: str, ticker: str, peer_names: dic
     return result
 
 
+def build_hydrated_developments(
+    research_sources: ResearchSourcesBundle, recent_developments: list[dict]
+) -> list[dict]:
+    """86bawptxh: the Stock Researcher's LLM output cites news by bare
+    N{num} id only ({"news_id": "N3", "significance": "high",
+    "sentiment": "positive"}, confirmed by direct read of the live
+    prompt's own schema and merge_output_researcher()) - this hydrates
+    each citation with the full real record before it reaches storage.
+
+    Live-verified against a real build_research_sources() call for
+    RY.TO: a genuine N1 id resolves to its real headline/date/source
+    through exactly this lookup, not a synthetic fixture.
+
+    Raises ValueError on an unrecognized news_id, matching the live
+    prompt's own "raise ValidationError" intent - but not literally
+    reusing that name, since no such type exists anywhere in this
+    codebase and pydantic.ValidationError is a model-construction
+    exception, not meant for an arbitrary runtime lookup miss.
+    tax_metrics.py::build_precomputed_tax_metrics() already established
+    the real convention for this class of "bad input, not something to
+    degrade around" case in this codebase: a plain ValueError."""
+    news_by_id = {item.id: item for item in research_sources.news_items}
+    hydrated = []
+    for dev in recent_developments:
+        news = news_by_id.get(dev["news_id"])
+        if news is None:
+            raise ValueError(f"invalid news_id: {dev['news_id']!r}")
+        hydrated.append(
+            {
+                "event": news.headline,
+                "date": news.date.isoformat(),
+                "source": news.source,
+                "significance": dev["significance"],
+                "sentiment": dev["sentiment"],
+            }
+        )
+    return hydrated
+
+
+def _deanonymize_value(value, replacements: dict[str, str]):
+    """Recurses through a JSON-shaped structure (dict/list/str/anything
+    else passed through unchanged), applying every COMPANY_X/TICKER_X/
+    PEER_n_COMPANY -> real-name replacement to every string found.
+    Plain str.replace(), not word-boundary regex like the forward
+    (anonymize_content) direction - these tokens are artificial strings
+    the forward pass itself invented, not real-world text that needs
+    fuzzy/variant matching to find."""
+    if isinstance(value, str):
+        for token, real in replacements.items():
+            value = value.replace(token, real)
+        return value
+    if isinstance(value, dict):
+        return {k: _deanonymize_value(v, replacements) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_deanonymize_value(v, replacements) for v in value]
+    return value
+
+
+def deanonymize_text_fields(
+    llm_response: dict, company_name: str, ticker: str, peer_names: dict[str, str]
+) -> dict:
+    """86bawptxr: reverses anonymize_content()'s own substitutions in the
+    Stock Researcher's LLM response, before it reaches storage. Takes
+    already-resolved values, not the whole DataBundle the live prompt's
+    own pseudocode signature suggests (deanonymize_text_fields(llm_response,
+    data_bundle)) - matching this module's own "pure function over
+    already-fetched inputs" convention (tax_metrics.py, canadian_data_flags.py),
+    not a cycle-avoidance concern (checked: no import cycle actually exists
+    either way today, research_sources.py and data_bundle.py don't import
+    each other). Whatever eventually builds the real orchestrator threads
+    data_bundle.company_info["name"]/data_bundle.stock.ticker/
+    data_bundle.research_sources.peer_names in.
+
+    Walks every string field in llm_response recursively - the live
+    prompt's own list (assessment_summary, narrative, caveats, key_factors
+    evidence, risks evidence, and all nested structured_data text fields)
+    is exactly "every string anywhere in this dict," so a blanket recursive
+    walk covers it without hand-maintaining a field list that would drift
+    from the prompt's own schema over time.
+
+    Must NOT touch news headlines - structurally satisfied by the real
+    call order this module's caller must follow, not by anything in this
+    function itself: hydrated_developments (build_hydrated_developments,
+    above) is spliced into structured_data AFTER this function runs, per
+    the live prompt's own merge_output_researcher() sequence - a headline
+    is never present in llm_response when this runs. Still safe to call
+    on a dict that happens to contain headline-shaped text (a plain
+    string with no anonymization tokens in it is simply returned
+    unchanged), which is what the "no-op on headlines" test actually
+    verifies.
+
+    Does NOT include the dual-class caveat - see apply_dual_class_caveat(),
+    which must run AFTER this function, not before. An earlier version of
+    the live prompt's own reference pseudocode gets this order backwards
+    (snapshots `caveats` and appends the dual-class line to it BEFORE
+    deanonymization runs, then returns that pre-deanonymization snapshot
+    in the final output) - a real bug in the reference, not something to
+    copy: any LLM-authored caveat mentioning COMPANY_X would reach the
+    final output un-deanonymized. This function only deanonymizes; the
+    caller is responsible for the correct order."""
+    replacements = {"COMPANY_X": company_name, "TICKER_X": ticker}
+    for peer_id, peer_name in peer_names.items():
+        replacements[f"{peer_id}_COMPANY"] = peer_name
+    return _deanonymize_value(llm_response, replacements)
+
+
+def apply_dual_class_caveat(caveats: list[str], dual_class_flag: bool) -> list[str]:
+    """86bawptxh/merge_output_researcher(): appends the standard dual-class
+    caveat when the flag is set - kept out of the prompt entirely (v1.3)
+    so the LLM is never told about dual-class structure during analysis.
+
+    Must be called on the caveats list taken from the already-deanonymized
+    llm_response, never on the raw pre-deanonymization list - see
+    deanonymize_text_fields()'s own docstring for the real bug in the live
+    prompt's reference pseudocode this ordering avoids. The fixed caveat
+    string itself has no anonymization tokens to reverse, so appending it
+    after deanonymization is always safe."""
+    if dual_class_flag:
+        return [
+            *caveats,
+            "Dual-class share structure: voting power concentrated; "
+            "consider governance implications before sizing position.",
+        ]
+    return list(caveats)
+
+
 async def build_research_sources(
     ticker: str, id_assigned_articles: list[dict], stock: StockLike | None = None
 ) -> ResearchSourcesBundle:
@@ -875,6 +1001,7 @@ async def build_research_sources(
         transcript_excerpts=[],
         news_items=news_items,
         peer_blocks=anonymized_peer_blocks,
+        peer_names=peer_names,
         management_signals=management_signals,
         dual_class_flag=dual_class_flag,
         cik_verified=cik_verified,

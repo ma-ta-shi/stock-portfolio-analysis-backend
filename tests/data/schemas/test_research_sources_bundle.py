@@ -38,6 +38,7 @@ def _bundle(**overrides) -> ResearchSourcesBundle:
         transcript_excerpts=[_transcript()],
         news_items=[_news_item()],
         peer_blocks=[PeerBlock(peer_id="PEER_1", content="...", token_count=100)],
+        peer_names={"PEER_1": "Example Peer Inc."},
         management_signals=_signals(),
         dual_class_flag=False,
         cik_verified=True,
@@ -212,6 +213,28 @@ def test_rejects_none_age_paired_with_nonempty_news_items():
         _bundle(latest_news_age_days=None)
 
 
+# ---------- peer_names / peer_blocks (86bawptxh/86bawptxr) ----------
+
+
+def test_accepts_matching_peer_names_and_peer_blocks():
+    bundle = _bundle()
+    assert bundle.peer_names == {"PEER_1": "Example Peer Inc."}
+
+
+def test_rejects_peer_names_entry_with_no_matching_block():
+    """An orphaned peer_names entry - no matching peer_blocks entry."""
+    with pytest.raises(ValidationError):
+        _bundle(peer_names={"PEER_1": "Example Peer Inc.", "PEER_2": "Another Peer Inc."})
+
+
+def test_rejects_peer_block_missing_from_peer_names():
+    """The reverse direction - a real peer_blocks entry with no name to
+    deanonymize it with. This is exactly the bug this whole field exists
+    to prevent (86bawptxr couldn't reverse PEER_n_COMPANY without it)."""
+    with pytest.raises(ValidationError):
+        _bundle(peer_names={})
+
+
 # ---------- base behavior ----------
 
 
@@ -262,6 +285,7 @@ def test_bundle_round_trips_with_all_empty_lists():
         transcript_excerpts=[],
         news_items=[],
         peer_blocks=[],
+        peer_names={},
         transcript_count=0,
         news_item_count=0,
         latest_filing_age_days=None,
