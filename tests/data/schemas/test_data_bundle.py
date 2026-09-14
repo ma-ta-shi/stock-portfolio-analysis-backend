@@ -162,9 +162,6 @@ def _bundle(**overrides) -> DataBundle:
 
 def _ca_flags() -> CanadianDataFlags:
     return CanadianDataFlags(
-        sentiment_source="local_llm",
-        has_transcript=False,
-        transcript_source=None,
         analyst_count=0,
         news_article_count=0,
         news_sources=[],
@@ -383,7 +380,7 @@ def test_ca_bundle_round_trips_through_model_dump():
     )
     dumped = bundle.model_dump()
     assert isinstance(dumped["canadian_data_flags"], dict)
-    assert dumped["canadian_data_flags"]["sentiment_source"] == "local_llm"
+    assert dumped["canadian_data_flags"]["statcan_available"] is False
     assert DataBundle.model_validate(dumped) == bundle
 
 
