@@ -268,6 +268,31 @@ async def test_ca_quote_chain_always_serves_from_yfinance():
     assert source == "yfinance"
 
 
+# ---------- asset_type classification (86bbpk6uf part 1) ----------
+# Verifies each provider's own classification signal reaches company_info
+# through the real Router path: FMP isEtf/isFund on the US chain, openbb-tmx
+# issue_type on the CA chain (single-link, no fallback).
+
+
+@pytest.mark.parametrize(
+    "ticker,expected",
+    [
+        ("AAPL", "equity"),
+        (t.US_ETF[0], "etf"),
+        (t.CA_CROSSLISTED[0], "equity"),
+        (t.CA_ETF_SUFFIXED[0], "etf"),
+    ],
+)
+async def test_company_info_asset_type_reaches_through_router(ticker, expected):
+    async with Router(ticker=ticker) as router:
+        result, source = await router._try_chain("get_company_info", ticker)
+    assert not _is_empty(result), f"get_company_info({ticker}) returned empty via {source!r}"
+    assert result["asset_type"] == expected, (
+        f"get_company_info({ticker}) served by {source!r} classified "
+        f"{result['asset_type']!r}, expected {expected!r}"
+    )
+
+
 # ---------- Ambiguous bare-vs-.TO ticker collisions ----------
 # Router-level, not a single-provider concern — is_canadian_ticker()'s
 # suffix check is what decides which chain (and therefore which company)
@@ -278,14 +303,12 @@ async def test_bare_us_ticker_and_dotted_ca_ticker_resolve_to_different_companie
     """T (NYSE: AT&T) vs T.TO (TSX: TELUS) — confirmed different
     companies; is_canadian_ticker must route them to different chains.
 
-    Uses get_price_history, not get_company_info: real finding 2026-08-04,
-    CA get_company_info is currently broken for real tickers by an
-    upstream openbb-tmx library bug (see test_provider_completeness.py's
-    baseline sweep — RY.TO/etc. all raise a KeyError inside openbb_tmx's
-    own symbol-sorting logic), with no fallback since it's a single-link
-    CA chain. get_price_history has a real fallback link and isn't
-    affected, so it's the reliable way to confirm two different
-    companies here."""
+    Uses get_price_history, not get_company_info: the upstream openbb-tmx
+    symbol-sort KeyError that used to break CA get_company_info was fixed
+    2026-08-04 (86bb7j0kh, the bare-symbol transform — RY.TO/etc. resolve
+    fine now, see test_company_info_asset_type_reaches_through_router
+    above), but get_price_history's real fallback link still makes it the
+    cleaner two-different-companies check."""
     async with Router(ticker=t.AMBIGUOUS_US_TICKER) as us_router:
         us_price, _ = await us_router._try_chain(
             "get_price_history", t.AMBIGUOUS_US_TICKER, "1mo", "1d"

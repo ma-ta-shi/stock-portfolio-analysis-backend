@@ -246,7 +246,35 @@ async def test_get_company_info_maps_to_normalized_shape(provider):
         "currency": "USD",
         "country": "US",
         "primary_exchange": "NASDAQ",
+        "asset_type": "equity",
     }
+
+
+@pytest.mark.parametrize(
+    "profile_extra,expected",
+    [
+        ({"isEtf": True, "isFund": False}, "etf"),
+        ({"isEtf": False, "isFund": True}, "other"),  # MF and CEF both land here
+        ({"isEtf": False, "isFund": False}, "equity"),
+        ({}, "equity"),  # neither key present -> equity
+    ],
+)
+async def test_get_company_info_maps_asset_type_from_is_etf_is_fund(
+    provider, profile_extra, expected
+):
+    """86bbpk6uf part 1: FMP's isEtf/isFund booleans drive asset_type. FMP
+    doesn't distinguish closed-end funds from mutual funds (both isFund)."""
+    _wire(
+        provider,
+        FakeResponse(
+            200,
+            json_data=[{"symbol": "X", "companyName": "X Corp", **profile_extra}],
+        ),
+    )
+
+    info = await provider.get_company_info("X")
+
+    assert info["asset_type"] == expected
 
 
 async def test_get_company_info_paywalled_ticker_returns_empty_dict(provider):

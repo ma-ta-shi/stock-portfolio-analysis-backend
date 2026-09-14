@@ -117,6 +117,7 @@ async def test_get_company_info_maps_to_normalized_shape(provider, monkeypatch):
         "currency": "USD",
         "country": "United States",
         "exchange": "NMS",
+        "quoteType": "EQUITY",
     }
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
 
@@ -130,7 +131,33 @@ async def test_get_company_info_maps_to_normalized_shape(provider, monkeypatch):
         "currency": "USD",
         "country": "United States",
         "primary_exchange": "NMS",
+        "asset_type": "equity",
     }
+
+
+@pytest.mark.parametrize(
+    "quote_type,expected",
+    [
+        ("EQUITY", "equity"),
+        ("ETF", "etf"),
+        ("MUTUALFUND", "other"),
+        ("INDEX", "other"),
+        ("CURRENCY", "other"),
+        (None, "equity"),  # past the longName guard, a missing quoteType -> equity
+    ],
+)
+async def test_get_company_info_maps_asset_type_from_quote_type(
+    provider, monkeypatch, quote_type, expected
+):
+    """86bbpk6uf part 1: yfinance's own quoteType drives asset_type.
+    NB: yfinance labels every closed-end fund "EQUITY" — a documented gap
+    the US path covers via FMP's isFund."""
+    info = {"longName": "Some Fund", "quoteType": quote_type}
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
+
+    result = await provider.get_company_info("SOME")
+
+    assert result["asset_type"] == expected
 
 
 async def test_get_company_info_no_real_data_returns_empty_dict(provider, monkeypatch):
@@ -138,7 +165,7 @@ async def test_get_company_info_no_real_data_returns_empty_dict(provider, monkey
     invalid ticker's .info isn't literally {} — confirmed live it returns
     a near-empty dict with one unrelated key ({'trailingPegRatio': None}).
     Without the `if not info.get("longName")` guard, this would have built
-    a full 7-key NormalizedCompanyInfo with everything blank, which
+    a full 8-key NormalizedCompanyInfo with everything blank, which
     router.py's _is_empty() (len(dict) == 0) can never detect as empty —
     breaking the fallback chain's ability to recognize total failure."""
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={"trailingPegRatio": None}))
@@ -159,6 +186,7 @@ async def test_get_company_info_missing_secondary_fields_default_gracefully(prov
     assert result["name"] == "Some Co"
     assert result["market_cap"] is None
     assert result["sector"] == ""
+    assert result["asset_type"] == "equity"  # no quoteType in .info -> equity
 
 
 # --- normalize_financials ---

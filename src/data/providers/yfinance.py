@@ -230,13 +230,13 @@ class YFinanceDataProvider(StockDataProvider):
         invalid ticker, yfinance's .info doesn't raise or come back empty —
         confirmed live it returns a near-empty dict with one unrelated key
         ({'trailingPegRatio': None}), no real data at all. Without a guard,
-        every field below would default to "" and this method would return
-        a full 7-key NormalizedCompanyInfo that LOOKS successful. That
-        breaks router.py's fallback chain: _is_empty()'s len(dict) == 0
-        check can never see a fully-blank-but-7-key dict as empty, so a
-        real FMP failure correctly falling back to yfinance would silently
-        "succeed" with a useless, all-blank result instead of the chain
-        correctly reporting total failure. fmp.py/openbb_tmx.py don't have
+        every field below would default to "" (asset_type to "equity") and
+        this method would return a full 8-key NormalizedCompanyInfo that
+        LOOKS successful. That breaks router.py's fallback chain: _is_empty()'s
+        len(dict) == 0 check can never see a fully-blank-but-8-key dict as
+        empty, so a real FMP failure correctly falling back to yfinance would
+        silently "succeed" with a useless, all-blank result instead of the
+        chain correctly reporting total failure. fmp.py/openbb_tmx.py don't have
         this problem — they already guard with `if not data: return {}`
         before building anything, since their APIs cleanly signal "no
         results" up front. name is the one field a real ticker should
@@ -245,6 +245,13 @@ class YFinanceDataProvider(StockDataProvider):
         info = stock.info
         if not info.get("longName"):
             return {}
+        # asset_type (86bbpk6uf part 1): map yfinance's own quoteType. Past
+        # the longName guard this is a real security, so a missing quoteType
+        # falls back to "equity". yfinance calls every closed-end fund
+        # "EQUITY" (a known, documented gap) — the US path serves those via
+        # FMP's isFund in practice, this branch only runs on an FMP outage.
+        qt = (info.get("quoteType") or "EQUITY").upper()
+        asset_type = {"EQUITY": "equity", "ETF": "etf"}.get(qt, "other")
         # .get(key) or "" (not .get(key, "")) — yfinance's .info can hold an
         # explicit None for these keys, not just omit them; .get(key, "")
         # only covers the omitted case and would silently store None in a
@@ -257,6 +264,7 @@ class YFinanceDataProvider(StockDataProvider):
             currency=info.get("currency") or "",
             country=info.get("country") or "",
             primary_exchange=info.get("exchange") or "",
+            asset_type=asset_type,
         )
 
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:

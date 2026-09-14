@@ -182,7 +182,7 @@ async def test_get_financials_returns_dataframe(provider, mock_obb):
 async def test_get_company_info_calls_profile_endpoint(provider, mock_obb):
     """Must call obb.equity.profile."""
     mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Shopify Inc.", "sector": "Tech"}]
+        [{"name": "Shopify Inc.", "sector": "Tech", "issue_type": "CS"}]
     )
     await provider.get_company_info(ticker="SHOP")
     mock_obb.equity.profile.assert_called_once()
@@ -197,7 +197,9 @@ async def test_get_company_info_strips_suffix_and_converts_to_tmx_dot_form(provi
     makes the fetch itself raise KeyError, confirmed live. Must request
     the TMX-native form ("RCI.B") instead — same transform already used
     in get_earnings_calendar."""
-    mock_obb.equity.profile.return_value = make_results_result([{"name": "Rogers Class B"}])
+    mock_obb.equity.profile.return_value = make_results_result(
+        [{"name": "Rogers Class B", "issue_type": "CS"}]
+    )
     await provider.get_company_info(ticker="RCI-B.TO")
     _, kwargs = mock_obb.equity.profile.call_args
     assert kwargs["symbol"] == "RCI.B"
@@ -212,7 +214,7 @@ async def test_get_company_info_returns_dict(provider, mock_obb):
     .to_df()'s buggy internal sort is avoided by requesting the right
     symbol format in the first place (see the transform test above)."""
     mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Shopify Inc.", "sector": "Tech"}]
+        [{"name": "Shopify Inc.", "sector": "Tech", "issue_type": "CS"}]
     )
     result = await provider.get_company_info(ticker="SHOP")
     assert isinstance(result, dict)
@@ -222,7 +224,7 @@ async def test_get_company_info_returns_dict(provider, mock_obb):
 async def test_get_company_info_returns_first_result_only(provider, mock_obb):
     """If multiple results are returned, only the first one's data should be used."""
     mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Row One"}, {"name": "Row Two"}]
+        [{"name": "Row One", "issue_type": "CS"}, {"name": "Row Two", "issue_type": "CS"}]
     )
     result = await provider.get_company_info(ticker="SHOP")
     assert result["name"] == "Row One"
@@ -247,6 +249,7 @@ async def test_get_company_info_maps_to_normalized_shape(provider, mock_obb):
                 "stock_exchange": "TSX",
                 "hq_country": None,
                 "inc_country": "CA",
+                "issue_type": "CS",
             }
         ]
     )
@@ -259,7 +262,47 @@ async def test_get_company_info_maps_to_normalized_shape(provider, mock_obb):
         "currency": "CAD",
         "country": "CA",
         "primary_exchange": "TSX",
+        "asset_type": "equity",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "issue_type,expected",
+    [
+        ("CS", "equity"),
+        ("RE", "equity"),
+        ("LP", "equity"),
+        ("ET", "etf"),
+        ("PS", "other"),
+    ],
+)
+async def test_get_company_info_maps_asset_type_from_issue_type(
+    provider, mock_obb, issue_type, expected
+):
+    """86bbpk6uf part 1: TMX's issue_type code drives asset_type."""
+    mock_obb.equity.profile.return_value = make_results_result(
+        [{"name": "Some Security", "issue_type": issue_type}]
+    )
+    result = await provider.get_company_info(ticker="X")
+    assert result["asset_type"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issue_type", [None, "WT"])  # null, and a code not in the map
+async def test_get_company_info_unknown_issue_type_defaults_equity_and_warns(
+    provider, mock_obb, issue_type
+):
+    """An unmapped/absent issue_type falls back to "equity" (benign) and
+    logs a warning — openbb-tmx is the CA path with no fallback, so this
+    is the only signal a TMX schema change would give."""
+    mock_obb.equity.profile.return_value = make_results_result(
+        [{"name": "Weird Security", "issue_type": issue_type}]
+    )
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_company_info(ticker="WEIRD")
+    assert result["asset_type"] == "equity"
+    assert any(log["event"] == "openbb_tmx_unknown_issue_type" for log in logs)
 
 
 @pytest.mark.asyncio

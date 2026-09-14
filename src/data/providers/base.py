@@ -1,7 +1,7 @@
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Literal, TypedDict
 
 import pandas as pd
 
@@ -68,8 +68,9 @@ class NormalizedCompanyInfo(TypedDict):
     """Canonical get_company_info() shape, confirmed by grepping every agent
     prompt that references DataBundle.company_info (86bbb001k) — all 10
     (Bull/Bear/Sentiment/Macro/Technical/Stock Researcher/Fundamental/Risk
-    Advisor/CIO/Shadow CIO) use exactly these fields, no variation. Each
-    adapter (fmp.py/yfinance.py/openbb_tmx.py) maps its own raw
+    Advisor/CIO/Shadow CIO) render the first seven fields, no variation;
+    asset_type (added 86bbpk6uf) is routing-only, not rendered anywhere.
+    Each adapter (fmp.py/yfinance.py/openbb_tmx.py) maps its own raw
     get_company_info() response into this shape before returning. A
     TypedDict is a plain dict at runtime, so router.py's _is_empty()/
     _try_chain() need no changes to keep working with it.
@@ -86,6 +87,14 @@ class NormalizedCompanyInfo(TypedDict):
     country: str
     primary_exchange: str  # NOT "exchange" — every payload template across
     # all 10 consumer prompts renders {primary_exchange}, never {exchange}
+    asset_type: Literal["equity", "etf", "other"]  # NOT consumed by any agent
+    # prompt (same as industry above) — added for pipeline routing (86bbpk6uf
+    # part 2): a gate rejects "etf"/"other" before a run so the equity-only
+    # agents never score a fund/index/preferred. Each adapter maps its own
+    # provider's classification (yfinance quoteType / FMP isEtf|isFund /
+    # openbb-tmx issue_type); "other" absorbs funds, indexes, preferreds,
+    # warrants. No provider distinguishes closed-end fund from mutual fund,
+    # so finer values aren't populatable.
 
 
 class NormalizedAnalystEstimates(TypedDict):
