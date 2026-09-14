@@ -74,19 +74,19 @@
   "AVL.TO": {
     "cik": 1362898,
     "company_name": "Avalon Advanced Materials Inc.",
-    "form_type": "40-F",
+    "form_type": "20-F",
     "us_ticker": "AVLNF"
   },
   "BAM.TO": {
     "cik": 1937926,
     "company_name": "Brookfield Asset Management Ltd.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "BAM"
   },
   "BB.TO": {
     "cik": 1070235,
     "company_name": "BLACKBERRY Ltd",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "BB"
   },
   "BBUC.TO": {
@@ -110,7 +110,7 @@
   "BCT.TO": {
     "cik": 1610820,
     "company_name": "BriaCell Therapeutics Corp.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "BCTX"
   },
   "BDI.TO": {
@@ -200,7 +200,7 @@
   "BU.TO": {
     "cik": 1158399,
     "company_name": "Burcon NutraScience Corp",
-    "form_type": "40-F",
+    "form_type": "20-F",
     "us_ticker": "BRCNF"
   },
   "CAE.TO": {
@@ -268,13 +268,13 @@
   "CRON.TO": {
     "cik": 1656472,
     "company_name": "Cronos Group Inc.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "CRON"
   },
   "CSCI.TO": {
     "cik": 1113423,
     "company_name": "COSCIENS Biopharma Inc.",
-    "form_type": "40-F",
+    "form_type": "20-F",
     "us_ticker": "CSCID"
   },
   "CTGO.TO": {
@@ -340,7 +340,7 @@
   "EFR.TO": {
     "cik": 1385849,
     "company_name": "ENERGY FUELS INC",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "UUUU"
   },
   "EGLX.TO": {
@@ -382,7 +382,7 @@
   "ENB.TO": {
     "cik": 895728,
     "company_name": "ENBRIDGE INC",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "ENB"
   },
   "EPRX.TO": {
@@ -514,7 +514,7 @@
   "HIVE.TO": {
     "cik": 1720424,
     "company_name": "HIVE Digital Technologies Ltd.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "HIVE"
   },
   "HSLV.TO": {
@@ -574,7 +574,7 @@
   "ITH.TO": {
     "cik": 1134115,
     "company_name": "INTERNATIONAL TOWER HILL MINES LTD",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "THM"
   },
   "K.TO": {
@@ -586,7 +586,7 @@
   "KEEL.TO": {
     "cik": 1812477,
     "company_name": "Keel Infrastructure Corp.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "KEEL"
   },
   "KEI.TO": {
@@ -610,7 +610,7 @@
   "LAR.TO": {
     "cik": 1440972,
     "company_name": "Lithium Argentina AG",
-    "form_type": "40-F",
+    "form_type": "20-F",
     "us_ticker": "LAR"
   },
   "LGO.TO": {
@@ -628,7 +628,7 @@
   "MDNA.TO": {
     "cik": 1807983,
     "company_name": "Medicenna Therapeutics Corp.",
-    "form_type": "40-F",
+    "form_type": "20-F",
     "us_ticker": "MDNAF"
   },
   "MFC.TO": {
@@ -718,7 +718,7 @@
   "ORIO.TO": {
     "cik": 1602842,
     "company_name": "Orion Digital Corp.",
-    "form_type": "40-F",
+    "form_type": "20-F",
     "us_ticker": "ORIO"
   },
   "OTEX.TO": {
@@ -748,13 +748,13 @@
   "PPTA.TO": {
     "cik": 1526243,
     "company_name": "PERPETUA RESOURCES CORP.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "PPTA"
   },
   "PRN.TO": {
     "cik": 1628808,
     "company_name": "Profound Medical Corp.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "PROF"
   },
   "PSLV.TO": {
@@ -820,7 +820,7 @@
   "SHOP.TO": {
     "cik": 1594805,
     "company_name": "SHOPIFY INC.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "SHOP"
   },
   "SII.TO": {
@@ -856,7 +856,7 @@
   "SSRM.TO": {
     "cik": 921638,
     "company_name": "SSR MINING INC.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "SSRM"
   },
   "STN.TO": {
@@ -976,7 +976,7 @@
   "URE.TO": {
     "cik": 1375205,
     "company_name": "UR-ENERGY INC",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "URG"
   },
   "VBNK.TO": {
@@ -1018,13 +1018,13 @@
   "WCN.TO": {
     "cik": 1318220,
     "company_name": "Waste Connections, Inc.",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "WCN"
   },
   "WEED.TO": {
     "cik": 1737927,
     "company_name": "Canopy Growth Corp",
-    "form_type": "40-F",
+    "form_type": "10-K",
     "us_ticker": "CGC"
   },
   "WFG.TO": {
@@ -1042,7 +1042,7 @@
   "WPRT.TO": {
     "cik": 1370416,
     "company_name": "WESTPORT FUEL SYSTEMS INC.",
-    "form_type": "40-F",
+    "form_type": "20-F",
     "us_ticker": "WPRT"
   },
   "XNDU.TO": {
