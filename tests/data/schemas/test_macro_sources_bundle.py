@@ -70,7 +70,6 @@ def _bundle(**overrides) -> MacroSourcesBundle:
         unemployment_age_days=15,
         cad_usd_age_days=0,
         vix_age_days=0,
-        sector_commodity_age_days_reliability=None,
         # StatCan supplementary
         statcan_unemployment_ca=None,
         ca_unemployment_6m_delta=None,

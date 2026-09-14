@@ -708,7 +708,13 @@ async def compute_macro_sources(
         sector_commodity_level=sector_commodity["sector_commodity_level"],
         sector_commodity_direction=sector_commodity["sector_commodity_direction"],
         sector_commodity_age_days=sector_commodity["sector_commodity_age_days"],
-        bond_yields_available=canada_bond_10y is not None,
+        # 86bawptxa: the payload always renders BOTH 10yr yields regardless
+        # of which market the subject stock is in ("US 10yr: ... | Canada
+        # 10yr: ..."), unlike CPI/GDP/unemployment which are jurisdiction-
+        # selected - so this must require both sources, not just Canada's.
+        # Confirmed live both currently resolve; this only diverges from
+        # the old canada-only check when exactly one of the two fails.
+        bond_yields_available=treasury_10y is not None and canada_bond_10y is not None,
         usd_revenue_exposure_pct=None,
         cb_commentary_items=cb_items,
         cb_commentary_count=len(cb_items),
@@ -722,6 +728,5 @@ async def compute_macro_sources(
         unemployment_age_days=_latest_age_days(unemployment_series, as_of_date),
         cad_usd_age_days=_latest_age_days(cad_usd_fred_series, as_of_date),
         vix_age_days=_latest_age_days(vix_series, as_of_date),
-        sector_commodity_age_days_reliability=sector_commodity["sector_commodity_age_days"],
         **statcan_fields,
     )

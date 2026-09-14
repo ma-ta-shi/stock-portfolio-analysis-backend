@@ -102,7 +102,6 @@ def _macro_bundle(statcan_age_days: int | None) -> MacroSourcesBundle:
         unemployment_age_days=None,
         cad_usd_age_days=None,
         vix_age_days=None,
-        sector_commodity_age_days_reliability=None,
         statcan_unemployment_ca=None,
         ca_unemployment_6m_delta=None,
         statcan_housing_starts=None,
