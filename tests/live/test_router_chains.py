@@ -392,6 +392,37 @@ async def test_short_interest_via_router_us_and_ca():
     assert ca_result["days_to_cover"] is not None
 
 
+# ---------- Benchmark index routing (86bawptw7) ----------
+# ^GSPTSE/^GSPC carry no suffix a market can be inferred from, and no
+# Stock/StockRef row ever exists for an index — Router-level classification,
+# same category as the bare-ticker collision tests below.
+
+
+async def test_ca_benchmark_index_routes_to_yfinance_not_fmp():
+    """Before the fix: ^GSPTSE had no .TO/.V suffix, so is_canadian_ticker()
+    misclassified it as US, sending it through US_CHAINS (fmp first) and
+    burning an FMP call per analysis before falling back. Pins the fixed
+    behavior: yfinance directly, no FMP call and no openbb_tmx attempt
+    (confirmed live 2026-09-15 that openbb_tmx always raises EmptyDataError
+    for this symbol — the _INDEX_PRICE_HISTORY_OVERRIDE skips it)."""
+    async with Router(ticker="^GSPTSE") as router:
+        result, source = await router._try_chain("get_price_history", "^GSPTSE", "1y", "1d")
+    assert not _is_empty(result)
+    assert source == "yfinance"
+
+
+async def test_us_benchmark_index_routes_to_fmp():
+    """^GSPC already resolved correctly before this ticket (no suffix match
+    defaults to US) — regression guard so a future default change can't
+    silently break it. Confirmed live 2026-09-15: FMP serves it directly,
+    no fallback needed (the earlier concern that FMP might 402 on index
+    symbols, same as it does for ETFs, doesn't hold for this one)."""
+    async with Router(ticker="^GSPC") as router:
+        result, source = await router._try_chain("get_price_history", "^GSPC", "1y", "1d")
+    assert not _is_empty(result)
+    assert source == "fmp"
+
+
 # ---------- Ambiguous bare-vs-.TO ticker collisions ----------
 # Router-level, not a single-provider concern — is_canadian_ticker()'s
 # suffix check is what decides which chain (and therefore which company)
