@@ -6,7 +6,7 @@ dict for this pass per the layout ticket's (86bawp7yx) call — the doc
 doesn't give them a fully specified shape yet.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import NonNegativeInt, model_validator
@@ -40,6 +40,27 @@ def get_benchmark(stock: StockRef) -> str:
     caller holding a live ORM Stock instead can get a StockRef via
     StockRef.from_stock() first."""
     return "^GSPTSE" if _is_canadian_stock(stock) else "^GSPC"
+
+
+def build_data_freshness(
+    sources_used: dict[str, str], *, at: datetime | None = None
+) -> dict[str, str]:
+    """Per-source fetch timestamp for audit (86bawptw7). Caller
+    (DataPipeline.prepare(), not yet built) passes a Router's sources_used
+    once all of that Router's calls for one bundle are done. One shared
+    timestamp for every entry, not a true per-call timestamp: no provider or
+    the router implements any caching today, so every call in one prepare()
+    run happens inline, back-to-back, in the same fetch pass — there is no
+    real timing difference between entries for audit to preserve. If a
+    caching layer is added later, that layer is the right place to add
+    genuine per-call timestamps (it would need to timestamp at the cache
+    hit/miss point anyway, which Router doesn't do now).
+
+    data_vintage needs no helper of its own — it's this same `at` timestamp,
+    captured once by DataPipeline.prepare() when it fetches the primary
+    stock's price history and passed into both places."""
+    stamp = (at or datetime.now(UTC)).isoformat()
+    return {method: stamp for method in sources_used}
 
 
 class DataBundle(ContractModel):
