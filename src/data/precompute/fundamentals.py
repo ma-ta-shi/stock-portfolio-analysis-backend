@@ -324,8 +324,12 @@ def compute_growth_metrics(
 def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
     if not fin.quarters and fin.ttm is None:
         return {
-            "gross_margin": None, "operating_margin": None, "net_margin": None,
-            "roe": None, "margin_trend": None, "fcf_to_net_income": None,
+            "gross_margin": None,
+            "operating_margin": None,
+            "net_margin": None,
+            "roe": None,
+            "margin_trend": None,
+            "fcf_to_net_income": None,
         }
     # Margins over the trailing twelve months, not one (often seasonal) quarter —
     # keeps them stable and comparable across a peer set with mixed fiscal
@@ -346,7 +350,9 @@ def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
         if ttm_revenue and ttm_operating_income is not None
         else None
     )
-    net_margin = ttm_net_income / ttm_revenue if ttm_revenue and ttm_net_income is not None else None
+    net_margin = (
+        ttm_net_income / ttm_revenue if ttm_revenue and ttm_net_income is not None else None
+    )
 
     roe = None
     total_equity = fin.balance_sheet.get("total_equity")
@@ -390,8 +396,9 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
     interest_coverage = None
     if fin.quarters:
         latest = fin.quarters[0]
-        operating_income, interest_expense = latest.get("operating_income"), latest.get(
-            "interest_expense"
+        operating_income, interest_expense = (
+            latest.get("operating_income"),
+            latest.get("interest_expense"),
         )
         if operating_income is not None and interest_expense:
             interest_coverage = operating_income / interest_expense
@@ -442,9 +449,7 @@ def compute_valuation_metrics(
         if market_cap is not None:
             pb_ratio = market_cap / total_equity
         else:
-            shares_outstanding = (
-                fin.quarters[0].get("shares_outstanding") if fin.quarters else None
-            )
+            shares_outstanding = fin.quarters[0].get("shares_outstanding") if fin.quarters else None
             if current_price is not None and shares_outstanding:
                 bvps = total_equity / shares_outstanding
                 pb_ratio = current_price / bvps if bvps else None
@@ -490,9 +495,7 @@ def compute_dividend_info(
     trailing_annual_dividend = sum(d["amount_per_share"] for d in trailing_4)
 
     current_price = price_info.get("current_price")
-    dividend_yield = (
-        trailing_annual_dividend / current_price if current_price else None
-    )
+    dividend_yield = trailing_annual_dividend / current_price if current_price else None
 
     by_year: dict[int, float] = {}
     for record in sorted_history:

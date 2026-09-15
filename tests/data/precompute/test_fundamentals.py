@@ -69,7 +69,9 @@ _BALANCE_SHEET = {
 
 
 def _fin(**overrides) -> NormalizedFinancials:
-    defaults = dict(quarters=_QUARTERS, annual=_ANNUAL, balance_sheet=_BALANCE_SHEET, currency="USD")
+    defaults = dict(
+        quarters=_QUARTERS, annual=_ANNUAL, balance_sheet=_BALANCE_SHEET, currency="USD"
+    )
     defaults.update(overrides)
     return NormalizedFinancials(**defaults)
 
@@ -161,7 +163,12 @@ def test_compute_growth_metrics_empty_earnings_surprises_stays_empty_list_not_no
 
 
 def test_compute_growth_metrics_cagr_none_when_base_year_non_positive():
-    annual = [_ANNUAL[0], _ANNUAL[1], _ANNUAL[2], _quarter(-100.0, 0.0, 0.0, period_end="2022-12-31")]
+    annual = [
+        _ANNUAL[0],
+        _ANNUAL[1],
+        _ANNUAL[2],
+        _quarter(-100.0, 0.0, 0.0, period_end="2022-12-31"),
+    ]
     result = compute_growth_metrics(_fin(annual=annual))
 
     assert result["revenue_growth_3yr_cagr"] is None
@@ -194,8 +201,12 @@ def test_compute_profitability_metrics_margins_from_ttm_on_thin_quarters():
     resolve (from ttm), and are the trailing-twelve-month figure."""
     fin = _fin(
         quarters=_QUARTERS[:2],
-        ttm={"revenue": 4000.0, "cost_of_revenue": 2400.0, "operating_income": 800.0,
-             "net_income": 500.0},
+        ttm={
+            "revenue": 4000.0,
+            "cost_of_revenue": 2400.0,
+            "operating_income": 800.0,
+            "net_income": 500.0,
+        },
     )
     result = compute_profitability_metrics(fin)
 
@@ -218,8 +229,12 @@ def test_compute_profitability_metrics_empty_quarters_returns_all_none():
     result = compute_profitability_metrics(_fin(quarters=[]))
 
     assert result == {
-        "gross_margin": None, "operating_margin": None, "net_margin": None,
-        "roe": None, "margin_trend": None, "fcf_to_net_income": None,
+        "gross_margin": None,
+        "operating_margin": None,
+        "net_margin": None,
+        "roe": None,
+        "margin_trend": None,
+        "fcf_to_net_income": None,
     }
 
 
@@ -269,7 +284,9 @@ def test_compute_balance_sheet_metrics_missing_interest_expense_omits_only_cover
 
 
 def test_compute_balance_sheet_metrics_missing_total_debt_omits_only_de():
-    result = compute_balance_sheet_metrics(_fin(balance_sheet={**_BALANCE_SHEET, "total_debt": None}))
+    result = compute_balance_sheet_metrics(
+        _fin(balance_sheet={**_BALANCE_SHEET, "total_debt": None})
+    )
 
     assert result["debt_to_equity"] is None
     assert result["current_ratio"] is not None  # unaffected
@@ -291,7 +308,9 @@ def test_compute_valuation_metrics_happy_path():
     ttm_ebitda = (200.0 + 190.0 + 180.0 + 170.0) + (50.0 * 4)
     assert result["ev_ebitda"] == pytest.approx((5000.0 + 1000.0 - 500.0) / ttm_ebitda)
     assert result["forward_pe"] is None
-    assert result["peg_ratio"] == pytest.approx(result["pe_ratio"] / (growth["eps_growth_yoy"] * 100))
+    assert result["peg_ratio"] == pytest.approx(
+        result["pe_ratio"] / (growth["eps_growth_yoy"] * 100)
+    )
 
 
 def test_peg_none_when_growth_is_a_base_year_artifact():
@@ -487,7 +506,10 @@ def test_compute_dividend_info_irregular_regularity_from_special_dividend():
 
 
 def test_compute_dividend_info_consecutive_years_paid_stops_at_gap():
-    history = [_dividend_record("2025-06-15", 0.20), _dividend_record("2023-06-15", 0.18)]  # gap: no 2024
+    history = [
+        _dividend_record("2025-06-15", 0.20),
+        _dividend_record("2023-06-15", 0.18),
+    ]  # gap: no 2024
 
     result = compute_dividend_info(_fin(), _price_info(), history)
 
@@ -502,7 +524,11 @@ def test_compute_dividend_info_partial_current_year_does_not_distort_growth():
     even producing a false negative rate. trailing_annual_dividend (a
     genuine trailing-12-month total) must be used as the "now" figure
     instead of by_year[latest_year]."""
-    history = [_dividend_record(f"{year}-{m:02d}-15", 0.20) for year in range(2020, 2026) for m in (2, 5, 8, 11)]
+    history = [
+        _dividend_record(f"{year}-{m:02d}-15", 0.20)
+        for year in range(2020, 2026)
+        for m in (2, 5, 8, 11)
+    ]
     # 2026: only 3 of 4 payments so far (partial year) — would show as a
     # decline if compared directly against a complete 2025.
     history += [_dividend_record(f"2026-{m:02d}-15", 0.20) for m in (2, 5, 8)]
@@ -544,9 +570,14 @@ def test_compute_peer_comparison_happy_path():
         result["peer_records"][0]["pe_ratio"]
     )
     assert set(result["sector_medians"].keys()) == {
-        "sector_median_pe", "sector_median_pb", "sector_median_rev_growth",
-        "sector_median_gross_margin", "sector_median_op_margin", "sector_median_roe",
-        "sector_median_de", "sector_median_ev_ebitda",
+        "sector_median_pe",
+        "sector_median_pb",
+        "sector_median_rev_growth",
+        "sector_median_gross_margin",
+        "sector_median_op_margin",
+        "sector_median_roe",
+        "sector_median_de",
+        "sector_median_ev_ebitda",
     }
 
 
@@ -662,7 +693,9 @@ def test_compute_peer_comparison_three_peers_two_valid_yields_median():
     a_pb = result["peer_records"][0]["pb_ratio"]
     assert a_pb is not None
     assert result["peer_records"][2]["pb_ratio"] is None  # C rejected (negative pb)
-    assert result["peer_records"][2]["roe"] is None  # C's roe suppressed at source (negative equity)
+    assert (
+        result["peer_records"][2]["roe"] is None
+    )  # C's roe suppressed at source (negative equity)
     assert result["sector_medians"]["sector_median_pb"] == pytest.approx(a_pb)  # median of A, B
 
 
@@ -673,9 +706,15 @@ def test_compute_all_happy_path_returns_full_shape():
     result = compute_all(_fin(), _price_info(), _dividend_history(), [])
 
     assert set(result.keys()) == {
-        "valuation_metrics", "growth_metrics", "profitability_metrics",
-        "balance_sheet_metrics", "dividend_info", "peer_metrics",
-        "quarters_available", "missing_fields", "currency_mismatch",
+        "valuation_metrics",
+        "growth_metrics",
+        "profitability_metrics",
+        "balance_sheet_metrics",
+        "dividend_info",
+        "peer_metrics",
+        "quarters_available",
+        "missing_fields",
+        "currency_mismatch",
     }
     assert result["quarters_available"] == 5
     assert result["valuation_metrics"]["pe_ratio"] is not None
