@@ -529,3 +529,32 @@ def build_precomputed_tax_metrics(
         lines.append(build_tax_rule_snapshot(reference_last_verified))
 
     return "\n".join(lines)
+
+
+def build_tax_metrics_field(
+    ticker: str,
+    account_type: Literal["tfsa", "rrsp", "trading"],
+    bundle: DataBundle,
+    account_state: AccountStateInput | None = None,
+    reference_path: str = "prompts/tax_strategist/canadian_tax_rules_reference.md",
+) -> str:
+    """Convenience entry point for DataPipeline.prepare() (not yet built, 86bawpty3): loads
+    the tax rules reference and builds the tax_metrics field in one call, instead of requiring
+    every caller to do both steps itself (86bbztxpj). Both TaxReferenceUnavailable (missing or
+    malformed reference file) and ValueError (invalid account_type, e.g. "general" — still
+    structurally possible per AnalysisContext.account_type's Literal, ClickUp 86bbzqud4) are
+    left to propagate uncaught, matching build_precomputed_tax_metrics()'s own fail-loud
+    posture: the "don't invoke this agent" decision belongs one level up, not here.
+
+    reference_path defaults to the same path load_tax_rules_reference() itself defaults to;
+    exposed here (not hardcoded) so a caller can point at a different file, same as that
+    function already supports — including tests exercising the missing-file case without
+    monkeypatching."""
+    _, reference_last_verified = load_tax_rules_reference(reference_path)
+    return build_precomputed_tax_metrics(
+        ticker,
+        account_type,
+        bundle,
+        account_state=account_state,
+        reference_last_verified=reference_last_verified,
+    )
