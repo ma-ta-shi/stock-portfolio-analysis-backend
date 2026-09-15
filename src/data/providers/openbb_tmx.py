@@ -46,9 +46,19 @@ from data.providers.base import (
     NormalizedAnalystEstimates,
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
+    NormalizedInsiderTransaction,
+    period_to_from_date,
 )
 
 logger = structlog.get_logger(__name__)
+
+# TMX `issue_type` code -> NormalizedCompanyInfo.asset_type (86bbpk6uf part 1).
+# Confirmed live 2026-09-10 (CS common / RE REIT / LP partnership-unit ->
+# equity, ET -> etf, PS preferred -> other). Seed values only; an unmapped
+# code logs a warning and defaults to "equity". This is the CA company_info
+# path with no fallback, so a TMX schema change would silently misclassify
+# every CA security as equity — the warning is the only signal.
+_TMX_ISSUE_TYPE = {"CS": "equity", "RE": "equity", "LP": "equity", "ET": "etf", "PS": "other"}
 
 
 class OpenBBTMXProvider(StockDataProvider, NewsProvider):
@@ -68,11 +78,16 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     # ---------- StockDataProvider ----------
 
     async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
+        # `start_date` (not `period`) — the tmx provider ignores `period` and
+        # otherwise caps at ~250 bars (~1y) regardless, which silently starved
+        # weekly_trend and the 3yr drawdown (86bbq7dkv). Confirmed live: with
+        # start_date, RY.TO returns the full requested span (250 -> 753 bars at 3y).
         result = await asyncio.to_thread(
             obb.equity.price.historical,
             symbol=ticker,
             interval=interval,
             provider=self.PROVIDER,
+            start_date=period_to_from_date(period),
         )
         return result.to_df()
 
@@ -92,7 +107,7 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         )
         return result.to_df()
 
-    async def get_company_info(self, ticker: str) -> dict:
+    async def get_company_info(self, ticker: str) -> NormalizedCompanyInfo:
         """Fixed 2026-08-04 (86bb7j0kh) — real bug, confirmed live and
         upstream, in openbb-tmx's own equity_profile.py: its internal
         `symbol_to_index[d["symbol"]]` sort keys the lookup dict off the
@@ -122,7 +137,9 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         API call. industry uses industry_category ("Banking") over the
         finer industry_group ("Diversified Banks") — closer to the
         single-level granularity FMP/yfinance's own `industry` field
-        represents."""
+        represents. asset_type (86bbpk6uf part 1) maps TMX's issue_type
+        code via _TMX_ISSUE_TYPE; an unmapped code warns and falls back to
+        "equity"."""
         bare_symbol = ticker.removesuffix(".TO").removesuffix(".V").replace("-", ".")
         result = await asyncio.to_thread(
             obb.equity.profile, symbol=bare_symbol, provider=self.PROVIDER
@@ -130,6 +147,11 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         if not result.results:
             return {}
         raw = result.results[0].model_dump()
+        # asset_type (86bbpk6uf part 1): map TMX's own issue_type code.
+        issue_type = raw.get("issue_type")
+        asset_type = _TMX_ISSUE_TYPE.get(issue_type, "equity")
+        if issue_type not in _TMX_ISSUE_TYPE:
+            logger.warning("openbb_tmx_unknown_issue_type", issue_type=issue_type, ticker=ticker)
         return NormalizedCompanyInfo(
             name=raw.get("name") or "",
             sector=raw.get("sector") or "",
@@ -138,6 +160,7 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             currency="CAD",
             country=raw.get("hq_country") or raw.get("inc_country") or "",
             primary_exchange=raw.get("stock_exchange") or "",
+            asset_type=asset_type,
         )
 
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
@@ -175,17 +198,30 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     async def get_earnings_surprises(self, ticker: str) -> list[dict]:
         raise NotImplementedError("Earnings-surprise history is not available via openbb-tmx.")
 
-    async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
+    async def get_business_summary(self, ticker: str) -> str | None:
+        raise NotImplementedError(
+            "Business summary is yfinance.py's job — confirmed live to work for CA tickers too"
+        )
+
+    async def get_insider_trading(
+        self, ticker: str, days: int = 90
+    ) -> list[NormalizedInsiderTransaction]:
         """Live-verified 2026-08-04 (86bb7j0kh): real data, but a quarterly
         aggregate rollup per owner (period="three_months" etc.) — TMX never
         populates the shared schema's transaction_date/filing_date fields,
         unlike edgartools' per-transaction Form 4 data. `days` is NOT
         honored here — there's no date to filter against, unlike the
         method's own signature implies (matching edgartools' `days`-
-        filtered contract). Every record is tagged `days_filter_applied:
-        False` so a future caller can tell from the data itself, not just
-        this docstring, that `days` was silently ignored rather than
-        actually applied."""
+        filtered contract). Every record's `date` is None, which is the
+        signal a caller checks (86bbwha5r) — no separate flag needed.
+
+        86bbwha5r: this is now the CA fallback only — CA_CHAINS tries
+        yfinance first (real per-transaction rows) and only reaches this
+        aggregate when yfinance returns empty for a ticker, which happens
+        for real names (confirmed live: AEM.TO, BCE.TO). `acquisition_or_
+        disposition` takes exactly two values, both confirmed live across
+        8 tickers — "sell" (all 8) and "buy" (5 of 8) — no third value ever
+        seen, so the "other" branch below is defensive, not a known gap."""
         result = await asyncio.to_thread(
             obb.equity.ownership.insider_trading, symbol=ticker, provider=self.PROVIDER
         )
@@ -194,9 +230,28 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         df = result.to_df()
         if df.empty:
             return []
-        records = df.to_dict("records")
-        for record in records:
-            record["days_filter_applied"] = False
+        direction_map = {"sell": "sale", "buy": "purchase"}
+        records: list[NormalizedInsiderTransaction] = []
+        for record in df.to_dict("records"):
+            shares = record.get("securities_transacted")
+            value = record.get("trade_value")
+            owner_name = record.get("owner_name")
+            # pd.notna(), not `is not None`/`or ""`: a missing pandas cell
+            # is NaN, not None, and NaN is neither `is None` nor falsy in
+            # Python — both of those checks would silently let a NaN float
+            # through instead of the documented None/"" sentinel.
+            records.append(
+                NormalizedInsiderTransaction(
+                    date=None,
+                    insider_name=owner_name if pd.notna(owner_name) else "",
+                    is_issuer=False,  # this aggregate is per-owner, never the issuer itself
+                    transaction_type=direction_map.get(
+                        record.get("acquisition_or_disposition"), "other"
+                    ),
+                    shares=float(shares) if pd.notna(shares) else None,
+                    value=float(value) if pd.notna(value) else None,
+                )
+            )
         return records
 
     async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
@@ -382,6 +437,19 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
         `.to_df()`'s default columns, so this reads `.results` directly
         (pydantic models) rather than going through the DataFrame.
 
+        Returns the house news shape — `headline` / `summary` / `source` /
+        `url` / `published_at` — matching `finnhub.py::get_news`, not
+        OpenBB's raw `title` / `excerpt` / `date` field names. The only
+        consumer, `precompute/news_id_assignment.py::assign_news_ids()`,
+        keys off `published_at`; before this mapping every Canadian article
+        was silently dropped (86bbqh23f). `summary` is `""` in practice:
+        `excerpt` and `body` are `None` on every Canadian article
+        (headline-only — a QuoteMedia/TMX limitation, not a bug here; it
+        belongs in the reliability discount). `published_at` carries
+        OpenBB's `America/New_York`-local wall clock with tz stripped —
+        consistent within this CA-only list; a CA+US merge (86bbr4azz) must
+        reconcile it against Finnhub's box-local strings.
+
         `limit` is required — confirmed live TMX returns zero results
         without it, `start_date` is silently ignored (accepted by the
         shared OpenBB signature but not honored by the tmx provider) — so
@@ -402,7 +470,17 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             article_date = item.date.replace(tzinfo=None) if item.date else None
             if article_date is not None and article_date < cutoff:
                 continue
-            articles.append(item.model_dump())
+            articles.append(
+                {
+                    "headline": item.title or "",
+                    "summary": item.excerpt or "",
+                    "source": item.source or "",
+                    "url": item.url or "",
+                    "published_at": (
+                        article_date.strftime("%Y-%m-%d %H:%M:%S") if article_date else None
+                    ),
+                }
+            )
         return articles
 
     async def get_analyst_recommendation_trends(self, ticker: str) -> list[dict]:

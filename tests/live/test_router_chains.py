@@ -19,7 +19,9 @@ than in test_provider_completeness.py.
 import pandas as pd
 import pytest
 
+from data.precompute.news_id_assignment import assign_news_ids
 from data.providers.router import Router
+from data.providers.yfinance import YFinanceDataProvider
 
 import tickers as t
 
@@ -151,6 +153,108 @@ async def test_ca_price_history_survives_openbb_tmx_exception_and_falls_back():
     assert source == "yfinance"
 
 
+async def test_ca_price_history_honors_period_not_the_250_bar_default():
+    """86bbq7dkv: openbb_tmx.get_price_history() used to ignore `period` and
+    return OpenBB's ~250-bar default regardless, silently starving
+    weekly_trend and the 3yr drawdown. A 5y request must now return the
+    full span."""
+    async with Router(ticker="RY.TO") as router:
+        result, source = await router._try_chain("get_price_history", "RY.TO", "5y", "1d")
+    assert source == "openbb_tmx"
+    assert len(result) > 500, f"5y request returned only {len(result)} bars — the old 250-cap bug"
+    span_days = (result.index.max() - result.index.min()).days
+    assert span_days > 365 * 3, f"5y request spans only {span_days} days"
+
+
+async def test_price_history_cross_provider_close_alignment():
+    """86bbq7dkv: after aligning yfinance to auto_adjust=False, openbb-tmx
+    and the yfinance adapter return the same (split-adjusted,
+    dividend-unadjusted) close for a CA name."""
+    async with Router(ticker="RY.TO") as router:
+        tmx, _ = await router._try_chain("get_price_history", "RY.TO", "1y", "1d")
+    yf_df = await YFinanceDataProvider().get_price_history("RY.TO", "1y", "1d")
+
+    tmx_close = {
+        (d.date() if hasattr(d, "date") else d): v for d, v in tmx["close"].items()
+    }
+    yf_close = {d.date(): v for d, v in yf_df["Close"].items()}
+    shared = sorted(set(tmx_close) & set(yf_close))
+    assert len(shared) > 100
+    for day in (shared[0], shared[len(shared) // 2], shared[-1]):
+        a, b = tmx_close[day], yf_close[day]
+        assert abs(a - b) / a < 0.005, f"{day}: openbb-tmx {a} vs yfinance {b} — adjustment mismatch"
+
+
+async def test_ca_news_house_shape_survives_id_assignment():
+    """86bbqh23f: openbb_tmx.get_news() used to return OpenBB's raw
+    `date`/`title`/`excerpt` shape, so assign_news_ids() (which keys off
+    `published_at`) silently dropped 100% of Canadian articles. This is
+    the end-to-end guard: real openbb-tmx CA news → real house shape →
+    non-zero survivors. RY.TO, not SHOP.TO — SHOP has no TMX news
+    coverage (tracked on 86bbr4azz)."""
+    async with Router(ticker="RY.TO") as router:
+        raw, source = await router._try_chain("get_news", "RY.TO", 30)
+    assert source == "openbb_tmx"
+    assert not _is_empty(raw), "RY.TO should have real openbb-tmx news coverage"
+    assert all(
+        set(row) == {"headline", "summary", "source", "url", "published_at"} for row in raw
+    ), f"get_news must return the house shape, got keys {sorted(raw[0])}"
+
+    survivors = assign_news_ids(raw)
+    # The bug was a 100% wipeout; > 0 is the real guard. Exact 1:1 survival is
+    # covered deterministically by test_openbb_tmx_house_shape_article_survives —
+    # asserting it here too would make this live test flaky on a single
+    # malformed upstream date.
+    assert len(survivors) > 0, "every CA article was dropped by assign_news_ids — the 86bbqh23f bug"
+    assert all(s["date"] is not None and s["headline"] for s in survivors)
+
+
+# --- CA + US news merge for cross-listed tickers (86bbr4azz) ---
+# Uses router.get_news() itself, not _try_chain — this is what exercises
+# the merge, unlike the single-provider check above.
+
+_WIRE_KEYWORDS = ("newswire", "quotemedia", "business wire")
+
+
+def _is_wire(article: dict) -> bool:
+    return any(k in article["source"].lower() for k in _WIRE_KEYWORDS)
+
+
+async def test_ca_news_merge_ry_has_both_wire_and_independent_journalism():
+    async with Router(ticker="RY.TO") as router:
+        result = await router.get_news("RY.TO", 30)
+    assert any(_is_wire(a) for a in result), "expected CA wire coverage to survive the merge"
+    assert any(not _is_wire(a) for a in result), (
+        "expected independent (non-wire) journalism from the Finnhub side of the merge"
+    )
+
+
+async def test_ca_news_merge_shop_gets_real_coverage_where_tmx_has_none():
+    """SHOP.TO returns 0 articles from openbb-tmx alone (no TMX news
+    coverage for this name, confirmed live) — the sharpest before/after
+    case for this ticket. Post-merge it must have real, non-wire
+    (Finnhub-sourced) articles."""
+    async with Router(ticker="SHOP.TO") as router:
+        result = await router.get_news("SHOP.TO", 30)
+    assert result, "SHOP.TO should have real news via the Finnhub merge even with 0 TMX coverage"
+    assert any(not _is_wire(a) for a in result)
+
+
+async def test_ca_news_merge_cnr_resolves_to_the_real_us_ticker():
+    """CNR.TO's US symbol is CNI (Canadian National Railway) — a naive
+    suffix strip would query Finnhub for "CNR" (Core Natural Resources,
+    an unrelated company). Confirms the merge fetched the right company's
+    news, not just that it fetched something."""
+    async with Router(ticker="CNR.TO") as router:
+        result = await router.get_news("CNR.TO", 30)
+    non_wire = [a for a in result if not _is_wire(a)]
+    assert non_wire, "expected Finnhub-sourced articles in the CNR.TO merge"
+    combined_text = " ".join(a["headline"] + " " + a["summary"] for a in non_wire).lower()
+    assert "canadian national" in combined_text or "cn rail" in combined_text or " cni" in (
+        " " + combined_text
+    ), "merged articles should be about Canadian National Railway, not a different CNR company"
+
+
 async def test_ca_quote_chain_always_serves_from_yfinance():
     """Real finding 2026-08-04: OpenBBTMXProvider has no get_quote method
     at all (confirmed via hasattr) — CA_CHAINS used to list it as the
@@ -164,6 +268,59 @@ async def test_ca_quote_chain_always_serves_from_yfinance():
     assert source == "yfinance"
 
 
+# ---------- asset_type classification (86bbpk6uf part 1) ----------
+# Verifies each provider's own classification signal reaches company_info
+# through the real Router path: FMP isEtf/isFund on the US chain, openbb-tmx
+# issue_type on the CA chain (single-link, no fallback).
+
+
+@pytest.mark.parametrize(
+    "ticker,expected",
+    [
+        ("AAPL", "equity"),
+        (t.US_ETF[0], "etf"),
+        (t.CA_CROSSLISTED[0], "equity"),
+        (t.CA_ETF_SUFFIXED[0], "etf"),
+    ],
+)
+async def test_company_info_asset_type_reaches_through_router(ticker, expected):
+    async with Router(ticker=ticker) as router:
+        result, source = await router._try_chain("get_company_info", ticker)
+    assert not _is_empty(result), f"get_company_info({ticker}) returned empty via {source!r}"
+    assert result["asset_type"] == expected, (
+        f"get_company_info({ticker}) served by {source!r} classified "
+        f"{result['asset_type']!r}, expected {expected!r}"
+    )
+
+
+# ---------- CA insider trading: yfinance-first, openbb_tmx fallback (86bbwha5r) ----------
+# openbb-tmx's CA insider data is a quarterly per-owner aggregate with no
+# date and no per-transaction detail; yfinance has real transactional rows
+# for most CA names. CA_CHAINS now tries yfinance first, falling back to
+# openbb_tmx only when yfinance is genuinely empty for a ticker (confirmed
+# live: AEM.TO, BCE.TO — not a hypothetical case).
+
+
+async def test_ca_insider_trading_prefers_yfinance_when_available():
+    async with Router(ticker=t.CA_CROSSLISTED[0]) as router:
+        result, source = await router._try_chain(
+            "get_insider_trading", t.CA_CROSSLISTED[0], 180
+        )
+    assert not _is_empty(result)
+    assert source == "yfinance"
+    assert result[0]["date"] is not None, "yfinance rows carry a real date; openbb_tmx's never do"
+
+
+async def test_ca_insider_trading_falls_back_to_openbb_tmx_when_yfinance_empty():
+    """AEM.TO confirmed live (2026-09) to have zero rows in yfinance's
+    insider_transactions — a real forcing ticker, not a synthetic one."""
+    async with Router(ticker="AEM.TO") as router:
+        result, source = await router._try_chain("get_insider_trading", "AEM.TO", 180)
+    assert not _is_empty(result)
+    assert source == "openbb_tmx"
+    assert result[0]["date"] is None, "openbb_tmx's aggregate never carries a per-transaction date"
+
+
 # ---------- Ambiguous bare-vs-.TO ticker collisions ----------
 # Router-level, not a single-provider concern — is_canadian_ticker()'s
 # suffix check is what decides which chain (and therefore which company)
@@ -174,14 +331,12 @@ async def test_bare_us_ticker_and_dotted_ca_ticker_resolve_to_different_companie
     """T (NYSE: AT&T) vs T.TO (TSX: TELUS) — confirmed different
     companies; is_canadian_ticker must route them to different chains.
 
-    Uses get_price_history, not get_company_info: real finding 2026-08-04,
-    CA get_company_info is currently broken for real tickers by an
-    upstream openbb-tmx library bug (see test_provider_completeness.py's
-    baseline sweep — RY.TO/etc. all raise a KeyError inside openbb_tmx's
-    own symbol-sorting logic), with no fallback since it's a single-link
-    CA chain. get_price_history has a real fallback link and isn't
-    affected, so it's the reliable way to confirm two different
-    companies here."""
+    Uses get_price_history, not get_company_info: the upstream openbb-tmx
+    symbol-sort KeyError that used to break CA get_company_info was fixed
+    2026-08-04 (86bb7j0kh, the bare-symbol transform — RY.TO/etc. resolve
+    fine now, see test_company_info_asset_type_reaches_through_router
+    above), but get_price_history's real fallback link still makes it the
+    cleaner two-different-companies check."""
     async with Router(ticker=t.AMBIGUOUS_US_TICKER) as us_router:
         us_price, _ = await us_router._try_chain(
             "get_price_history", t.AMBIGUOUS_US_TICKER, "1mo", "1d"

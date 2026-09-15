@@ -224,6 +224,22 @@ async def test_missing_10y_bond_makes_bond_yields_available_false():
 
 
 @pytest.mark.asyncio
+async def test_missing_us_10y_treasury_makes_bond_yields_available_false():
+    """86bawptxa: real bug found live - the payload always renders BOTH
+    10yr yields regardless of which market the subject stock is in, but
+    bond_yields_available used to check only canada_bond_10y. This is the
+    direction the two existing bond_yields_available tests never covered
+    (both only ever varied the Canada side) - a real US treasury outage
+    with a healthy Canada bond feed used to report True even though half
+    the always-rendered yield block would be missing."""
+    fred = _FakeFred({k: v for k, v in _full_fred_series().items() if k != "DGS10"})
+    bundle = await _compute(fred=fred)
+    assert bundle.treasury_10y is None
+    assert bundle.canada_bond_10y is not None
+    assert bundle.bond_yields_available is False
+
+
+@pytest.mark.asyncio
 async def test_totally_empty_fred_and_boc_still_constructs():
     bundle = await _compute(fred=_FakeFred({}), boc=_FakeBoc({}, rates={}, fx={"pair": "CADUSD"}))
     assert bundle.fed_funds_rate is None

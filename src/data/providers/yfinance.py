@@ -11,6 +11,7 @@ from data.providers.base import (
     NormalizedCompanyInfo,
     NormalizedDividendRecord,
     NormalizedFinancials,
+    NormalizedInsiderTransaction,
     NormalizedQuote,
 )
 import time
@@ -123,9 +124,14 @@ class YFinanceDataProvider(StockDataProvider):
     """Abstract base for stock-centric financial data yfinance."""
 
     async def get_price_history(self, ticker: str, period: str, interval: str) -> pd.DataFrame:
+        # auto_adjust=False: keep `Close` the raw (split-adjusted, NOT
+        # dividend-back-adjusted) price, matching openbb-tmx and FMP so a CA
+        # name and a US name are on the same basis (86bbq7dkv). Drop the
+        # `Adj Close` column it adds — we've settled on unadjusted, and this
+        # keeps the column set identical to before.
         stock = yf.Ticker(ticker)
-        history = stock.history(period, interval)
-        return history  # histroy hould be a panda data frame already
+        history = stock.history(period=period, interval=interval, auto_adjust=False)
+        return history.drop(columns=["Adj Close"], errors="ignore")
 
     async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
         stock = yf.Ticker(ticker)
@@ -225,13 +231,13 @@ class YFinanceDataProvider(StockDataProvider):
         invalid ticker, yfinance's .info doesn't raise or come back empty —
         confirmed live it returns a near-empty dict with one unrelated key
         ({'trailingPegRatio': None}), no real data at all. Without a guard,
-        every field below would default to "" and this method would return
-        a full 7-key NormalizedCompanyInfo that LOOKS successful. That
-        breaks router.py's fallback chain: _is_empty()'s len(dict) == 0
-        check can never see a fully-blank-but-7-key dict as empty, so a
-        real FMP failure correctly falling back to yfinance would silently
-        "succeed" with a useless, all-blank result instead of the chain
-        correctly reporting total failure. fmp.py/openbb_tmx.py don't have
+        every field below would default to "" (asset_type to "equity") and
+        this method would return a full 8-key NormalizedCompanyInfo that
+        LOOKS successful. That breaks router.py's fallback chain: _is_empty()'s
+        len(dict) == 0 check can never see a fully-blank-but-8-key dict as
+        empty, so a real FMP failure correctly falling back to yfinance would
+        silently "succeed" with a useless, all-blank result instead of the
+        chain correctly reporting total failure. fmp.py/openbb_tmx.py don't have
         this problem — they already guard with `if not data: return {}`
         before building anything, since their APIs cleanly signal "no
         results" up front. name is the one field a real ticker should
@@ -240,6 +246,13 @@ class YFinanceDataProvider(StockDataProvider):
         info = stock.info
         if not info.get("longName"):
             return {}
+        # asset_type (86bbpk6uf part 1): map yfinance's own quoteType. Past
+        # the longName guard this is a real security, so a missing quoteType
+        # falls back to "equity". yfinance calls every closed-end fund
+        # "EQUITY" (a known, documented gap) — the US path serves those via
+        # FMP's isFund in practice, this branch only runs on an FMP outage.
+        qt = (info.get("quoteType") or "EQUITY").upper()
+        asset_type = {"EQUITY": "equity", "ETF": "etf"}.get(qt, "other")
         # .get(key) or "" (not .get(key, "")) — yfinance's .info can hold an
         # explicit None for these keys, not just omit them; .get(key, "")
         # only covers the omitted case and would silently store None in a
@@ -252,7 +265,20 @@ class YFinanceDataProvider(StockDataProvider):
             currency=info.get("currency") or "",
             country=info.get("country") or "",
             primary_exchange=info.get("exchange") or "",
+            asset_type=asset_type,
         )
+
+    async def get_business_summary(self, ticker: str) -> str | None:
+        """86ban0x1u part 2a: research_sources.py's peer-block business
+        summary. Confirmed live for both CA and US tickers (5 tickers
+        spanning both markets) — unlike FMP's `description`, which is
+        US-only (empty/paywalled for .TO). No length cap here; truncating
+        to the peer-block token budget is research_sources.py's job, not
+        this adapter's — same "adapters stay dumb" split as everywhere
+        else in this file."""
+        stock = yf.Ticker(ticker)
+        summary = stock.info.get("longBusinessSummary")
+        return summary or None
 
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
         """Maps onto NormalizedAnalystEstimates (86bbdu04a). yfinance
@@ -332,17 +358,71 @@ class YFinanceDataProvider(StockDataProvider):
         }
         return ratings_data
 
-    async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
+    # yfinance's CA insider "Text" phrase -> NormalizedInsiderTransaction.
+    # transaction_type (86bbwha5r). Seeded from 8 real CA tickers across 6
+    # sectors (RY.TO, SHOP.TO, T.TO, FTS.TO, WCN.TO, REI-UN.TO, plus AEM.TO/
+    # BCE.TO which had no rows at all). Checked in order, first match wins.
+    # NOT the `Transaction` column — that's an empty string on every one of
+    # ~500 rows checked; the real phrase is in `Text`. "Disposition under a
+    # purchase/ownership plan" still means a SALE — "purchase" there names
+    # the plan type, not the direction.
+    _INSIDER_TEXT_RULES: list[tuple[str, str]] = [
+        ("Exercise of options", "exercise"),
+        ("Disposition", "sale"),
+        ("Sale at price", "sale"),
+        ("Acquisition", "purchase"),
+        # "Purchase at price" (WCN.TO's own plain phrasing, same pattern as
+        # its "Sale at price" — caught live during this ticket's own
+        # verification, not anticipated in the original 8-ticker seed)
+        ("Purchase at price", "purchase"),
+        ("Redemption, retraction, cancelation, repurchase", "buyback"),
+        ("Gift", "gift"),
+        # "Grant of rights" / "Change in nature of ownership" (confirmed live
+        # on REI-UN.TO) fall through to "other" deliberately — neither is a
+        # market transaction with a buy/sell direction.
+    ]
+
+    @classmethod
+    def _classify_insider_text(cls, ticker: str, text) -> str:
+        # `text` is a raw pandas cell, not guaranteed to be a str — a blank
+        # cell is NaN (a float), not None, so `text or ""` alone would
+        # (a) fail to catch it (NaN is truthy) and (b) crash on .strip()
+        # a float. pd.notna() catches both None and NaN correctly.
+        stripped = text.strip() if pd.notna(text) else ""
+        if not stripped:
+            # Confirmed live (RY.TO/SHOP.TO/WCN.TO): a blank Text is common,
+            # often the majority of real rows, not a non-transaction — just
+            # never logged, since "no description was ever scraped" isn't
+            # the same failure as "a description exists and we don't
+            # recognize it." Never classifiable as purchase/sale either way
+            # (confirmed live: blank Text rows never carry a Value either).
+            return "other"
+        for phrase, transaction_type in cls._INSIDER_TEXT_RULES:
+            if phrase in stripped:
+                return transaction_type
+        logger.info("yfinance_unrecognized_insider_text", ticker=ticker, text=stripped)
+        return "other"
+
+    async def get_insider_trading(
+        self, ticker: str, days: int = 90
+    ) -> list[NormalizedInsiderTransaction]:
         """Real, confirmed bug fixed here (found in a later sweep, same
         class as get_dividend_history()'s pre-fix bug): declared
         -> list[dict] (matching StockDataProvider's ABC signature) but
         every code path actually returned a pd.DataFrame — the "no data"
         branch, the "no recognizable date column" branch, and the main
         filtered-results path. Also used print() instead of structlog
-        (CLAUDE.md violation). Currently unreachable via router.py (US
-        routes get_insider_trading to edgartools only, per CLAUDE.md's
-        hard "never FMP" rule; CA routes to openbb_tmx), but a real bug in
-        the adapter regardless — directly callable on its own."""
+        (CLAUDE.md violation).
+
+        86bbwha5r: this is now CA's primary insider source (CA_CHAINS
+        prefers it over openbb_tmx's quarterly aggregate) since it's the
+        only CA source with real per-transaction dates and amounts. Real
+        gap, disclosed in NormalizedInsiderTransaction's own docstring: a
+        meaningful share of real rows have a blank `Text` and land in
+        transaction_type "other", not purchase/sale, because there is
+        nothing else in the raw data to classify them from — this isn't a
+        classifier weakness to fix, it's a real ceiling on what yfinance's
+        scrape captures."""
         stock = yf.Ticker(ticker)
         df_insider = stock.insider_transactions
         if df_insider is None or df_insider.empty:
@@ -353,12 +433,36 @@ class YFinanceDataProvider(StockDataProvider):
         elif "Date" in df_insider.columns:
             date_col = "Date"
         else:
+            # Never observed live across 8 tickers — every real row has one
+            # of these two columns. Fail clean (empty) rather than return
+            # records with no date, so the router falls back to openbb_tmx
+            # instead of silently serving malformed rows.
             logger.warning("yfinance_insider_trading_no_date_column", ticker=ticker)
-            return df_insider.to_dict("records")
+            return []
         df_insider[date_col] = pd.to_datetime(df_insider[date_col])
         cutoff_date = datetime.now() - timedelta(days=days)
         filtered_df = df_insider[df_insider[date_col] >= cutoff_date]
-        return filtered_df.to_dict("records")
+
+        records: list[NormalizedInsiderTransaction] = []
+        for _, row in filtered_df.iterrows():
+            shares = row.get("Shares")
+            value = row.get("Value")
+            insider_name = row.get("Insider")
+            records.append(
+                NormalizedInsiderTransaction(
+                    date=row[date_col].strftime("%Y-%m-%d"),
+                    # `or ""` alone doesn't work here: NaN is truthy in
+                    # Python, unlike None, so a missing Insider cell would
+                    # silently store a float instead of "" without this
+                    # explicit pd.notna() check.
+                    insider_name=insider_name if pd.notna(insider_name) else "",
+                    is_issuer=row.get("Position") == "Issuer",
+                    transaction_type=self._classify_insider_text(ticker, row.get("Text")),
+                    shares=float(shares) if pd.notna(shares) else None,
+                    value=float(value) if pd.notna(value) else None,
+                )
+            )
+        return records
 
     async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
         """

@@ -8,9 +8,6 @@ from data.schemas.canadian_data_flags import CanadianDataFlags
 
 def _flags(**overrides) -> CanadianDataFlags:
     defaults = dict(
-        sentiment_source="finnhub",
-        has_transcript=True,
-        transcript_source="finnhub",
         analyst_count=5,
         news_article_count=12,
         news_sources=["openbb_tmx", "globenewswire"],
@@ -22,49 +19,7 @@ def _flags(**overrides) -> CanadianDataFlags:
 
 def test_valid_construction():
     flags = _flags()
-    assert flags.sentiment_source == "finnhub"
     assert flags.news_sources == ["openbb_tmx", "globenewswire"]
-
-
-@pytest.mark.parametrize("sentiment_source", ["finnhub", "local_llm", "keyword"])
-def test_accepts_all_real_sentiment_sources(sentiment_source):
-    _flags(sentiment_source=sentiment_source)
-
-
-def test_rejects_invalid_sentiment_source():
-    with pytest.raises(ValidationError):
-        _flags(sentiment_source="gpt4")
-
-
-def test_transcript_source_accepts_finnhub():
-    flags = _flags(transcript_source="finnhub")
-    assert flags.transcript_source == "finnhub"
-
-
-def test_transcript_source_accepts_none():
-    """has_transcript=False pairs with transcript_source=None — no
-    transcript, no source to name."""
-    flags = _flags(has_transcript=False, transcript_source=None)
-    assert flags.transcript_source is None
-
-
-def test_transcript_source_rejects_values_other_than_finnhub_or_none():
-    with pytest.raises(ValidationError):
-        _flags(transcript_source="local_llm")
-
-
-def test_rejects_has_transcript_true_with_no_source():
-    """Real gap caught on review: has_transcript=True with
-    transcript_source=None is self-contradictory and must not construct
-    silently — this is exactly the kind of bad upstream data this model
-    exists to catch."""
-    with pytest.raises(ValidationError):
-        _flags(has_transcript=True, transcript_source=None)
-
-
-def test_rejects_has_transcript_false_with_a_source():
-    with pytest.raises(ValidationError):
-        _flags(has_transcript=False, transcript_source="finnhub")
 
 
 def test_rejects_negative_analyst_count():
@@ -101,9 +56,13 @@ def test_forbids_extra_fields():
 
 def test_requires_all_fields_no_implicit_defaults():
     """No field should silently default — every dimension must be
-    explicitly populated by whatever builds this (DataPipeline.prepare())."""
+    explicitly populated by whatever builds this (DataPipeline.prepare()).
+    Uses a real remaining field (analyst_count) — sentiment_source, used
+    here before 86bawptx4 removed it, would now fail for the wrong reason
+    (an unrecognized field, not a missing-required-field case) and this
+    test would silently stop testing what it claims to."""
     with pytest.raises(ValidationError):
-        CanadianDataFlags(sentiment_source="finnhub")
+        CanadianDataFlags(analyst_count=5)
 
 
 # ---------- model_dump() round-trip (ClickUp 86bawp88h) ----------
@@ -111,11 +70,6 @@ def test_requires_all_fields_no_implicit_defaults():
 
 def test_round_trips_through_model_dump():
     flags = _flags()
-    assert CanadianDataFlags.model_validate(flags.model_dump()) == flags
-
-
-def test_round_trips_with_none_transcript_source():
-    flags = _flags(has_transcript=False, transcript_source=None)
     assert CanadianDataFlags.model_validate(flags.model_dump()) == flags
 
 

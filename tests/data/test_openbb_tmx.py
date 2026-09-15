@@ -1,6 +1,9 @@
 import asyncio
+import re
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
+from data.providers.base import period_to_from_date
 from data.providers.openbb_tmx import OpenBBTMXProvider
 from openbb_core.app.model.abstract.error import OpenBBError
 import pandas as pd
@@ -94,14 +97,18 @@ async def test_get_price_history_uses_tmx_provider(provider, mock_obb):
 
 
 @pytest.mark.asyncio
-async def test_get_price_history_passes_ticker_and_interval(provider, mock_obb):
-    """Must forward ticker as `symbol` and interval unchanged."""
+async def test_get_price_history_passes_ticker_interval_and_start_date(provider, mock_obb):
+    """Forward ticker as `symbol`, interval unchanged, and `period` mapped to
+    `start_date` — the tmx provider ignores `period` and otherwise caps at
+    ~250 bars (86bbq7dkv)."""
     fake_df = pd.DataFrame({"close": [1.0]})
     mock_obb.equity.price.historical.return_value = make_obb_result(fake_df)
     await provider.get_price_history(ticker="RY", period="6mo", interval="1wk")
     _, kwargs = mock_obb.equity.price.historical.call_args
     assert kwargs["symbol"] == "RY"
     assert kwargs["interval"] == "1wk"
+    assert kwargs["start_date"] == period_to_from_date("6mo")
+    assert "period" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -175,7 +182,7 @@ async def test_get_financials_returns_dataframe(provider, mock_obb):
 async def test_get_company_info_calls_profile_endpoint(provider, mock_obb):
     """Must call obb.equity.profile."""
     mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Shopify Inc.", "sector": "Tech"}]
+        [{"name": "Shopify Inc.", "sector": "Tech", "issue_type": "CS"}]
     )
     await provider.get_company_info(ticker="SHOP")
     mock_obb.equity.profile.assert_called_once()
@@ -190,7 +197,9 @@ async def test_get_company_info_strips_suffix_and_converts_to_tmx_dot_form(provi
     makes the fetch itself raise KeyError, confirmed live. Must request
     the TMX-native form ("RCI.B") instead — same transform already used
     in get_earnings_calendar."""
-    mock_obb.equity.profile.return_value = make_results_result([{"name": "Rogers Class B"}])
+    mock_obb.equity.profile.return_value = make_results_result(
+        [{"name": "Rogers Class B", "issue_type": "CS"}]
+    )
     await provider.get_company_info(ticker="RCI-B.TO")
     _, kwargs = mock_obb.equity.profile.call_args
     assert kwargs["symbol"] == "RCI.B"
@@ -205,7 +214,7 @@ async def test_get_company_info_returns_dict(provider, mock_obb):
     .to_df()'s buggy internal sort is avoided by requesting the right
     symbol format in the first place (see the transform test above)."""
     mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Shopify Inc.", "sector": "Tech"}]
+        [{"name": "Shopify Inc.", "sector": "Tech", "issue_type": "CS"}]
     )
     result = await provider.get_company_info(ticker="SHOP")
     assert isinstance(result, dict)
@@ -215,7 +224,7 @@ async def test_get_company_info_returns_dict(provider, mock_obb):
 async def test_get_company_info_returns_first_result_only(provider, mock_obb):
     """If multiple results are returned, only the first one's data should be used."""
     mock_obb.equity.profile.return_value = make_results_result(
-        [{"name": "Row One"}, {"name": "Row Two"}]
+        [{"name": "Row One", "issue_type": "CS"}, {"name": "Row Two", "issue_type": "CS"}]
     )
     result = await provider.get_company_info(ticker="SHOP")
     assert result["name"] == "Row One"
@@ -240,6 +249,7 @@ async def test_get_company_info_maps_to_normalized_shape(provider, mock_obb):
                 "stock_exchange": "TSX",
                 "hq_country": None,
                 "inc_country": "CA",
+                "issue_type": "CS",
             }
         ]
     )
@@ -252,7 +262,47 @@ async def test_get_company_info_maps_to_normalized_shape(provider, mock_obb):
         "currency": "CAD",
         "country": "CA",
         "primary_exchange": "TSX",
+        "asset_type": "equity",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "issue_type,expected",
+    [
+        ("CS", "equity"),
+        ("RE", "equity"),
+        ("LP", "equity"),
+        ("ET", "etf"),
+        ("PS", "other"),
+    ],
+)
+async def test_get_company_info_maps_asset_type_from_issue_type(
+    provider, mock_obb, issue_type, expected
+):
+    """86bbpk6uf part 1: TMX's issue_type code drives asset_type."""
+    mock_obb.equity.profile.return_value = make_results_result(
+        [{"name": "Some Security", "issue_type": issue_type}]
+    )
+    result = await provider.get_company_info(ticker="X")
+    assert result["asset_type"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("issue_type", [None, "WT"])  # null, and a code not in the map
+async def test_get_company_info_unknown_issue_type_defaults_equity_and_warns(
+    provider, mock_obb, issue_type
+):
+    """An unmapped/absent issue_type falls back to "equity" (benign) and
+    logs a warning — openbb-tmx is the CA path with no fallback, so this
+    is the only signal a TMX schema change would give."""
+    mock_obb.equity.profile.return_value = make_results_result(
+        [{"name": "Weird Security", "issue_type": issue_type}]
+    )
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_company_info(ticker="WEIRD")
+    assert result["asset_type"] == "equity"
+    assert any(log["event"] == "openbb_tmx_unknown_issue_type" for log in logs)
 
 
 @pytest.mark.asyncio
@@ -628,13 +678,54 @@ async def test_get_insider_trading_calls_ownership_endpoint(provider, mock_obb):
 
 
 @pytest.mark.asyncio
-async def test_get_insider_trading_returns_list_of_dicts(provider, mock_obb):
-    fake_df = pd.DataFrame([{"owner_name": "Ross, Bruce"}, {"owner_name": "McLaughlin, Neil"}])
+async def test_get_insider_trading_maps_normalized_fields(provider, mock_obb):
+    """86bbwha5r: date is always None (TMX gives no per-transaction date,
+    only a quarterly rollup) — that's the signal callers check, replacing
+    the old days_filter_applied flag."""
+    fake_df = pd.DataFrame(
+        [
+            {
+                "owner_name": "Ross, Bruce",
+                "acquisition_or_disposition": "sell",
+                "securities_transacted": 20085,
+                "trade_value": 5684162.7,
+            },
+            {
+                "owner_name": "McLaughlin, Neil",
+                "acquisition_or_disposition": "buy",
+                "securities_transacted": 500,
+                "trade_value": 12345.0,
+            },
+        ]
+    )
     mock_obb.equity.ownership.insider_trading.return_value = make_obb_result(fake_df)
+
     result = await provider.get_insider_trading(ticker="RY.TO")
-    assert isinstance(result, list)
+
     assert len(result) == 2
-    assert all(isinstance(row, dict) for row in result)
+    assert result[0] == {
+        "date": None,
+        "insider_name": "Ross, Bruce",
+        "is_issuer": False,
+        "transaction_type": "sale",
+        "shares": 20085.0,
+        "value": 5684162.7,
+    }
+    assert result[1]["transaction_type"] == "purchase"
+
+
+@pytest.mark.asyncio
+async def test_get_insider_trading_unknown_direction_lands_other(provider, mock_obb):
+    """Defensive only — both real values ("sell"/"buy") are confirmed live
+    across 8 tickers, no third value ever seen."""
+    fake_df = pd.DataFrame(
+        [{"owner_name": "Someone", "acquisition_or_disposition": "unexpected"}]
+    )
+    mock_obb.equity.ownership.insider_trading.return_value = make_obb_result(fake_df)
+
+    result = await provider.get_insider_trading(ticker="RY.TO")
+
+    assert result[0]["transaction_type"] == "other"
 
 
 @pytest.mark.asyncio
@@ -702,14 +793,22 @@ async def test_get_earnings_calendar_no_match_returns_empty_list(provider, mock_
 
 
 def _fake_news_result(articles: list[dict]) -> MagicMock:
+    """`.results` is a list of OpenBB news models. get_news reads
+    `item.title` / `item.excerpt` / `item.source` / `item.url` / `item.date`
+    directly (not `model_dump()`), so this uses SimpleNamespace, not
+    MagicMock — a MagicMock auto-creates a truthy child mock for an unset
+    attribute, which would mask the empty-summary case."""
     result = MagicMock()
-    items = []
-    for article in articles:
-        item = MagicMock()
-        item.date = article.get("date")
-        item.model_dump.return_value = article
-        items.append(item)
-    result.results = items
+    result.results = [
+        SimpleNamespace(
+            title=a.get("title"),
+            excerpt=a.get("excerpt"),
+            source=a.get("source"),
+            url=a.get("url"),
+            date=a.get("date"),
+        )
+        for a in articles
+    ]
     return result
 
 
@@ -730,7 +829,51 @@ async def test_get_news_filters_by_days(provider, mock_obb):
     mock_obb.news.company.return_value = _fake_news_result([recent, old])
     result = await provider.get_news(ticker="RY.TO", days=90)
     assert len(result) == 1
-    assert result[0]["title"] == "Recent"
+    assert result[0]["headline"] == "Recent"
+
+
+@pytest.mark.asyncio
+async def test_get_news_maps_to_house_shape(provider, mock_obb):
+    """Output keys and names match finnhub.py::get_news, not OpenBB's raw
+    title/excerpt/date — the mismatch that dropped 100% of CA news
+    downstream (86bbqh23f)."""
+    now = datetime.now()
+    article = {
+        "date": now - timedelta(days=2),
+        "title": "Bank reports Q3 results",
+        "excerpt": "Summary text.",
+        "source": "PR Newswire via QuoteMedia",
+        "url": "https://money.tmx.com/quote/RY/news/1",
+    }
+    mock_obb.news.company.return_value = _fake_news_result([article])
+    result = await provider.get_news(ticker="RY.TO", days=30)
+    assert len(result) == 1
+    row = result[0]
+    assert set(row) == {"headline", "summary", "source", "url", "published_at"}
+    assert row["headline"] == "Bank reports Q3 results"
+    assert row["summary"] == "Summary text."
+    assert row["source"] == "PR Newswire via QuoteMedia"
+    assert row["url"] == "https://money.tmx.com/quote/RY/news/1"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", row["published_at"])
+
+
+@pytest.mark.asyncio
+async def test_get_news_empty_excerpt_yields_empty_summary(provider, mock_obb):
+    """Every Canadian article has excerpt=None (headline-only, confirmed
+    live) — it must map to "" and the article must NOT be dropped."""
+    now = datetime.now()
+    article = {
+        "date": now - timedelta(days=1),
+        "title": "Canadian headline only",
+        "excerpt": None,
+        "source": "Canada Newswire via QuoteMedia",
+        "url": "https://money.tmx.com/quote/RY/news/2",
+    }
+    mock_obb.news.company.return_value = _fake_news_result([article])
+    result = await provider.get_news(ticker="RY.TO", days=30)
+    assert len(result) == 1
+    assert result[0]["summary"] == ""
+    assert result[0]["headline"] == "Canadian headline only"
 
 
 @pytest.mark.asyncio

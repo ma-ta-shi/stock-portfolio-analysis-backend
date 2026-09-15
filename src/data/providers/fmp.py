@@ -1,5 +1,4 @@
 import os
-import re
 
 import aiohttp
 import pandas as pd
@@ -12,6 +11,7 @@ from data.providers.base import (
     NormalizedDividendRecord,
     NormalizedQuote,
     StockDataProvider,
+    period_to_from_date,
 )
 
 from dotenv import load_dotenv
@@ -26,24 +26,7 @@ BASE_URL = "https://financialmodelingprep.com/stable"
 # FMP has fully migrated off /api/v3/... onto /stable/... (query-param style).
 # Do not add /v3 paths here.
 
-_PERIOD_RE = re.compile(r"^(\d+)(d|mo|y)$")
-_PERIOD_UNIT_DAYS = {"d": 1, "mo": 30, "y": 365}
 _EARNINGS_SURPRISE_LOOKBACK = 4  # matches yfinance's own hard 4-row limit for the same field
-
-
-def _period_to_from_date(period: str) -> str:
-    """FMP's EOD endpoint takes from/to dates, not yfinance-style period tokens
-    (StockDataProvider's ABC signature is shared across both providers)."""
-    if period.lower() == "max":
-        return "1970-01-01"
-    match = _PERIOD_RE.match(period.strip().lower())
-    if not match:
-        raise ValueError(
-            f"Unsupported period '{period}'. Use e.g. '1mo', '6mo', '1y', '5y', or 'max'."
-        )
-    count, unit = match.groups()
-    days = int(count) * _PERIOD_UNIT_DAYS[unit]
-    return (pd.Timestamp.now().normalize() - pd.Timedelta(days=days)).strftime("%Y-%m-%d")
 
 
 class FMPDataProvider(StockDataProvider, NewsProvider):
@@ -147,7 +130,7 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         # FMP's free-tier EOD endpoint is daily-only regardless of `interval` — kept
         # in the signature for StockDataProvider compatibility with yfinance, which
         # does support intraday intervals.
-        from_date = _period_to_from_date(period)
+        from_date = period_to_from_date(period)
         to_date = pd.Timestamp.now().normalize().strftime("%Y-%m-%d")
         data = await self._request(
             "historical-price-eod/full", {"symbol": ticker, "from": from_date, "to": to_date}
@@ -163,12 +146,18 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
         (86bbb001k) — real FMP field names confirmed via openbb_fmp's own
         /profile wrapper (openbb_fmp/models/equity_profile.py's alias dict)
         and cross-checked against a live-observed field in
-        tests/live/test_provider_completeness.py. All 6 canonical fields
-        are present directly, no derivation needed."""
+        tests/live/test_provider_completeness.py. The seven rendered fields
+        are present directly, no derivation needed; asset_type (86bbpk6uf)
+        is derived from FMP's isEtf/isFund booleans."""
         data = await self._request("profile", {"symbol": ticker})
         if not data:
             return {}
         raw = data[0]
+        # asset_type (86bbpk6uf part 1): FMP's /profile carries isEtf/isFund
+        # booleans. isFund covers both mutual funds and closed-end funds
+        # (FMP doesn't distinguish them) -> "other". A US preferred has both
+        # false -> "equity" (a documented gap, rare for this watchlist).
+        asset_type = "etf" if raw.get("isEtf") else ("other" if raw.get("isFund") else "equity")
         # .get(key) or "" (not .get(key, "")) — FMP can return an explicit
         # null for these fields, not just omit the key; .get(key, "") only
         # covers the omitted case and would silently store None in a str field.
@@ -180,6 +169,7 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
             currency=raw.get("currency") or "",
             country=raw.get("country") or "",
             primary_exchange=raw.get("exchange") or "",
+            asset_type=asset_type,
         )
 
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates:
@@ -320,6 +310,12 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
 
     async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
         raise NotImplementedError("Insider trading (Form 4) is edgartools.py's job")
+
+    async def get_business_summary(self, ticker: str) -> str | None:
+        raise NotImplementedError(
+            "Business summary is yfinance.py's job — FMP's description field is "
+            "US-only (confirmed live, empty for .TO tickers) where yfinance covers both markets"
+        )
 
     async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
         raise NotImplementedError("Peers are Finnhub's job — GET /stock/peers")

@@ -4,8 +4,8 @@ import pandas as pd
 import pytest
 import structlog
 
-from data.providers.base import NewsProvider, StockDataProvider
-from data.providers.fmp import FMPDataProvider, _period_to_from_date
+from data.providers.base import NewsProvider, StockDataProvider, period_to_from_date
+from data.providers.fmp import FMPDataProvider
 
 
 # --- Fakes standing in for aiohttp's response/session objects ---
@@ -139,7 +139,8 @@ async def test_request_attaches_api_key_to_query(provider):
     assert params["symbol"] == "AAPL"
 
 
-# --- _period_to_from_date ---
+# --- period_to_from_date (moved to base.py in 86bbq7dkv; still exercised here,
+#     and it's what FMP's get_price_history from-date is built on) ---
 
 
 @pytest.mark.parametrize(
@@ -148,23 +149,24 @@ async def test_request_attaches_api_key_to_query(provider):
         ("1mo", 30),
         ("6mo", 180),
         ("1y", 365),
+        ("3y", 1095),
         ("5y", 1825),
         ("10d", 10),
     ],
 )
 def test_period_to_from_date_valid_periods(period, expected_days_ago):
-    result = pd.Timestamp(_period_to_from_date(period))
+    result = pd.Timestamp(period_to_from_date(period))
     expected = pd.Timestamp.now().normalize() - pd.Timedelta(days=expected_days_ago)
     assert result == expected
 
 
 def test_period_to_from_date_max_returns_epoch():
-    assert _period_to_from_date("max") == "1970-01-01"
+    assert period_to_from_date("max") == "1970-01-01"
 
 
 def test_period_to_from_date_invalid_raises():
     with pytest.raises(ValueError, match="Unsupported period"):
-        _period_to_from_date("banana")
+        period_to_from_date("banana")
 
 
 # --- get_price_history ---
@@ -244,7 +246,35 @@ async def test_get_company_info_maps_to_normalized_shape(provider):
         "currency": "USD",
         "country": "US",
         "primary_exchange": "NASDAQ",
+        "asset_type": "equity",
     }
+
+
+@pytest.mark.parametrize(
+    "profile_extra,expected",
+    [
+        ({"isEtf": True, "isFund": False}, "etf"),
+        ({"isEtf": False, "isFund": True}, "other"),  # MF and CEF both land here
+        ({"isEtf": False, "isFund": False}, "equity"),
+        ({}, "equity"),  # neither key present -> equity
+    ],
+)
+async def test_get_company_info_maps_asset_type_from_is_etf_is_fund(
+    provider, profile_extra, expected
+):
+    """86bbpk6uf part 1: FMP's isEtf/isFund booleans drive asset_type. FMP
+    doesn't distinguish closed-end funds from mutual funds (both isFund)."""
+    _wire(
+        provider,
+        FakeResponse(
+            200,
+            json_data=[{"symbol": "X", "companyName": "X Corp", **profile_extra}],
+        ),
+    )
+
+    info = await provider.get_company_info("X")
+
+    assert info["asset_type"] == expected
 
 
 async def test_get_company_info_paywalled_ticker_returns_empty_dict(provider):

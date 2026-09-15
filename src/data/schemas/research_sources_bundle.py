@@ -51,9 +51,19 @@ class ManagementSignals(ContractModel):
     c_suite_changes_12mo is NonNegativeInt, not bool (changed 2026-08-07,
     contract-vs-consumer audit) — the live Stock Researcher Agent Prompt.md
     renders and reasons about this as a count ("c_suite_changes_12mo=3" in
-    its own worked example), not a flag."""
+    its own worked example), not a flag.
 
-    c_suite_changes_12mo: NonNegativeInt
+    Widened to NonNegativeInt | None (86ban0x1u/2b): no provider exposes
+    structured executive-change data anywhere in this codebase, and a
+    prior version of this exact field once had a roster size rendered
+    into it by mistake — the agent reported "10 C-suite changes in 12
+    months — instability" from that, and the fabricated signal reached
+    the CIO's evidence base verbatim. A plausible-looking number in a
+    field named for a different quantity is worse than a null, because
+    nothing downstream can detect it. research_sources.py always emits
+    None here until a real, grounded derivation exists — do not guess."""
+
+    c_suite_changes_12mo: NonNegativeInt | None
     changes_detail: str
     insider_net_direction_90d: Literal["buying", "neutral", "selling"] | None
     buyback_activity: str
@@ -86,6 +96,21 @@ class ResearchSourcesBundle(ContractModel):
     news_items: list[NewsItem]
     peer_blocks: list[PeerBlock]
     management_signals: ManagementSignals
+
+    # Added 86bawptxh/86bawptxr (2026-09-14): peer_id -> real company name
+    # (e.g. {"PEER_1": "Toronto-Dominion Bank (The)"}). anonymize_content()
+    # already computes exactly this mapping to build PEER_n_COMPANY tokens
+    # in the first place, but build_research_sources() used to discard it
+    # once anonymization finished - leaving deanonymize_text_fields() with
+    # no way to reverse a peer token, only the main COMPANY_X/TICKER_X pair
+    # (which DataBundle.company_info/stock already cover independently).
+    # Re-deriving this at merge time isn't a safe alternative: a fresh
+    # Router.get_peers() call could return a different peer list, and
+    # wouldn't reproduce build_peer_blocks()'s own drop-and-renumber logic
+    # (a peer with nothing citable is dropped, survivors renumber with no
+    # gap) - the only correct source is the exact mapping computed at
+    # anonymization time.
+    peer_names: dict[str, str]
 
     dual_class_flag: bool
     cik_verified: bool
@@ -148,4 +173,21 @@ class ResearchSourcesBundle(ContractModel):
                 raise ValueError(f"{age_name} must be None when {list_name} is empty")
             if count > 0 and age is None:
                 raise ValueError(f"{age_name} must not be None when {list_name} is non-empty")
+        return self
+
+    @model_validator(mode="after")
+    def _check_peer_names_matches_peer_blocks(self) -> "ResearchSourcesBundle":
+        """Unlike the value/age pairings elsewhere in this file (and in
+        MacroSourcesBundle), this mapping isn't ambiguous - peer_names and
+        peer_blocks must always describe exactly the same set of peers, by
+        definition. Bidirectional: an orphaned peer_names entry (no
+        matching block) and a peer_blocks entry missing from peer_names
+        are both real bugs, not just one direction of it."""
+        block_ids = {block.peer_id for block in self.peer_blocks}
+        name_ids = set(self.peer_names)
+        if block_ids != name_ids:
+            raise ValueError(
+                f"peer_names keys {sorted(name_ids)} must exactly match peer_blocks "
+                f"peer_ids {sorted(block_ids)}"
+            )
         return self

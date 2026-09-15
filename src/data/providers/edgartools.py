@@ -1,11 +1,18 @@
 import asyncio
 import os
+from typing import Literal
 
 import pandas as pd
 import structlog
 from edgar import Company, set_identity
 
-from data.providers.base import NormalizedFinancials, StockDataProvider
+from data.providers.base import (
+    NormalizedFilingSection,
+    NormalizedFinancials,
+    NormalizedInsiderTransaction,
+    StockDataProvider,
+)
+from data.providers.ca_crosslisting import get_native_filing_section
 
 logger = structlog.get_logger(__name__)
 
@@ -492,14 +499,30 @@ class EdgarToolsDataProvider(StockDataProvider):
             return None, None
         return inc, cf
 
-    async def get_insider_trading(self, ticker: str, days: int = 90) -> list[dict]:
-        """Transactional-level Form 4 data (date, shares, price, insider name) —
-        not the aggregate-only data openbb-tmx gives for Canadian stocks."""
+    # Form 4 transaction code -> NormalizedInsiderTransaction.transaction_type
+    # (86bbwha5r). Confirmed live (AAPL/MSFT, 180d): real codes seen are
+    # {F, S, G, A, M} — P (open-market purchase) is in the SEC taxonomy but
+    # didn't appear in either sample; mega-cap tech insiders mostly get
+    # compensated in equity, not buying on the open market. A (grant/award)
+    # and F (tax-withholding share delivery) are COMMON, not edge cases —
+    # every row in both live samples fell into this set. Both are
+    # compensation mechanics, not directional market conviction, so mapping
+    # them to "other" (excluded from insider_net_direction_90d, same as
+    # exercise/gift) is deliberate, not an oversight.
+    _FORM4_CODE = {"P": "purchase", "S": "sale", "M": "exercise", "G": "gift"}
+
+    async def get_insider_trading(
+        self, ticker: str, days: int = 90
+    ) -> list[NormalizedInsiderTransaction]:
+        """Transactional-level Form 4 data (date, shares, value, insider name) —
+        not the aggregate-only data openbb-tmx gives for Canadian stocks.
+        is_issuer is always False: Form 4 is filed per insider (a person),
+        never by the issuer itself the way yfinance's CA data can be."""
         company = await asyncio.to_thread(Company, ticker)
         filings = await asyncio.to_thread(lambda: company.get_filings(form="4").head(20))
         cutoff = pd.Timestamp.now() - pd.Timedelta(days=days)
 
-        records: list[dict] = []
+        records: list[NormalizedInsiderTransaction] = []
         for filing in filings:
             try:
                 form4 = await asyncio.to_thread(filing.obj)
@@ -515,17 +538,59 @@ class EdgarToolsDataProvider(StockDataProvider):
             if df is None or df.empty or "Date" not in df.columns:
                 continue
             for _, row in df[df["Date"] >= cutoff].iterrows():
+                shares = float(row["Shares"]) if pd.notna(row["Shares"]) else None
+                price = float(row["Price"]) if pd.notna(row["Price"]) else None
+                insider_name = row.get("Insider")
                 records.append(
-                    {
-                        "date": row["Date"].strftime("%Y-%m-%d"),
-                        "shares": float(row["Shares"]) if pd.notna(row["Shares"]) else None,
-                        "price": float(row["Price"]) if pd.notna(row["Price"]) else None,
-                        "insider_name": row.get("Insider"),
-                        "transaction_type": row.get("Transaction Type"),
-                        "code": row.get("Code"),
-                    }
+                    NormalizedInsiderTransaction(
+                        date=row["Date"].strftime("%Y-%m-%d"),
+                        # `or ""` alone doesn't work here: NaN is truthy in
+                        # Python, unlike None, so a missing Insider cell
+                        # would silently store a float without this check.
+                        insider_name=insider_name if pd.notna(insider_name) else "",
+                        is_issuer=False,
+                        transaction_type=self._FORM4_CODE.get(row.get("Code"), "other"),
+                        shares=shares,
+                        value=shares * price if shares is not None and price is not None else None,
+                    )
                 )
         return records
+
+    # FilingDigest.section's own vocabulary ("Business"/"MDA") -> the
+    # attribute name on edgartools' native parsed-filing object. Keeps the
+    # public parameter matching the schema research_sources.py builds,
+    # not a third naming scheme (86ban0x1u/2a).
+    _SECTION_ATTR = {"Business": "business", "MDA": "management_discussion"}
+
+    async def get_filing_section(
+        self, ticker: str, section: Literal["Business", "MDA"]
+    ) -> NormalizedFilingSection | None:
+        """General US filing-section extraction (86ban0x1u/2a) — the
+        capability `ca_crosslisting.py` already proved for the ~176 CA
+        cross-listed names, now reused for a plain US ticker via the same
+        get_native_filing_section() helper. Real, confirmed gap before
+        this: no code path in the repo returned 10-K/20-F Item 1/Item 7
+        text for a ticker outside the CA crosslisting map.
+
+        Tries `10-K` first, then `20-F` — a ticker with no CA suffix and
+        no crosslisting-map entry isn't necessarily a US domestic filer;
+        20-F is the SEC form for foreign private issuers (confirmed live:
+        BABA has zero 10-K filings and a real 20-F). edgartools' `.business`/
+        `.management_discussion` properties work unchanged across both
+        forms — the library abstracts 20-F's different item numbering
+        (Item 4/5 vs. 10-K's Item 1/7) behind the same attribute names, so
+        no per-form branching is needed here beyond the try order.
+
+        Degrades to None on any failure (no 10-K or 20-F filing, section
+        not present, parse error) — same convention as every other method
+        in this file, and the same as get_crosslisted_mda/
+        get_crosslisted_business_overview's contract for the CA path."""
+        attr = self._SECTION_ATTR[section]
+        for form in ("10-K", "20-F"):
+            result = await get_native_filing_section(ticker, form, attr)
+            if result is not None:
+                return result
+        return None
 
     # Out of scope for edgartools — SEC EDGAR has no price, profile, estimates,
     # ratings, peer, earnings-calendar, or dividend data. That's fmp.py's job
@@ -535,6 +600,11 @@ class EdgarToolsDataProvider(StockDataProvider):
 
     async def get_company_info(self, ticker: str) -> dict:
         raise NotImplementedError("Company info is out of scope for edgartools — use fmp.py")
+
+    async def get_business_summary(self, ticker: str) -> str | None:
+        raise NotImplementedError(
+            "Business summary is out of scope for edgartools — use yfinance.py"
+        )
 
     async def get_analyst_estimates(self, ticker: str) -> dict:
         raise NotImplementedError("Analyst estimates are out of scope for edgartools — use fmp.py")

@@ -14,8 +14,8 @@ the payload's news line is `N{num} | {date} | {headline} | source: {source}
 | tier: {tier} | sentiment: {sentiment_score_or_none}` - no per-article
 summary field anywhere, and no confidence value is rendered either.
 
-Both US and Finnhub-sourced and (once wired up) CA articles are scored
-identically now: confirmed live that Finnhub's /company-news has no
+US (Finnhub-sourced) and CA (openbb-tmx-sourced, wired 86bbqh23f) articles
+are scored identically: confirmed live that Finnhub's /company-news has no
 sentiment field on the free tier (same gap as Canadian, not a US-only
 one), so this module is the only sentiment source for either market.
 

@@ -31,12 +31,18 @@ logger = structlog.get_logger(__name__)
 # the docs (data-pipeline.md only names the three-tier enum itself), so
 # this is a first-pass design, not sourced from any doc, same disclosure
 # pattern as fundamentals.py's health_rating thresholds. Case-insensitive
-# substring match against the raw `source` string providers return —
-# Finnhub is currently the only working news provider (CA news is a
-# separate, pre-existing gap: openbb_tmx.get_news() raises
-# NotImplementedError) and passes through whatever publisher name Finnhub's
-# API gives, unnormalized. Default is "low": an unrecognized source gets
-# the most conservative tier rather than being assumed reliable.
+# substring match against the raw `source` string providers return, both
+# unnormalized: Finnhub gives a publisher name ("Reuters", "Yahoo"),
+# openbb-tmx gives a wire name suffixed " via QuoteMedia" ("Canada
+# Newswire via QuoteMedia", "PR Newswire via QuoteMedia"). Default is
+# "low": an unrecognized source gets the most conservative tier rather
+# than being assumed reliable.
+#
+# "canada newswire" sits alongside "pr newswire" / "business wire" /
+# "globenewswire": it is the same class of primary-source wire and is
+# openbb-tmx's dominant Canadian source (86bbqh23f — confirmed live it was
+# ~80% of RY.TO's feed and would otherwise all tier "low" while the same
+# feed's PR-Newswire articles tiered "primary").
 #
 # No "sec" entry: a plausible-looking wire-service keyword that was cut on
 # review — Finnhub's company-news `source` field is a publisher name
@@ -48,6 +54,7 @@ _PRIMARY_SOURCE_KEYWORDS = (
     "pr newswire",
     "business wire",
     "globenewswire",
+    "canada newswire",
     "reuters",
 )
 _SECONDARY_SOURCE_KEYWORDS = (
@@ -74,24 +81,22 @@ def classify_quality_tier(source: str) -> str:
 
 
 def _parse_published_at(value: Any) -> datetime | None:
-    """Providers currently return published_at as a string formatted
-    "%Y-%m-%d %H:%M:%S" (per finnhub.py's get_news) — a real datetime is
-    also accepted defensively, since a fixed CA provider could return one
-    directly. Returns None for anything else (missing, malformed).
+    """Both wired providers return published_at as a string formatted
+    "%Y-%m-%d %H:%M:%S" (finnhub.py and, since 86bbqh23f, openbb_tmx.py) —
+    a real datetime is also accepted defensively, in case a future provider
+    returns one directly. Returns None for anything else (missing,
+    malformed).
 
-    Real datetimes are normalized to naive UTC before returning: Finnhub's
-    strings always parse naive, but NewsItem's own contract docstring
-    (data.schemas.common) notes openbb-tmx's news results carry tz-aware
-    timestamps. Once CA news is wired up, a single article list could mix
-    both — sorting naive against tz-aware datetimes raises TypeError, so
-    every date is normalized to the same shape here rather than deferred
-    to the sort call. Converting to UTC first (not just stripping tzinfo)
-    matters for correctness, not just avoiding the crash: a bare
-    `.replace(tzinfo=None)` keeps the original wall-clock numbers, which
-    would silently sort a tz-aware article hours out of true chronological
-    order relative to Finnhub's already-naive timestamps instead of
-    raising — a wrong-but-quiet result is worse than the exception this
-    normalization exists to prevent."""
+    A datetime with tzinfo is converted to UTC then stripped to naive
+    (not a bare `.replace(tzinfo=None)`, which would keep the wrong
+    wall-clock numbers and silently mis-sort). The string path parses
+    naive as-is.
+
+    KNOWN, out of scope here (86bbr4azz): the two providers' strings are
+    not the same reference — Finnhub emits box-local time, openbb-tmx
+    emits America/New_York wall clock. Sorting a CA-only or US-only list
+    is fine; a merged CA+US list would mis-sort by the offset. 86bbr4azz,
+    which builds that merge, must reconcile the two."""
     if isinstance(value, datetime):
         if value.tzinfo is not None:
             value = value.astimezone(UTC)
@@ -147,10 +152,11 @@ def assign_news_ids(articles: list[dict]) -> list[dict]:
             # downstream) because this function sorts and drops unparseable-date
             # articles - its output is neither the same length nor order as the
             # input, so a caller can't zip back to the original raw article by
-            # position afterward. Finnhub's field name only, not CA-tolerant
-            # (openbb_tmx.get_news() raises NotImplementedError today, so a CA
-            # article shape can't reach this code yet - ClickUp 86ban0wf4).
-            # No "url" field - considered, cut: nothing anywhere actually reads it.
+            # position afterward. Both providers emit `summary` in the house shape
+            # (86bbqh23f wired openbb-tmx to it), but CA `summary` is near-always
+            # "" - openbb-tmx/QuoteMedia articles are headline-only - so CA
+            # scoring runs on the headline alone; sentiment.py treats `text` as
+            # optional. No "url" field - considered, cut: nothing reads it.
             "text": article.get("summary", ""),
         }
         for i, (published_at, article) in enumerate(dated_articles, start=1)

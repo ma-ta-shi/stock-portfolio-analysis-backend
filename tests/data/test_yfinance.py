@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+import structlog
 
 from data.providers.yfinance import YFinanceDataProvider
 
@@ -23,7 +24,10 @@ class FakeTicker:
         insider_transactions: pd.DataFrame | None = None,
         calendar: dict | None = None,
         earnings_history: pd.DataFrame | None = None,
+        price_history: pd.DataFrame | None = None,
     ) -> None:
+        self._price_history = _empty_if_none(price_history)
+        self.history_calls: list[dict] = []
         self.info = info or {}
         self.quarterly_financials = _empty_if_none(quarterly_financials)
         self.financials = _empty_if_none(financials)
@@ -44,6 +48,10 @@ class FakeTicker:
             raise KeyError("quoteType not found")  # real yfinance failure mode
         return self._fast_info
 
+    def history(self, *args, **kwargs) -> pd.DataFrame:
+        self.history_calls.append({"args": args, "kwargs": kwargs})
+        return self._price_history
+
 
 def _empty_if_none(df: pd.DataFrame | None) -> pd.DataFrame:
     return df if df is not None else pd.DataFrame()
@@ -58,6 +66,46 @@ def _patch_ticker(monkeypatch, ticker_factory) -> None:
     monkeypatch.setattr("data.providers.yfinance.yf.Ticker", ticker_factory)
 
 
+# --- get_price_history (86bbq7dkv) ---
+
+
+async def test_get_price_history_requests_unadjusted_bar(provider, monkeypatch):
+    """auto_adjust=False so `Close` is the raw split-adjusted, NOT
+    dividend-back-adjusted, price — same basis as openbb-tmx / FMP."""
+    fake = FakeTicker(price_history=pd.DataFrame({"Close": [1.0, 2.0]}))
+    _patch_ticker(monkeypatch, lambda ticker: fake)
+    await provider.get_price_history("AAPL", "5y", "1d")
+    assert fake.history_calls[0]["kwargs"] == {
+        "period": "5y",
+        "interval": "1d",
+        "auto_adjust": False,
+    }
+
+
+async def test_get_price_history_drops_adj_close_column(provider, monkeypatch):
+    """The extra `Adj Close` column auto_adjust=False adds is dropped —
+    the output column set stays what it was before this change."""
+    raw = pd.DataFrame(
+        {
+            "Open": [1.0],
+            "High": [1.0],
+            "Low": [1.0],
+            "Close": [1.0],
+            "Adj Close": [0.95],
+            "Volume": [100],
+            "Dividends": [0.0],
+            "Stock Splits": [0.0],
+        }
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(price_history=raw))
+    result = await provider.get_price_history("AAPL", "1y", "1d")
+    assert "Adj Close" not in result.columns
+    assert list(result.columns) == [
+        "Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"
+    ]
+    assert result["Close"].iloc[0] == 1.0  # the raw close, not the 0.95 adjusted one
+
+
 # --- get_company_info ---
 
 
@@ -70,6 +118,7 @@ async def test_get_company_info_maps_to_normalized_shape(provider, monkeypatch):
         "currency": "USD",
         "country": "United States",
         "exchange": "NMS",
+        "quoteType": "EQUITY",
     }
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
 
@@ -83,7 +132,33 @@ async def test_get_company_info_maps_to_normalized_shape(provider, monkeypatch):
         "currency": "USD",
         "country": "United States",
         "primary_exchange": "NMS",
+        "asset_type": "equity",
     }
+
+
+@pytest.mark.parametrize(
+    "quote_type,expected",
+    [
+        ("EQUITY", "equity"),
+        ("ETF", "etf"),
+        ("MUTUALFUND", "other"),
+        ("INDEX", "other"),
+        ("CURRENCY", "other"),
+        (None, "equity"),  # past the longName guard, a missing quoteType -> equity
+    ],
+)
+async def test_get_company_info_maps_asset_type_from_quote_type(
+    provider, monkeypatch, quote_type, expected
+):
+    """86bbpk6uf part 1: yfinance's own quoteType drives asset_type.
+    NB: yfinance labels every closed-end fund "EQUITY" — a documented gap
+    the US path covers via FMP's isFund."""
+    info = {"longName": "Some Fund", "quoteType": quote_type}
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
+
+    result = await provider.get_company_info("SOME")
+
+    assert result["asset_type"] == expected
 
 
 async def test_get_company_info_no_real_data_returns_empty_dict(provider, monkeypatch):
@@ -91,7 +166,7 @@ async def test_get_company_info_no_real_data_returns_empty_dict(provider, monkey
     invalid ticker's .info isn't literally {} — confirmed live it returns
     a near-empty dict with one unrelated key ({'trailingPegRatio': None}).
     Without the `if not info.get("longName")` guard, this would have built
-    a full 7-key NormalizedCompanyInfo with everything blank, which
+    a full 8-key NormalizedCompanyInfo with everything blank, which
     router.py's _is_empty() (len(dict) == 0) can never detect as empty —
     breaking the fallback chain's ability to recognize total failure."""
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={"trailingPegRatio": None}))
@@ -112,6 +187,40 @@ async def test_get_company_info_missing_secondary_fields_default_gracefully(prov
     assert result["name"] == "Some Co"
     assert result["market_cap"] is None
     assert result["sector"] == ""
+    assert result["asset_type"] == "equity"  # no quoteType in .info -> equity
+
+
+# --- get_business_summary ---
+
+
+async def test_get_business_summary_returns_real_text(provider, monkeypatch):
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(info={"longBusinessSummary": "A leading widget maker."}),
+    )
+
+    result = await provider.get_business_summary("WDGT")
+
+    assert result == "A leading widget maker."
+
+
+async def test_get_business_summary_missing_field_returns_none(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={}))
+
+    result = await provider.get_business_summary("ZZZZ")
+
+    assert result is None
+
+
+async def test_get_business_summary_blank_field_returns_none(provider, monkeypatch):
+    """`or None` normalization: an empty string is treated the same as a
+    missing key, not returned as-is — matches how the Router's _is_empty()
+    check expects "no data" to look for this method."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={"longBusinessSummary": ""}))
+
+    result = await provider.get_business_summary("ZZZZ")
+
+    assert result is None
 
 
 # --- normalize_financials ---
@@ -488,25 +597,138 @@ async def test_get_quote_null_currency_defaults_to_empty_string_not_none(provide
 # --- get_insider_trading ---
 
 
-async def test_get_insider_trading_returns_list_of_dicts_within_window(provider, monkeypatch):
-    """Real, confirmed bug fixed here: declared -> list[dict] but every
-    code path actually returned a pd.DataFrame."""
+def _insider_df(rows: list[dict]) -> pd.DataFrame:
+    """Builds a frame with yfinance's real column set (86bbwha5r) — every
+    row gets a default for columns the test doesn't care about, matching
+    real .insider_transactions shape (Shares/Value/Text/Insider/Position/
+    Transaction/Start Date/Ownership)."""
     now = pd.Timestamp.now()
-    df = pd.DataFrame(
-        {
-            "Start Date": [now - pd.Timedelta(days=5), now - pd.Timedelta(days=400)],
-            "Insider": ["Jane Doe", "Old Insider"],
-            "Shares": [100, 50],
-        }
+    defaults = {
+        "Shares": 100,
+        "Value": 1000.0,
+        "Text": "",
+        "Insider": "Jane Doe",
+        "Position": "Director of Issuer",
+        "Transaction": "",  # real yfinance data: always empty, never the phrase field
+        "Start Date": now - pd.Timedelta(days=5),
+        "Ownership": "D",
+    }
+    return pd.DataFrame([{**defaults, **row} for row in rows])
+
+
+async def test_get_insider_trading_maps_normalized_fields_within_window(provider, monkeypatch):
+    """Real, confirmed bug fixed here: declared -> list[dict] but every
+    code path actually returned a pd.DataFrame. 86bbwha5r: now normalizes
+    into NormalizedInsiderTransaction, classifying `Text` (not the always-
+    empty `Transaction` column — a real mix-up caught before shipping)."""
+    now = pd.Timestamp.now()
+    df = _insider_df(
+        [
+            {
+                "Text": "Disposition in the public market at price 199.35 per share.",
+                "Insider": "Jane Doe",
+                "Shares": 100,
+                "Value": 19935.0,
+                "Start Date": now - pd.Timedelta(days=5),
+            },
+            {
+                "Text": "Disposition in the public market at price 100.00 per share.",
+                "Insider": "Old Insider",
+                "Start Date": now - pd.Timedelta(days=400),
+            },
+        ]
     )
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
 
     result = await provider.get_insider_trading("AAPL", days=90)
 
-    assert isinstance(result, list)
-    assert all(isinstance(row, dict) for row in result)
     assert len(result) == 1
-    assert result[0]["Insider"] == "Jane Doe"
+    assert result[0] == {
+        "date": (now - pd.Timedelta(days=5)).strftime("%Y-%m-%d"),
+        "insider_name": "Jane Doe",
+        "is_issuer": False,
+        "transaction_type": "sale",
+        "shares": 100.0,
+        "value": 19935.0,
+    }
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Exercise of options at price 72.08 per share.", "exercise"),
+        ("Disposition in the public market at price 1.00 per share.", "sale"),
+        ("Disposition under a purchase/ownership plan at price 1.00 per share.", "sale"),
+        ("Sale at price 170.00 per share.", "sale"),  # WCN.TO's distinct phrasing, same meaning
+        ("Purchase at price 152.24 per share.", "purchase"),  # WCN.TO's counterpart, caught live
+        ("Acquisition in the public market at price 1.00 per share.", "purchase"),
+        ("Acquisition under a purchase/ownership plan at price 1.00 per share.", "purchase"),
+        ("Redemption, retraction, cancelation, repurchase at price 1.00 per share.", "buyback"),
+        ("Stock Gift at price 0.00 per share.", "gift"),
+        ("Grant of rights at price 1.00 per share.", "other"),  # not a market transaction
+        ("Change in nature of ownership at price 1.00 per share.", "other"),
+    ],
+)
+async def test_get_insider_trading_classifies_real_text_phrases(
+    provider, monkeypatch, text, expected
+):
+    """Every phrase here was observed live across 8 real CA tickers spanning
+    6 sectors (86bbwha5r) — not invented."""
+    df = _insider_df([{"Text": text}])
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    result = await provider.get_insider_trading("RY.TO")
+
+    assert result[0]["transaction_type"] == expected
+
+
+async def test_get_insider_trading_unrecognized_nonempty_text_logs_and_lands_other(
+    provider, monkeypatch
+):
+    df = _insider_df([{"Text": "Some brand new phrase never seen before."}])
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_insider_trading("RY.TO")
+
+    assert result[0]["transaction_type"] == "other"
+    assert any(log["event"] == "yfinance_unrecognized_insider_text" for log in logs)
+
+
+async def test_get_insider_trading_blank_text_lands_other_without_logging(provider, monkeypatch):
+    """86bbwha5r: confirmed live that a blank Text is common (often the
+    majority of real rows, e.g. RY.TO/SHOP.TO/WCN.TO), not rare filler —
+    it must still appear in the output, just uncounted as "unrecognized"
+    since there was never a phrase to fail to recognize."""
+    df = _insider_df([{"Text": "", "Shares": 350000, "Position": "Issuer", "Value": None}])
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    with structlog.testing.capture_logs() as logs:
+        result = await provider.get_insider_trading("RY.TO")
+
+    assert len(result) == 1
+    assert result[0]["transaction_type"] == "other"
+    assert result[0]["shares"] == 350000.0
+    assert result[0]["value"] is None
+    assert not any(log["event"] == "yfinance_unrecognized_insider_text" for log in logs)
+
+
+async def test_get_insider_trading_is_issuer_flags_buybacks(provider, monkeypatch):
+    df = _insider_df(
+        [
+            {
+                "Text": "Redemption, retraction, cancelation, repurchase at price 1.00 per share.",
+                "Insider": "Royal Bank of Canada",
+                "Position": "Issuer",
+            }
+        ]
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    result = await provider.get_insider_trading("RY.TO")
+
+    assert result[0]["is_issuer"] is True
+    assert result[0]["transaction_type"] == "buyback"
 
 
 async def test_get_insider_trading_no_data_returns_empty_list(provider, monkeypatch):
@@ -517,14 +739,17 @@ async def test_get_insider_trading_no_data_returns_empty_list(provider, monkeypa
     assert result == []
 
 
-async def test_get_insider_trading_no_date_column_still_returns_list_of_dicts(provider, monkeypatch):
+async def test_get_insider_trading_no_date_column_returns_empty_list(provider, monkeypatch):
+    """Never observed live across 8 real tickers — every real row has
+    Start Date or Date. 86bbwha5r: changed from returning malformed raw
+    dict rows to a clean [] so the router falls back to openbb_tmx instead
+    of serving rows with no `date` field at all."""
     df = pd.DataFrame({"Insider": ["Jane Doe"], "Shares": [100]})
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
 
     result = await provider.get_insider_trading("AAPL")
 
-    assert isinstance(result, list)
-    assert result == [{"Insider": "Jane Doe", "Shares": 100}]
+    assert result == []
 
 
 # --- get_earnings_calendar ---
