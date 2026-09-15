@@ -341,6 +341,7 @@ class StockDataProvider(ABC):
         `10y`/`max` — valid natively in yfinance and via period_to_from_date
         in the date-range providers. `interval`: `1d` or `1wk`."""
         ...
+
     @abstractmethod
     async def get_financials(self, ticker: str, statement: str, period: str) -> pd.DataFrame:
         """Individual adapters (fmp.py, yfinance.py, edgartools.py, openbb_tmx.py)
@@ -368,6 +369,7 @@ class StockDataProvider(ABC):
         a narrow, single-consumer field, deliberately its own method
         rather than growing a shared 8-consumer-prompt contract."""
         ...
+
     @abstractmethod
     async def get_analyst_estimates(self, ticker: str) -> NormalizedAnalystEstimates: ...
     @abstractmethod
@@ -400,6 +402,7 @@ class StockDataProvider(ABC):
         particular is a quarterly aggregate, not real transactions, and is
         the CA fallback only (CA_CHAINS prefers yfinance)."""
         ...
+
     @abstractmethod
     async def get_peers(self, ticker: str, limit: int = 5) -> list[str]: ...
     @abstractmethod
