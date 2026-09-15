@@ -128,6 +128,26 @@ async def test_us_earnings_calendar_chain_primary_engages():
     assert source == "fmp"
 
 
+async def test_us_smallcap_earnings_calendar_falls_back_to_finnhub():
+    """FMP's bulk feed omits DDD (86bbpgrbz recon: FMP -> []); finnhub is
+    the only working US source for it, once it queries by symbol (86bbpgrjv)."""
+    async with Router(ticker=t.US_FMP_GAP) as router:
+        result, source = await router._try_chain("get_earnings_calendar", t.US_FMP_GAP)
+    assert not _is_empty(result)
+    assert source == "finnhub"
+    assert result[0].get("date")  # the key technicals._earnings_proximity reads
+
+
+async def test_us_smallcap_analyst_estimates_falls_back_to_yfinance():
+    """FMP's free tier 402s /analyst-estimates for non-large-caps; yfinance
+    .info has forwardEps (86bbpgrbz item 2)."""
+    async with Router(ticker=t.US_FMP_GAP) as router:
+        result, source = await router._try_chain("get_analyst_estimates", t.US_FMP_GAP)
+    assert not _is_empty(result)
+    assert source == "yfinance"
+    assert "forward_eps" in result
+
+
 # ---------- CA chains ----------
 # get_price_history: PLAN.V forces openbb_tmx to raise (EmptyDataError,
 # not a clean empty — see test_provider_completeness.py's TSXV test) —
@@ -174,15 +194,15 @@ async def test_price_history_cross_provider_close_alignment():
         tmx, _ = await router._try_chain("get_price_history", "RY.TO", "1y", "1d")
     yf_df = await YFinanceDataProvider().get_price_history("RY.TO", "1y", "1d")
 
-    tmx_close = {
-        (d.date() if hasattr(d, "date") else d): v for d, v in tmx["close"].items()
-    }
+    tmx_close = {(d.date() if hasattr(d, "date") else d): v for d, v in tmx["close"].items()}
     yf_close = {d.date(): v for d, v in yf_df["Close"].items()}
     shared = sorted(set(tmx_close) & set(yf_close))
     assert len(shared) > 100
     for day in (shared[0], shared[len(shared) // 2], shared[-1]):
         a, b = tmx_close[day], yf_close[day]
-        assert abs(a - b) / a < 0.005, f"{day}: openbb-tmx {a} vs yfinance {b} — adjustment mismatch"
+        assert abs(a - b) / a < 0.005, (
+            f"{day}: openbb-tmx {a} vs yfinance {b} — adjustment mismatch"
+        )
 
 
 async def test_ca_news_house_shape_survives_id_assignment():
@@ -250,9 +270,26 @@ async def test_ca_news_merge_cnr_resolves_to_the_real_us_ticker():
     non_wire = [a for a in result if not _is_wire(a)]
     assert non_wire, "expected Finnhub-sourced articles in the CNR.TO merge"
     combined_text = " ".join(a["headline"] + " " + a["summary"] for a in non_wire).lower()
-    assert "canadian national" in combined_text or "cn rail" in combined_text or " cni" in (
-        " " + combined_text
+    assert (
+        "canadian national" in combined_text
+        or "cn rail" in combined_text
+        or " cni" in (" " + combined_text)
     ), "merged articles should be about Canadian National Railway, not a different CNR company"
+
+
+async def test_ca_earnings_calendar_served_by_yfinance_with_a_date():
+    """CA earnings calendar is yfinance-only (openbb_tmx's TMX feed is a
+    ~2-day-forward window, dropped 86bbpgrbz item 1). The reshaped adapter
+    emits a `date` key so technicals._earnings_proximity can read it —
+    without the reshape this chain would resolve non-empty but be a silent
+    no-op downstream."""
+    ca_ticker = t.CA_CROSSLISTED[1]  # SHOP.TO — reliably has a forward date on yfinance
+    async with Router(ticker=ca_ticker) as router:
+        result, source = await router._try_chain("get_earnings_calendar", ca_ticker)
+    assert not _is_empty(result)
+    assert source == "yfinance"
+    for row in result:
+        pd.Timestamp(row["date"])  # raises if the reshaped adapter emitted an unparseable date
 
 
 async def test_ca_quote_chain_always_serves_from_yfinance():
@@ -303,9 +340,7 @@ async def test_company_info_asset_type_reaches_through_router(ticker, expected):
 
 async def test_ca_insider_trading_prefers_yfinance_when_available():
     async with Router(ticker=t.CA_CROSSLISTED[0]) as router:
-        result, source = await router._try_chain(
-            "get_insider_trading", t.CA_CROSSLISTED[0], 180
-        )
+        result, source = await router._try_chain("get_insider_trading", t.CA_CROSSLISTED[0], 180)
     assert not _is_empty(result)
     assert source == "yfinance"
     assert result[0]["date"] is not None, "yfinance rows carry a real date; openbb_tmx's never do"
@@ -319,6 +354,42 @@ async def test_ca_insider_trading_falls_back_to_openbb_tmx_when_yfinance_empty()
     assert not _is_empty(result)
     assert source == "openbb_tmx"
     assert result[0]["date"] is None, "openbb_tmx's aggregate never carries a per-transaction date"
+
+
+# ---------- CA analyst ratings + short interest (86bbpgrxh) ----------
+# CA_CHAINS["get_analyst_ratings"] = ["openbb_tmx", "yfinance"] — openbb-tmx's
+# consensus row is the richer CA source and leads; yfinance is the fallback.
+# get_short_interest is yfinance-only on both branches.
+
+
+async def test_ca_analyst_ratings_served_by_openbb_tmx_with_a_real_target():
+    async with Router(ticker=t.DIVIDEND_PAYER_CA) as router:
+        result, source = await router._try_chain("get_analyst_ratings", t.DIVIDEND_PAYER_CA)
+    assert not _is_empty(result)
+    assert source == "openbb_tmx"
+    assert result["target_mean"] is not None
+
+
+async def test_ca_thin_coverage_ticker_analyst_ratings_falls_back_to_yfinance():
+    """MKO.V has no TMX consensus row (openbb_tmx → {}) but yfinance still
+    has a 1-analyst rating for it — the chain must fall back past the empty
+    first link and serve the yfinance result, not stop at {}."""
+    async with Router(ticker=t.LOW_ANALYST_COVERAGE) as router:
+        result, source = await router._try_chain("get_analyst_ratings", t.LOW_ANALYST_COVERAGE)
+    assert not _is_empty(result)
+    assert source == "yfinance"
+
+
+async def test_short_interest_via_router_us_and_ca():
+    async with Router(ticker=t.US_FMP_GAP) as us_router:
+        us_result, us_source = await us_router._try_chain("get_short_interest", t.US_FMP_GAP)
+    async with Router(ticker=t.DIVIDEND_PAYER_CA) as ca_router:
+        ca_result, ca_source = await ca_router._try_chain("get_short_interest", t.DIVIDEND_PAYER_CA)
+    assert us_source == "yfinance" and us_result["short_interest_pct"] is not None
+    # CA shortPercentOfFloat is None from yfinance but the adapter derives
+    # it from sharesShort / floatShares — so this is a real number, not None.
+    assert ca_source == "yfinance" and ca_result["short_interest_pct"] is not None
+    assert ca_result["days_to_cover"] is not None
 
 
 # ---------- Ambiguous bare-vs-.TO ticker collisions ----------

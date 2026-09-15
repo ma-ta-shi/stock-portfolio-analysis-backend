@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 import structlog
 
+from data.providers.base import canonical_rating
 from data.providers.yfinance import YFinanceDataProvider
 
 
@@ -25,6 +26,7 @@ class FakeTicker:
         calendar: dict | None = None,
         earnings_history: pd.DataFrame | None = None,
         price_history: pd.DataFrame | None = None,
+        recommendations: pd.DataFrame | None = None,
     ) -> None:
         self._price_history = _empty_if_none(price_history)
         self.history_calls: list[dict] = []
@@ -41,6 +43,7 @@ class FakeTicker:
         self.insider_transactions = _empty_if_none(insider_transactions)
         self.calendar = calendar if calendar is not None else {}
         self.earnings_history = _empty_if_none(earnings_history)
+        self.recommendations = _empty_if_none(recommendations)
 
     @property
     def fast_info(self) -> dict:
@@ -101,7 +104,13 @@ async def test_get_price_history_drops_adj_close_column(provider, monkeypatch):
     result = await provider.get_price_history("AAPL", "1y", "1d")
     assert "Adj Close" not in result.columns
     assert list(result.columns) == [
-        "Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "Dividends",
+        "Stock Splits",
     ]
     assert result["Close"].iloc[0] == 1.0  # the raw close, not the 0.95 adjusted one
 
@@ -394,7 +403,9 @@ async def test_normalize_financials_maps_net_income_common(provider, monkeypatch
     assert result.quarters[0]["net_income_common"] == 235.0
 
 
-async def test_normalize_financials_currency_is_financial_currency_not_trading(provider, monkeypatch):
+async def test_normalize_financials_currency_is_financial_currency_not_trading(
+    provider, monkeypatch
+):
     """A Canadian-listed, USD-reporting company (ATD.TO, NTR.TO, ...) has
     info["currency"] == "CAD" but statement line items in USD. NormalizedFinancials
     must carry the financial currency so compute_all()'s guard catches the
@@ -755,28 +766,58 @@ async def test_get_insider_trading_no_date_column_returns_empty_list(provider, m
 # --- get_earnings_calendar ---
 
 
-async def test_get_earnings_calendar_returns_list_of_dicts(provider, monkeypatch):
-    """Real, confirmed bug fixed here: declared -> list[dict] but every
-    code path actually returned a single dict, never a list."""
+async def test_get_earnings_calendar_maps_to_date_symbol_rows(provider, monkeypatch):
+    """86bbpgrbz item 1: one {date, symbol} row per date — `date` is the
+    ISO string technicals._earnings_proximity reads."""
     _patch_ticker(
         monkeypatch,
         lambda ticker: FakeTicker(
             calendar={
                 "Earnings Date": [pd.Timestamp("2026-11-05")],
-                "Earnings Average": 1.5,
-                "Earnings High": 1.7,
-                "Earnings Low": 1.3,
-                "Revenue Average": 90_000_000_000,
+                "Earnings Average": 1.5,  # yfinance carries this; we no longer emit it
             }
+        ),
+    )
+
+    result = await provider.get_earnings_calendar("RY.TO")
+
+    assert result == [{"date": "2026-11-05", "symbol": "RY.TO"}]
+
+
+async def test_get_earnings_calendar_emits_one_row_per_date(provider, monkeypatch):
+    """yfinance sometimes gives a two-date range it isn't sure between —
+    emit both; the consumer picks the earlier."""
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(
+            calendar={"Earnings Date": [pd.Timestamp("2026-11-05"), pd.Timestamp("2026-11-07")]}
         ),
     )
 
     result = await provider.get_earnings_calendar("AAPL")
 
-    assert isinstance(result, list)
-    assert len(result) == 1
-    assert result[0]["Upcoming Earnings Dates"] == ["2026-11-05"]
-    assert result[0]["EPS Estimate"] == 1.5
+    assert result == [
+        {"date": "2026-11-05", "symbol": "AAPL"},
+        {"date": "2026-11-07", "symbol": "AAPL"},
+    ]
+
+
+async def test_get_earnings_calendar_skips_unusable_date_values(provider, monkeypatch):
+    """NaT (yfinance's "unknown date"), None, and a non-list Earnings Date
+    all degrade to a clean result rather than a "NaT" string row or a crash."""
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(calendar={"Earnings Date": [pd.NaT, pd.Timestamp("2026-11-05")]}),
+    )
+    assert await provider.get_earnings_calendar("AAPL") == [
+        {"date": "2026-11-05", "symbol": "AAPL"}
+    ]
+
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(calendar={"Earnings Date": "2026-11-05"}),  # scalar, not a list
+    )
+    assert await provider.get_earnings_calendar("AAPL") == []
 
 
 async def test_get_earnings_calendar_no_data_returns_empty_list(provider, monkeypatch):
@@ -826,9 +867,7 @@ async def test_get_earnings_surprises_maps_history_to_normalized_shape(provider,
             "epsDifference": [0.08, 0.17],
             "surprisePercent": [0.0452, 0.0634],
         },
-        index=pd.Index(
-            [pd.Timestamp("2025-09-30"), pd.Timestamp("2025-12-31")], name="quarter"
-        ),
+        index=pd.Index([pd.Timestamp("2025-09-30"), pd.Timestamp("2025-12-31")], name="quarter"),
     )
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(earnings_history=eh))
 
@@ -885,3 +924,171 @@ async def test_get_earnings_surprises_no_data_returns_empty_list(provider, monke
     result = await provider.get_earnings_surprises("ZZZZ")
 
     assert result == []
+
+
+# --- get_analyst_ratings (86bbpgrxh) ---
+
+
+def _recs(strong_buy, buy, hold, sell, strong_sell) -> pd.DataFrame:
+    """yfinance .recommendations — row 0 is period '0m' (current month)."""
+    return pd.DataFrame(
+        {
+            "period": ["0m", "-1m"],
+            "strongBuy": [strong_buy, 0],
+            "buy": [buy, 0],
+            "hold": [hold, 0],
+            "sell": [sell, 0],
+            "strongSell": [strong_sell, 0],
+        }
+    )
+
+
+async def test_get_analyst_ratings_maps_info_and_recommendations(provider, monkeypatch):
+    """target_mean / num_analysts / rating from .info; buy/hold/sell folded
+    from .recommendations row 0 (strongBuy+buy, hold, sell+strongSell).
+    Field names + shapes confirmed live 2026-09-08 (AAPL)."""
+    info = {
+        "targetMeanPrice": 245.3,
+        "numberOfAnalystOpinions": 38,
+        "recommendationKey": "buy",
+        "recommendationMean": 2.05,
+    }
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(info=info, recommendations=_recs(6, 18, 13, 3, 3)),
+    )
+
+    result = await provider.get_analyst_ratings("AAPL")
+
+    assert result == {
+        "consensus_rating": "buy",
+        "num_analysts": 38,
+        "target_mean": 245.3,
+        "buy_count": 24,
+        "hold_count": 13,
+        "sell_count": 6,
+    }
+
+
+async def test_get_analyst_ratings_falls_back_to_recommendation_mean(provider, monkeypatch):
+    """When recommendationKey is missing/unrecognised, the published
+    recommendationMean (1.0-5.0) is bucketed instead."""
+    info = {"targetMeanPrice": 100.0, "numberOfAnalystOpinions": 4, "recommendationMean": 1.3}
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
+
+    result = await provider.get_analyst_ratings("DDD")
+
+    assert result["consensus_rating"] == "strong_buy"
+    assert result["buy_count"] is None  # no .recommendations
+
+
+async def test_get_analyst_ratings_empty_info_returns_empty_dict(provider, monkeypatch):
+    """Bare {}, not the old fixed 4-key junk dict — Router._is_empty()
+    must see a failed lookup as empty so the CA fallback chain works."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={}))
+
+    result = await provider.get_analyst_ratings("ZZZZ")
+
+    assert result == {}
+
+
+# --- get_short_interest (86bbpgrxh) ---
+
+
+async def test_get_short_interest_maps_info_fields(provider, monkeypatch):
+    """shortPercentOfFloat is a fraction (× 100, rounded to 2dp);
+    dateShortInterest / sharesShortPreviousMonthDate are epoch seconds.
+    Confirmed live 2026-09-08 (DDD)."""
+    info = {
+        "shortPercentOfFloat": 0.2719,
+        "floatShares": 160_000_000,
+        "shortRatio": 13.07,
+        "sharesShort": 30_000_000,
+        "sharesShortPriorMonth": 28_000_000,
+        "dateShortInterest": 1786665600,
+        "sharesShortPreviousMonthDate": 1784073600,
+    }
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
+
+    result = await provider.get_short_interest("DDD")
+
+    assert result == {
+        "short_interest_pct": 27.19,
+        "days_to_cover": 13.07,
+        "shares_short": 30_000_000,
+        "shares_short_prior_month": 28_000_000,
+        "as_of_date": "2026-08-14",
+        "prior_month_date": "2026-07-15",
+    }
+
+
+async def test_get_short_interest_derives_ca_pct_from_float_when_yfinance_field_is_none(
+    provider, monkeypatch
+):
+    """yfinance shortPercentOfFloat is always None for .TO / .V — fall back
+    to sharesShort / floatShares × 100 (validated live to match yfinance's
+    own field to 2dp on tickers where both exist)."""
+    info = {
+        "shortPercentOfFloat": None,
+        "floatShares": 1_383_128_435,
+        "shortRatio": 4.04,
+        "sharesShort": 10_731_072,
+        "sharesShortPriorMonth": 8_445_728,
+        "dateShortInterest": 1788134400,
+        "sharesShortPreviousMonthDate": 1785456000,
+    }
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
+
+    result = await provider.get_short_interest("RY.TO")
+
+    assert result["short_interest_pct"] == pytest.approx(0.78, abs=0.01)
+    assert result["days_to_cover"] == 4.04
+    assert result["shares_short"] == 10_731_072
+    assert result["prior_month_date"] == "2026-07-31"
+
+
+async def test_get_short_interest_pct_none_when_no_percent_and_no_float(provider, monkeypatch):
+    """No shortPercentOfFloat and no floatShares to derive from — pct is
+    None, but days_to_cover keeps the row non-empty."""
+    info = {"shortPercentOfFloat": None, "shortRatio": 2.0, "sharesShort": 100}
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info=info))
+
+    result = await provider.get_short_interest("THIN.V")
+
+    assert result["short_interest_pct"] is None
+    assert result["days_to_cover"] == 2.0
+
+
+async def test_get_short_interest_no_data_returns_empty_dict(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(info={}))
+
+    result = await provider.get_short_interest("ZZZZ")
+
+    assert result == {}
+
+
+# --- canonical_rating (86bbpgrxh) — shared by yfinance + openbb-tmx ---
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("strong_buy", "strong_buy"),  # yfinance recommendationKey
+        ("buy", "buy"),
+        ("hold", "hold"),
+        ("underperform", "sell"),  # yfinance's word for sell
+        ("sell", "sell"),
+        ("StrongBuy", "strong_buy"),  # openbb-tmx consensus_action (CamelCase)
+        ("Buy", "buy"),
+        ("Neutral", "hold"),  # openbb-tmx's live value for a hold consensus (T.TO, LSPD.TO)
+        ("StrongSell", "strong_sell"),
+        ("none", None),  # yfinance's "no coverage" value fails safe
+        ("N/A", None),
+        ("Reduce", None),  # not a confirmed emitter — fails safe rather than guessing
+        ("", None),
+        (None, None),
+        ("something weird", None),
+    ],
+)
+def test_canonical_rating(raw, expected):
+    assert canonical_rating(raw) == expected
