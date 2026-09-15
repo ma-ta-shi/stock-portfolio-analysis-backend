@@ -380,7 +380,23 @@ async def test_get_metric_no_data_returns_empty_dict(provider):
 # --- get_earnings_calendar ---
 
 
-async def test_get_earnings_calendar_filters_bulk_response_by_ticker(provider):
+async def test_get_earnings_calendar_queries_by_symbol_within_a_window(provider):
+    """86bbpgrjv: the request must carry `symbol` (plus from/to). Without
+    it Finnhub returns a bulk feed capped at ~1500 rows that omits the
+    requested ticker, so the old client-side filter matched nothing."""
+    payload = {"earningsCalendar": [{"symbol": "DDD", "date": "2026-11-02", "epsEstimate": -0.04}]}
+    session = _wire(provider, FakeResponse(200, json_data=payload))
+
+    result = await provider.get_earnings_calendar("DDD")
+
+    _, params = session.calls[0]
+    assert params["symbol"] == "DDD"
+    assert "from" in params and "to" in params
+    assert result == [{"symbol": "DDD", "date": "2026-11-02", "epsEstimate": -0.04}]
+
+
+async def test_get_earnings_calendar_filters_response_by_ticker(provider):
+    """Client-side filter kept as a cheap guard against a stray row."""
     payload = {"earningsCalendar": [{"symbol": "RKT"}, {"symbol": "UBER"}, {"symbol": "SONY"}]}
     _wire(provider, FakeResponse(200, json_data=payload))
 
