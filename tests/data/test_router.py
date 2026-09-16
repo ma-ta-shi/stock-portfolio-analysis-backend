@@ -227,6 +227,29 @@ async def test_index_price_history_override_applies_even_when_router_built_for_a
     assert router.sources_used["get_price_history"] == "yfinance"
 
 
+@pytest.mark.parametrize(
+    "ticker", ["XLK", "XLF", "XLV", "XLP", "XLY", "XLI", "XLE", "XLB", "XLRE", "XLU", "XLC"]
+)
+async def test_sector_etf_price_history_override_skips_fmp(ticker):
+    """Every SPDR US sector ETF (86bawpty3's sector_etf_price resolution)
+    must never try FMP: confirmed live every one 402s on FMP's free tier
+    (the same ETF paywall CLAUDE.md already documents), a guaranteed-wasted
+    call US_CHAINS's normal ordering would otherwise make on every
+    sector-relative-strength fetch for a US stock."""
+    fmp_calls, fmp_get_price_history = _tracked_empty()
+    router = Router(
+        ticker=ticker,
+        fmp=FakeProvider(get_price_history=fmp_get_price_history),
+        edgartools=FakeProvider(),
+        finnhub=FakeProvider(),
+        yfinance=FakeProvider(get_price_history=_ok(pd.DataFrame({"close": [100]}))),
+    )
+    result = await router.get_price_history(ticker, "1y", "1d")
+    assert fmp_calls == [], f"fmp.get_price_history must never be invoked for {ticker}"
+    assert list(result["close"]) == [100]
+    assert router.sources_used["get_price_history"] == "yfinance"
+
+
 async def test_chain_falls_back_on_empty_result():
     router = Router(
         ticker="AAPL",

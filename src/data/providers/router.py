@@ -61,7 +61,7 @@ _INDEX_TICKER_IS_CANADIAN: dict[str, bool] = {
     "^GSPC": False,  # S&P 500
 }
 
-# get_price_history-only override for index symbols whose primary CA_CHAINS
+# get_price_history-only override for index/ETF symbols whose primary chain
 # link can never serve them. Confirmed live (2026-09-15): openbb_tmx is a
 # TSX-equity endpoint and raises EmptyDataError for ^GSPTSE every time — a
 # clean, caught failure, but a guaranteed-wasted call on every CA benchmark
@@ -73,8 +73,28 @@ _INDEX_TICKER_IS_CANADIAN: dict[str, bool] = {
 # with — unlike is_ca (fixed once at construction), this override is safe
 # even when one Router instance is reused to fetch a different ticker's
 # (e.g. a benchmark index's) price history.
+#
+# Extended 86bawpty3 with the 11 SPDR US sector ETFs (DataPipeline.prepare()'s
+# sector_etf_price resolution) — confirmed live every one 402s on FMP's free
+# tier (the same ETF paywall CLAUDE.md already documents for other ETFs), so
+# without this override every sector-relative-strength fetch for a US stock
+# would burn a wasted FMP call before falling back to yfinance. No CA
+# equivalent needed: CA_CHAINS never includes fmp at all, so there's nothing
+# to waste there — confirmed live the 9 CA sector ETFs already resolve via
+# openbb_tmx directly, no fallback even triggered.
 _INDEX_PRICE_HISTORY_OVERRIDE: dict[str, list[str]] = {
     "^GSPTSE": ["yfinance"],
+    "XLK": ["yfinance"],  # Technology
+    "XLF": ["yfinance"],  # Financial Services
+    "XLV": ["yfinance"],  # Healthcare
+    "XLP": ["yfinance"],  # Consumer Defensive
+    "XLY": ["yfinance"],  # Consumer Cyclical
+    "XLI": ["yfinance"],  # Industrials
+    "XLE": ["yfinance"],  # Energy
+    "XLB": ["yfinance"],  # Basic Materials
+    "XLRE": ["yfinance"],  # Real Estate
+    "XLU": ["yfinance"],  # Utilities
+    "XLC": ["yfinance"],  # Communication Services
 }
 
 
