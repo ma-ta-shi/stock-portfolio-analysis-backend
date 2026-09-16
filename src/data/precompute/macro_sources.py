@@ -491,11 +491,21 @@ def _cb_stance_note(items: list[CBCommentaryItem]) -> str | None:
 
 
 async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) -> dict:
-    unemployment = await stats_canada.get_unemployment_rate()
-    housing = await stats_canada.get_housing_starts()
-    retail = await stats_canada.get_retail_sales_yoy()
-    cpi_national = await stats_canada.get_cpi_national()
-    gdp_index = await stats_canada.get_real_gdp_index()
+    # Real gap found live (86bawpty3, 2026-09-15): unlike _fetch_cb_commentary's
+    # finnhub call above, these five calls had no error handling at all - a
+    # StatsCanada outage/timeout crashed compute_macro_sources() entirely for
+    # every Canadian stock, rather than degrading to statcan_available=False the
+    # way the rest of this function (and canadian_data_flags.py's own
+    # statcan_available derivation) already assumes a single failed metric can.
+    try:
+        unemployment = await stats_canada.get_unemployment_rate()
+        housing = await stats_canada.get_housing_starts()
+        retail = await stats_canada.get_retail_sales_yoy()
+        cpi_national = await stats_canada.get_cpi_national()
+        gdp_index = await stats_canada.get_real_gdp_index()
+    except Exception:
+        logger.warning("macro_sources_statcan_fetch_failed", exc_info=True)
+        unemployment = housing = retail = cpi_national = gdp_index = None
 
     # statcan_age_days is one field, not one per statcan_* value — no doc
     # says which underlying fetch it should track, so it's taken from

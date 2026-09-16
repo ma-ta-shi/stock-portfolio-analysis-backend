@@ -528,6 +528,40 @@ async def test_statcan_called_and_populated_for_a_canadian_stock():
 
 
 @pytest.mark.asyncio
+async def test_statcan_outage_degrades_gracefully_instead_of_crashing():
+    """Real gap found live (86bawpty3): a StatsCanada network failure used
+    to propagate uncaught out of compute_macro_sources(), crashing the
+    whole CA pipeline instead of degrading to statcan_available=False the
+    way canadian_data_flags.py already expects a StatsCanada outage to
+    behave. Mirrors _BrokenFinnhub's coverage of the same class of bug for
+    the cb_commentary fetch above."""
+
+    class _BrokenStatsCanada:
+        async def get_unemployment_rate(self):
+            raise RuntimeError("statcan is down")
+
+        async def get_housing_starts(self):
+            raise RuntimeError("statcan is down")
+
+        async def get_retail_sales_yoy(self):
+            raise RuntimeError("statcan is down")
+
+        async def get_cpi_national(self):
+            raise RuntimeError("statcan is down")
+
+        async def get_real_gdp_index(self):
+            raise RuntimeError("statcan is down")
+
+    bundle = await _compute(is_canadian_stock=True, stats_canada=_BrokenStatsCanada())
+    assert bundle.statcan_unemployment_ca is None
+    assert bundle.statcan_housing_starts is None
+    assert bundle.statcan_retail_sales_yoy is None
+    assert bundle.canada_cpi is None
+    assert bundle.ca_gdp_qoq is None
+    assert bundle.statcan_age_days is None
+
+
+@pytest.mark.asyncio
 async def test_statcan_age_days_falls_back_to_cpi_or_gdp_when_others_fail():
     """Regression test: unemployment/housing/retail all failing must not
     report statcan_age_days=None if cpi_national/gdp_index actually
