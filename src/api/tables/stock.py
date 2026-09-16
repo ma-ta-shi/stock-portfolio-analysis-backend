@@ -18,5 +18,4 @@ class Stock(Base):
     last_updated: Mapped[datetime] = mapped_column(default=func.now())
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSON)
     # relationships
-    aliases: Mapped[list["StockAlias"]] = relationship(back_populates="stock")
     analysis_runs: Mapped[list["AnalysisRun"]] = relationship(back_populates="stock")

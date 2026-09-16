@@ -1,9 +1,9 @@
-from sqlalchemy import String, JSON, func, ForeignKey
+from sqlalchemy import String, JSON, Text, func, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from api.database import Base
 from uuid import UUID, uuid4
 from datetime import datetime
-from typing import Optional, Text
+from typing import Optional
 
 class Recommendation(Base):
     __tablename__ = "recommendations"
