@@ -21,5 +21,5 @@ from data.schemas.base import ContractModel
 
 
 class AnalysisContext(ContractModel):
-    account_type: Literal["tfsa", "rrsp", "trading", "general"]
+    account_type: Literal["tfsa", "rrsp", "trading"]
     timeline: Literal["short_term", "medium_term", "long_term"]
