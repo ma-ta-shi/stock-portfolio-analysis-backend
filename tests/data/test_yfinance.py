@@ -926,6 +926,37 @@ async def test_get_earnings_surprises_no_data_returns_empty_list(provider, monke
     assert result == []
 
 
+async def test_get_earnings_surprises_nan_surprise_pct_does_not_crash(provider, monkeypatch):
+    """Real crash found live 86bawptye (CSU.TO, MKO.V): a NaN surprisePercent
+    is not None, so the old raw-value check passed, but _safe_float()
+    converted it to None independently - then None * 100 raised TypeError.
+    A quarter with actual/estimated EPS but no surprise percent yet is a
+    real yfinance shape, not a fabricated edge case."""
+    eh = pd.DataFrame(
+        {
+            "epsActual": [1.85],
+            "epsEstimate": [1.76993],
+            "epsDifference": [0.08],
+            "surprisePercent": [float("nan")],
+        },
+        index=pd.Index([pd.Timestamp("2025-09-30")], name="quarter"),
+    )
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(earnings_history=eh))
+
+    result = await provider.get_earnings_surprises("CSU.TO")
+
+    assert result == [
+        {
+            "period_end": "2025-09-30",
+            "eps_actual": 1.85,
+            "eps_estimated": 1.76993,
+            "eps_surprise_pct": None,
+            "revenue_actual": None,
+            "revenue_estimated": None,
+        }
+    ]
+
+
 # --- get_analyst_ratings (86bbpgrxh) ---
 
 

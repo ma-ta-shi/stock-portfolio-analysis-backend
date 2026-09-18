@@ -33,17 +33,19 @@ def build_canadian_data_flags(
     raw dict a caller also assigns to DataBundle.analyst_consensus).
 
     analyst_count: analyst_consensus is Router.get_analyst_ratings()'s real
-    shape for a CA ticker - CA_CHAINS routes this method to yfinance, not
-    openbb-tmx, confirmed live via Router (not the adapter directly, which
-    gives an entirely different, wrong shape with a "total_analysts" key
-    that doesn't exist on the real CA code path). The real key is
-    "rating_breakdown", a dict of {strong_buy, buy, hold, sell, strong_sell}
-    counts - confirmed live for RY.TO/SHOP.TO/WELL.TO (analyst_count
-    15/53/13). yfinance.py's own get_analyst_ratings() sets rating_breakdown
-    to the literal string "No breakdown data available" when its
-    recommendations fetch returns nothing - a real, live-reachable case for
-    a thinly-covered stock, just not one of the three tickers checked - so
-    this guards with isinstance() rather than assuming a dict.
+    shape for a CA ticker (NormalizedAnalystRatings, 86bbpgrxh). CA_CHAINS
+    routes this method to openbb_tmx first (the richer source - target plus
+    a full rating breakdown in one call), yfinance second as fallback; both
+    adapters build the same shape. Real fields are buy_count/hold_count/
+    sell_count (int | None each, strong_buy folded into buy_count and
+    strong_sell into sell_count by both adapters) - not "rating_breakdown",
+    a pre-normalization key that no longer exists anywhere in the codebase
+    (real bug found live 86bawptye: this function read that stale key and
+    silently returned 0 for every Canadian stock). Sum the three counts,
+    treating a missing/None field as 0 - covers both the fully-empty {} case
+    (no data at all) and openbb_tmx's own partial case (target/rating
+    present but one of the three counts missing), which its own early-return
+    guard doesn't catch.
 
     news_article_count/news_sources: from the already-assembled
     ResearchSourcesBundle, not a separate fetch - the original ticket's
@@ -64,8 +66,11 @@ def build_canadian_data_flags(
 
     No sentiment_source parameter - deliberately removed from
     CanadianDataFlags entirely (86bawptx4), see that model's own docstring."""
-    breakdown = analyst_consensus.get("rating_breakdown")
-    analyst_count = sum(breakdown.values()) if isinstance(breakdown, dict) else 0
+    analyst_count = (
+        (analyst_consensus.get("buy_count") or 0)
+        + (analyst_consensus.get("hold_count") or 0)
+        + (analyst_consensus.get("sell_count") or 0)
+    )
     return CanadianDataFlags(
         analyst_count=analyst_count,
         news_article_count=research_sources.news_item_count,

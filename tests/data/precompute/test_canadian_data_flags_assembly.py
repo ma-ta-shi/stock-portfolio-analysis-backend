@@ -117,33 +117,39 @@ def _macro_bundle(statcan_age_days: int | None) -> MacroSourcesBundle:
 
 
 # ---------- analyst_count ----------
-# Real shapes, confirmed live via Router.get_analyst_ratings() for RY.TO/
-# SHOP.TO/WELL.TO - CA_CHAINS routes this to yfinance, not openbb-tmx, so
-# "rating_breakdown" (not "total_analysts") is the real key.
+# Real shape (NormalizedAnalystRatings, 86bbpgrxh): buy_count/hold_count/
+# sell_count, built the same way by both CA_CHAINS links (openbb_tmx first,
+# yfinance fallback). Real bug found live 86bawptye: this used to read a
+# stale "rating_breakdown" key that no longer exists anywhere in the
+# codebase, silently returning 0 for every Canadian stock.
 
 
-def test_analyst_count_sums_real_rating_breakdown_shape():
-    """Real, live-confirmed RY.TO shape."""
+def test_analyst_count_sums_buy_hold_sell_counts():
+    """Same real RY.TO total (15) as before the fix, expressed in the real
+    buy_count/hold_count/sell_count shape - strong_buy(4)+buy(5)=9,
+    hold=5, sell(0)+strong_sell(1)=1, matching both adapters' own folding
+    of strong_buy/strong_sell into buy_count/sell_count."""
     consensus = {
         "symbol": "RY.TO",
         "current_price": 285.2,
-        "consensus": "buy",
-        "rating_breakdown": {"strong_buy": 4, "buy": 5, "hold": 5, "sell": 0, "strong_sell": 1},
+        "consensus_rating": "buy",
+        "buy_count": 9,
+        "hold_count": 5,
+        "sell_count": 1,
     }
     flags = build_canadian_data_flags(_research_bundle([]), _macro_bundle(None), consensus)
     assert flags.analyst_count == 15
 
 
-def test_analyst_count_zero_when_rating_breakdown_is_the_no_data_string():
-    """yfinance.py's own get_analyst_ratings() sets rating_breakdown to the
-    literal string "No breakdown data available" when its recommendations
-    fetch returns nothing - a real, live-reachable case for a thinly-
-    covered stock, not one of the three tickers checked live, so this is a
-    disclosed synthetic fixture for a real shape, not a live-confirmed one.
-    sum() on a string would raise; must guard, not crash."""
-    consensus = {"symbol": "XYZ.TO", "rating_breakdown": "No breakdown data available"}
+def test_analyst_count_sums_available_counts_when_some_are_missing():
+    """Real, live-reachable partial case: openbb_tmx.py's get_analyst_ratings()
+    early-return guard only checks target_mean/num_analysts/buy_count/rating,
+    not hold_count/sell_count - so a real TMX row with buy_ratings set but
+    hold_ratings/sell_ratings missing returns buy_count=5, hold_count=None,
+    sell_count=None, not {}. Sum what's there, treat missing as 0."""
+    consensus = {"buy_count": 5, "hold_count": None, "sell_count": None}
     flags = build_canadian_data_flags(_research_bundle([]), _macro_bundle(None), consensus)
-    assert flags.analyst_count == 0
+    assert flags.analyst_count == 5
 
 
 def test_analyst_count_zero_when_consensus_empty():
@@ -202,14 +208,12 @@ def test_statcan_available_false_when_age_days_none():
 
 def test_full_build_matches_real_ry_to_live_verification():
     """The exact real values confirmed live this session: Router.get_analyst_ratings("RY.TO")
-    -> rating_breakdown -> analyst_count=15; build_research_sources("RY.TO") ->
+    -> buy_count/hold_count/sell_count -> analyst_count=15; build_research_sources("RY.TO") ->
     news_article_count=155 with 7 real distinct sources, sedar_filing_available=True;
     compute_macro_sources(is_canadian_stock=True) -> statcan_age_days=8. Reconstructed as a
     fixture here (not a live call, per this test's own non-live scope) to pin the exact
     real-world shape rather than only a synthetic one."""
-    consensus = {
-        "rating_breakdown": {"strong_buy": 4, "buy": 5, "hold": 5, "sell": 0, "strong_sell": 1}
-    }
+    consensus = {"buy_count": 9, "hold_count": 5, "sell_count": 1}
     sources = [
         "Benzinga",
         "Canada Newswire via QuoteMedia",

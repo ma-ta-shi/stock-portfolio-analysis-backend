@@ -22,6 +22,7 @@ from api.tables.recommendations import Recommendation  # noqa: F401
 from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile  # noqa: F401
 from data.pipeline import DataPipeline, StockNotFoundError
+from data.precompute.tax_metrics import build_tax_metrics_field
 from data.schemas.context import AnalysisContext
 
 pytestmark = pytest.mark.live
@@ -72,6 +73,12 @@ async def test_prepare_real_us_stock():
     # this, only a real run against real data can.
     assert bundle.risk_metrics["max_drawdown_3yr_pct"] is not None
     assert bundle.risk_metrics["beta"] is not None
+    # Real item from the original ticket text: tax_metrics must match what a
+    # standalone call would produce for the same inputs. bundle itself
+    # duck-types build_tax_metrics_field()'s bundle param (it only ever
+    # reads company_info/dividend_history/price_info), so this is a
+    # meaningful check against real data, not circular.
+    assert build_tax_metrics_field("AAPL", "trading", bundle) == bundle.tax_metrics
 
 
 async def test_prepare_real_ca_stock():
@@ -100,6 +107,40 @@ async def test_prepare_real_ca_stock():
     assert bundle.tax_metrics
     assert bundle.risk_metrics["max_drawdown_3yr_pct"] is not None
     assert bundle.risk_metrics["beta"] is not None
+    assert build_tax_metrics_field("RY.TO", "tfsa", bundle) == bundle.tax_metrics
+
+
+async def test_prepare_benchmark_index_as_subject():
+    """Real item from the original ticket text: does prepare() work when the
+    *subject* stock itself is a benchmark index, not just when an index is
+    fetched as a benchmark/sector-ETF input? Genuinely uncertain going in -
+    confirmed via code review that nothing in pipeline.py or Router
+    special-cases an index ticker as the primary subject (only as a
+    benchmark/override target), so this is a real "find out live" check,
+    not a known-safe one."""
+    session = await _make_session()
+    stock = await _insert_stock(
+        session,
+        canonical_ticker="^GSPTSE",
+        company_name="S&P/TSX Composite Index",
+        primary_exchange="TSX",
+        currency="CAD",
+        sector=None,
+        industry=None,
+    )
+    context = AnalysisContext(account_type="trading", timeline="medium_term")
+
+    bundle = await DataPipeline().prepare(stock.stock_id, context, session)
+
+    assert bundle.stock.ticker == "^GSPTSE"
+    assert bundle.benchmark_ticker == "^GSPTSE"
+    # Free assertions on data already in memory, no extra API cost: the CA
+    # gating logic held for this edge case too (canadian_data_flags
+    # populated, matching DataBundle's own validator), and the None sector
+    # correctly short-circuited resolve_sector_etf() rather than trying to
+    # fetch a sector ETF for an index.
+    assert bundle.canadian_data_flags is not None
+    assert "get_price_history:sector_etf" not in bundle.data_freshness
 
 
 async def test_prepare_stock_not_found_raises_against_real_db():

@@ -340,7 +340,14 @@ class YFinanceDataProvider(StockDataProvider):
         numpy-leak class _extract_row() above already guards against for
         financials. Cast explicitly; numpy.float64 isn't always
         JSON-serializable downstream and this project has no other
-        established tolerance for it leaking past the provider layer."""
+        established tolerance for it leaking past the provider layer.
+
+        Real crash found live (86bawptye, CSU.TO/MKO.V): a NaN
+        surprisePercent is not None (NaN is not None), so a raw-value
+        `is not None` check passes, but _safe_float() converts NaN to None
+        independently — then None * 100 raised TypeError. Branch on
+        _safe_float()'s own result, not the raw value, so there's only one
+        source of truth for "is this usable"."""
         stock = yf.Ticker(ticker)
         eh = stock.earnings_history
         if eh is None or eh.empty:
@@ -351,8 +358,8 @@ class YFinanceDataProvider(StockDataProvider):
                 "eps_actual": _safe_float(row.get("epsActual")),
                 "eps_estimated": _safe_float(row.get("epsEstimate")),
                 "eps_surprise_pct": (
-                    _safe_float(row.get("surprisePercent")) * 100
-                    if row.get("surprisePercent") is not None
+                    surprise_pct * 100
+                    if (surprise_pct := _safe_float(row.get("surprisePercent"))) is not None
                     else None
                 ),
                 "revenue_actual": None,

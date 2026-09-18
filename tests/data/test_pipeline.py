@@ -12,6 +12,12 @@ from data.schemas.context import AnalysisContext
 from data.schemas.macro_sources_bundle import MacroSourcesBundle
 from data.schemas.research_sources_bundle import ManagementSignals, ResearchSourcesBundle
 
+# Captured at collection time, before any fixture runs - patched_precompute
+# replaces pipeline_module.technicals.compute_all with a fake, and since
+# that's the same module object everywhere, grabbing "the real function"
+# after the fixture has already patched it would just return the fake.
+_REAL_TECHNICALS_COMPUTE_ALL = pipeline_module.technicals.compute_all
+
 
 # --- resolve_sector_etf: every mapped entry in both tables, plus unmapped ---
 
@@ -467,3 +473,54 @@ async def test_prepare_stock_not_found_raises(patched_precompute):
     context = AnalysisContext(account_type="trading", timeline="medium_term")
     with pytest.raises(StockNotFoundError):
         await DataPipeline().prepare(uuid4(), context, db)
+
+
+def _ohlcv_with_zero_volume_day(n: int = 30) -> pd.DataFrame:
+    """Real OHLCV shape (lowercase columns, matching
+    tests/data/precompute/test_technicals.py's own _ohlcv convention), with
+    the last bar's volume zeroed - a real trigger for technicals.py's own
+    _preflight_warnings()."""
+    idx = pd.bdate_range("2023-01-02", periods=n)
+    close = [100.0 + i * 0.1 for i in range(n)]
+    volume = [1_000_000] * n
+    volume[-1] = 0
+    return pd.DataFrame(
+        {
+            "open": [c - 0.1 for c in close],
+            "high": [c + 0.5 for c in close],
+            "low": [c - 0.5 for c in close],
+            "close": close,
+            "volume": volume,
+        },
+        index=idx,
+    )
+
+
+async def test_prepare_propagates_a_real_preflight_warning(patched_precompute, monkeypatch):
+    """Real gap from the original ticket text: every other test fakes
+    technicals.compute_all entirely, so nothing has confirmed a real
+    technical anomaly actually survives assembly into the final bundle.
+    This test keeps technicals.compute_all real (undoing patched_precompute's
+    fake for this one attribute) and feeds it real price history with a
+    zero-volume day."""
+    monkeypatch.setattr(pipeline_module.technicals, "compute_all", _REAL_TECHNICALS_COMPUTE_ALL)
+
+    stock = _make_stock(is_ca=False)
+    _FakeRouter.is_ca = False
+    _FakeRouter.fin = SimpleNamespace(currency="USD", quarters=[])
+    _FakeRouter.quote = {
+        "current_price": 150.0,
+        "market_cap": 1e12,
+        "currency": "USD",
+        "high_52w": 160.0,
+        "low_52w": 100.0,
+    }
+    _FakeRouter.dividend_history = []
+    _FakeRouter.peers = []
+    _FakeRouter.price_history = _ohlcv_with_zero_volume_day()
+
+    db = _FakeDB(stock)
+    context = AnalysisContext(account_type="trading", timeline="medium_term")
+    bundle = await DataPipeline().prepare(stock.stock_id, context, db)
+
+    assert any("zero-volume" in w for w in bundle.preflight_warnings)
