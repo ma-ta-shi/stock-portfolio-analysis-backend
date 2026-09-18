@@ -1,6 +1,6 @@
 # Canadian Tax Rules Reference
 
-Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_reference()`) and injected into its system prompt as structured context. This is the maintained source of truth at runtime — rule changes are made here and kept in sync with the Notion "Canadian Tax Rules Reference" page and its local mirror at `docs/product/canadian-tax-rules-reference.md`.
+Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_reference()`) and injected into its system prompt as structured context. This is the sole maintained copy — rule changes are made here directly. (Previously described as synced with a Notion page and a `docs/product/` mirror; the mirror was never actually created. Two duplicate copies also existed at the top-level repo's `prompts/` and at `simulation/prompts/` — the former was content-identical to this one, the latter had already drifted (missing the Coverage and Withholding tax grid sections below). Both were retired 2026-09-18; this is now the only copy.)
 
 **Disclaimer:** For system-prompt injection only. Not tax advice. Rules are summarized for LLM consumption. Always verify against CRA publications for the current tax year.
 
@@ -147,3 +147,15 @@ For the Tax Strategist agent's prompt, this matrix helps determine optimal accou
 | Any stock, expected loss / speculative | Taxable | Capital losses can offset gains elsewhere |
 | Any stock, income generation for retirement | RRSP | Tax-deferred income, withdraw at lower rate in retirement |
 | Short-term trade (weeks) | Taxable | Keep TFSA/RRSP for long-term compounding; frequent TFSA trading risks CRA business income classification |
+
+---
+
+# Maintenance notes
+
+This document should be reviewed annually (before January) for:
+
+- TFSA annual contribution limit changes
+- RRSP annual maximum changes
+- Capital gains inclusion rate changes (this has been politically contested)
+- Any changes to the Canada-US tax treaty
+- CRA guidance changes on TFSA day trading or other enforcement areas
