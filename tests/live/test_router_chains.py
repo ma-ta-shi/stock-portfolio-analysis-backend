@@ -423,6 +423,39 @@ async def test_us_benchmark_index_routes_to_fmp():
     assert source == "fmp"
 
 
+# ---------- Sector ETF price history routing (86bawpty3) ----------
+# technicals.py's sector_etf_price input needs a real US/CA sector ETF's
+# price history, resolved via DataPipeline.prepare()'s resolve_sector_etf().
+
+
+@pytest.mark.parametrize(
+    "ticker", ["XLK", "XLF", "XLV", "XLP", "XLY", "XLI", "XLE", "XLB", "XLRE", "XLU", "XLC"]
+)
+async def test_us_sector_etf_routes_to_yfinance_not_fmp(ticker):
+    """Confirmed live 2026-09-15: every SPDR US sector ETF 402s on FMP's
+    free tier (the same ETF paywall CLAUDE.md already documents), so
+    without the _INDEX_PRICE_HISTORY_OVERRIDE entry this would burn a
+    wasted FMP call before falling back to yfinance on every fetch."""
+    async with Router(ticker=ticker) as router:
+        result, source = await router._try_chain("get_price_history", ticker, "3mo", "1d")
+    assert not _is_empty(result)
+    assert source == "yfinance"
+
+
+@pytest.mark.parametrize(
+    "ticker",
+    ["XFN.TO", "XEG.TO", "XMA.TO", "XIT.TO", "XID.TO", "XRE.TO", "XUT.TO", "XHC.TO", "XTC.TO"],
+)
+async def test_ca_sector_etf_routes_to_openbb_tmx(ticker):
+    """No override needed on the CA side — CA_CHAINS never includes fmp at
+    all, so there's nothing to waste. Confirmed live 2026-09-15: all 9
+    resolve via openbb_tmx directly, no fallback even triggered."""
+    async with Router(ticker=ticker) as router:
+        result, source = await router._try_chain("get_price_history", ticker, "3mo", "1d")
+    assert not _is_empty(result)
+    assert source == "openbb_tmx"
+
+
 # ---------- Ambiguous bare-vs-.TO ticker collisions ----------
 # Router-level, not a single-provider concern — is_canadian_ticker()'s
 # suffix check is what decides which chain (and therefore which company)

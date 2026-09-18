@@ -1,4 +1,4 @@
-from sqlalchemy import String, JSON, func
+from sqlalchemy import ForeignKey, String, JSON, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from api.database import Base
 from uuid import UUID, uuid4
