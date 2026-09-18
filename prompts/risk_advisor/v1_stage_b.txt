@@ -1,0 +1,42 @@
+Now apply the risk profile you just produced to a specific account: {account_type}, still within the {timeline} horizon you already analyzed. You are NOT re-deriving volatility, drawdown, or downside scenarios — use the general risk profile you already produced above as given. Your job now is portfolio fit, position sizing, and (if applicable) a stop-loss level.
+
+RULES:
+
+1. PORTFOLIO CORRELATION/CONCENTRATION (CONDITIONAL).
+   - If portfolio_context provided AND CORR/CONC entry exists: `correlation_to_existing_portfolio` and `concentration_risk` are high|medium|low with reasoning citing CORR/CONC.
+   - If portfolio_context provided BUT no CORR/CONC entry: correlation may stay "unknown" AND caveats must note the missing data.
+   - If portfolio_context absent: correlation = "unknown", concentration = "not_applicable".
+   Simple concentration rule: any single position >10% of portfolio = high concentration.
+
+2. POSITION SIZE IS X-Y%. `position_size_recommendation` is a percentage range, format "X-Y%". Examples: "1-2%" high-risk, "3-5%" moderate, "5-8%" staple-quality. "Be careful" or "size appropriately" are inadmissible. Sizing reflects the volatility, drawdown history, and downside scenarios from your general risk profile above, scaled to THIS account type and THIS timeline. Weigh any `dividend_cut_cascade` scenario more heavily for accounts that hold this position primarily for income (e.g., RRSP dividend-compounding holdings) than for accounts building a shorter technical position.
+
+3. STOP-LOSS IS NUMERIC OR NULL.
+   - Trading + short_term: MUST be a numeric price level grounded in TECH support or ATR (already visible to you from the Pass 1 payload above — cite TECH or VOL).
+   - TFSA / RRSP at medium_term or long_term: MUST be null.
+   - All other combinations: null.
+   Numeric values must be in [0, 1.5 x current price].
+
+4. ACCOUNT-SPECIFIC AMPLIFICATION. TFSA: permanent capital loss has amplified cost — losses cannot offset gains elsewhere AND permanently reduce tax-sheltered compounding capacity, so size tighter for any position carrying an elevated-impact downside scenario. RRSP: US dividends are WHT-exempt and RRSP commonly holds dividend-compounding positions — weigh a `dividend_cut_cascade` scenario heavily in sizing. Trading: loss-harvesting (50% inclusion) reduces the cost of being wrong; active management is appropriate.
+
+5. SIZING RATIONALE. In 1-2 sentences, tie the position size (and stop-loss, if set) back to a specific downside scenario or the risk_reward_ratio from your general risk profile above, PLUS the account instruction below. This is not a new narrative — it is a short justification for the sizing decision only.
+
+ACCOUNT: {account_instruction}
+
+PORTFOLIO CONTEXT (may be empty):
+{portfolio_context}
+
+PRE-COMPUTED PORTFOLIO-FIT METRICS:
+{precomputed_portfolio_fit_metrics}
+
+Respond with ONLY the JSON object below and NOTHING ELSE. Your response must end immediately after the final closing brace — no extra characters, no extra braces, after it.
+
+{
+  "correlation_to_existing_portfolio": "high|medium|low|unknown",
+  "concentration_risk": "high|medium|low|not_applicable",
+  "liquidity_risk": "high|medium|low",
+  "position_size_recommendation": "X-Y% format string (e.g., '1-2%', '3-5%')",
+  "stop_loss_suggestion": <number price level OR null>,
+  "sizing_rationale": "1-2 sentences tying the size/stop-loss back to a specific downside scenario or risk_reward_ratio from the general risk profile, plus the account instruction.",
+  "caveats": ["0-2 items, portfolio-data gaps only (e.g., missing CORR/CONC entry)"]
+}
+
