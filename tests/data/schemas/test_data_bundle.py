@@ -153,6 +153,7 @@ def _bundle(**overrides) -> DataBundle:
         canadian_data_flags=None,
         macro_sources=_empty_macro_sources(),
         risk_metrics={},
+        tax_metrics=None,
         benchmark_ticker="^GSPC",
         data_freshness={},
         data_vintage=datetime(2026, 8, 5),
@@ -225,6 +226,19 @@ def test_valid_construction_us_stock():
     bundle = _bundle()
     assert bundle.stock.ticker == "AAPL"
     assert bundle.canadian_data_flags is None
+
+
+def test_valid_construction_with_real_tax_metrics_string():
+    bundle = _bundle(tax_metrics="DIVID: 2.3% yield, 4 payments/yr\nELIG: canadian_eligible")
+    assert bundle.tax_metrics == "DIVID: 2.3% yield, 4 payments/yr\nELIG: canadian_eligible"
+
+
+def test_valid_construction_with_tax_metrics_none():
+    """None stays legal on the schema for a bundle built without running full assembly — the
+    default every other fixture in this file already relies on (see _bundle()'s own defaults),
+    not a real skip-path a real assembly call would take. No override needed to prove it."""
+    bundle = _bundle()
+    assert bundle.tax_metrics is None
 
 
 def test_valid_construction_ca_stock_with_flags():

@@ -10,6 +10,7 @@ from data.precompute.tax_metrics import (
     WHT_GRID,
     TaxReferenceUnavailable,
     build_precomputed_tax_metrics,
+    build_tax_metrics_field,
     build_tax_rule_snapshot,
     classify_dividend,
     compute_effective_after_tax_yield,
@@ -714,3 +715,40 @@ def test_build_precomputed_tax_metrics_list_line_uses_real_country_when_present(
     )
     block = build_precomputed_tax_metrics("AAPL", "trading", bundle)
     assert "LIST: NASDAQ (US)" in block
+
+
+# --- build_tax_metrics_field (86bbztxpj) ---
+
+
+@pytest.mark.parametrize("account_type", ["tfsa", "rrsp", "trading"])
+def test_build_tax_metrics_field_happy_path_all_accounts(account_type):
+    """End to end through the wrapper, real reference file, all three real
+    account types — matches test_build_precomputed_tax_metrics_full_gate1_render_with_real_reference's
+    own real-reference pattern, just through build_tax_metrics_field() instead of the two-step
+    load_tax_rules_reference() + build_precomputed_tax_metrics() a caller would otherwise do itself."""
+    bundle = _fake_bundle(
+        _company_info(name="Royal Bank of Canada", industry="Banking", primary_exchange="TSX"),
+        [_div_record(_days_ago(d), 1.5) for d in (10, 100, 190, 280)],
+        100.0,
+    )
+    block = build_tax_metrics_field("RY.TO", account_type, bundle)
+    for required in ("DIVID", "ELIG", "LIST", "DOM", "WHT", "TAX_RULE_SNAPSHOT"):
+        assert required in block
+
+
+def test_build_tax_metrics_field_rejects_general_account_type():
+    """The real runtime risk this test targets: AnalysisContext.account_type's Literal
+    still structurally allows "general" (ClickUp 86bbzqud4, not yet fixed) — Python doesn't
+    enforce Literal at runtime, so a caller passing context.account_type straight through can
+    genuinely reach this ValueError, not just a type-checker-only concern."""
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    with pytest.raises(ValueError, match="general"):
+        build_tax_metrics_field("AAPL", "general", bundle)
+
+
+def test_build_tax_metrics_field_propagates_tax_reference_unavailable():
+    """reference_path passed straight through to load_tax_rules_reference(), same pattern as
+    test_load_tax_rules_reference_missing_file_raises — no monkeypatching needed."""
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    with pytest.raises(TaxReferenceUnavailable):
+        build_tax_metrics_field("AAPL", "trading", bundle, reference_path="does/not/exist.md")
