@@ -61,6 +61,16 @@ def test_is_canadian_raises_without_stock_or_ticker():
         is_canadian()
 
 
+def test_is_canadian_ticker_classifies_tsx_composite_index():
+    """^GSPTSE carries no .TO/.V suffix — a suffix-only check misses it
+    (86bawptw7). Resolved via the explicit index table, not inference."""
+    assert is_canadian_ticker("^GSPTSE") is True
+
+
+def test_is_canadian_ticker_classifies_sp500_index():
+    assert is_canadian_ticker("^GSPC") is False
+
+
 # --- Fakes for provider chain testing ---
 
 
@@ -78,6 +88,23 @@ def _ok(value):
         return value
 
     return method
+
+
+def _tracked_empty():
+    """Returns (calls, method): method is an async fake that records every
+    invocation into `calls` and returns an empty dict — real "not called"
+    proof for a chain-order assertion. A raising fake doesn't work for this:
+    _try_chain's own `except Exception` catches and logs any failure
+    (including AssertionError) and falls through to the next link exactly
+    like a real provider error would, so the test would pass whether or not
+    the provider was actually skipped."""
+    calls: list[tuple] = []
+
+    async def method(*args, **kwargs):
+        calls.append(args)
+        return {}
+
+    return calls, method
 
 
 def _raises(exc):
@@ -133,6 +160,71 @@ async def test_chain_returns_first_non_empty_result():
     )
     result = await router.get_quote("AAPL")
     assert result == {"symbol": "AAPL", "price": 100}
+
+
+async def test_chain_records_source_used_on_success():
+    router = Router(
+        ticker="AAPL",
+        fmp=FakeProvider(get_quote=_ok({"symbol": "AAPL", "price": 100})),
+        edgartools=FakeProvider(),
+        finnhub=FakeProvider(),
+    )
+    await router.get_quote("AAPL")
+    assert router.sources_used["get_quote"] == "fmp"
+
+
+async def test_chain_records_source_used_after_fallback():
+    router = Router(
+        ticker="AAPL",
+        fmp=FakeProvider(get_quote=_ok({})),
+        edgartools=FakeProvider(),
+        finnhub=FakeProvider(),
+        yfinance=FakeProvider(get_quote=_ok({"symbol": "AAPL", "price": 100})),
+    )
+    await router.get_quote("AAPL")
+    assert router.sources_used["get_quote"] == "yfinance"
+
+
+async def test_index_price_history_override_skips_straight_to_yfinance():
+    """^GSPTSE's price history must never try openbb_tmx: confirmed live
+    (2026-09-15) it always raises EmptyDataError for index symbols — a
+    guaranteed-wasted call CA_CHAINS's normal ordering would otherwise
+    make on every benchmark fetch (86bawptw7). The "typical" construction
+    pattern — Router built directly for the benchmark ticker, matching how
+    the ticket's own live verification exercised this."""
+    openbb_calls, openbb_get_price_history = _tracked_empty()
+    router = Router(
+        ticker="^GSPTSE",
+        openbb_tmx=FakeProvider(get_price_history=openbb_get_price_history),
+        yfinance=FakeProvider(get_price_history=_ok(pd.DataFrame({"close": [35000]}))),
+        yfinance_news=FakeProvider(),
+    )
+    result = await router.get_price_history("^GSPTSE", "1y", "1d")
+    assert openbb_calls == [], "openbb_tmx.get_price_history must never be invoked for ^GSPTSE"
+    assert list(result["close"]) == [35000]
+    assert router.sources_used["get_price_history"] == "yfinance"
+
+
+async def test_index_price_history_override_applies_even_when_router_built_for_a_different_ticker():
+    """The override must key off the ticker actually passed to
+    get_price_history(), not the ticker Router was constructed with — those
+    can differ if one Router instance is reused across tickers (e.g. a
+    stock's own Router asked to also fetch a benchmark index's price
+    history). Constructed here for a real CA stock, RY.TO, then called with
+    ^GSPTSE — must still skip openbb_tmx. Edge case beyond the "typical
+    usage" test above: this is the one that actually catches a regression
+    to construction-time-only resolution, since the two tickers differ."""
+    openbb_calls, openbb_get_price_history = _tracked_empty()
+    router = Router(
+        ticker="RY.TO",
+        openbb_tmx=FakeProvider(get_price_history=openbb_get_price_history),
+        yfinance=FakeProvider(get_price_history=_ok(pd.DataFrame({"close": [35000]}))),
+        yfinance_news=FakeProvider(),
+    )
+    result = await router.get_price_history("^GSPTSE", "1y", "1d")
+    assert openbb_calls == [], "openbb_tmx.get_price_history must never be invoked for ^GSPTSE"
+    assert list(result["close"]) == [35000]
+    assert router.sources_used["get_price_history"] == "yfinance"
 
 
 async def test_chain_falls_back_on_empty_result():

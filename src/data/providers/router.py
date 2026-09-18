@@ -48,6 +48,35 @@ _DEFAULT_PEERS_PATH = Path(__file__).resolve().parent.parent / "peers.json"
 # listings like PLAN.V. Fallback only: used when no Stock record exists.
 _CA_SUFFIXES = (".TO", ".V")
 
+# Benchmark index symbols carry no suffix a market can be inferred from, and
+# no Stock/StockRef row ever exists for one, so the suffix check below can
+# never classify them. Checked explicitly instead of inferred (86bawptw7).
+# Deliberately duplicates get_benchmark()'s stock->symbol mapping in
+# data_bundle.py rather than importing it — same reasoning data_bundle.py's
+# own docstring gives for _is_canadian_stock(): keep data.schemas
+# independent of data.providers. A third benchmark symbol needs updating
+# both places, same as the existing CA-detection duplication.
+_INDEX_TICKER_IS_CANADIAN: dict[str, bool] = {
+    "^GSPTSE": True,  # S&P/TSX Composite
+    "^GSPC": False,  # S&P 500
+}
+
+# get_price_history-only override for index symbols whose primary CA_CHAINS
+# link can never serve them. Confirmed live (2026-09-15): openbb_tmx is a
+# TSX-equity endpoint and raises EmptyDataError for ^GSPTSE every time — a
+# clean, caught failure, but a guaranteed-wasted call on every CA benchmark
+# fetch. Same "phantom primary" fix already applied to CA_CHAINS["get_quote"]
+# below, and consistent with CLAUDE.md's Data Providers section, which
+# documents yfinance (not openbb_tmx) as the benchmark-history source.
+# Resolved per-call in _chain() from the ticker actually passed to
+# get_price_history(), not from whatever ticker Router was constructed
+# with — unlike is_ca (fixed once at construction), this override is safe
+# even when one Router instance is reused to fetch a different ticker's
+# (e.g. a benchmark index's) price history.
+_INDEX_PRICE_HISTORY_OVERRIDE: dict[str, list[str]] = {
+    "^GSPTSE": ["yfinance"],
+}
+
 
 class StockLike(Protocol):
     """Duck-typed stand-in for api.tables.stock.Stock — avoids importing the
@@ -58,10 +87,15 @@ class StockLike(Protocol):
 
 
 def is_canadian_ticker(ticker: str) -> bool:
-    """Raw suffix check — last resort when no Stock record exists. Confirmed
+    """Index symbols are resolved explicitly (_INDEX_TICKER_IS_CANADIAN)
+    since they carry no suffix a market could be inferred from. Otherwise a
+    raw suffix check — last resort when no Stock record exists. Confirmed
     live this alone is unsafe as the primary signal: bare 'T' is AT&T (NYSE,
     USD) while 'T.TO' is TELUS (TSX, CAD) — completely different companies."""
-    return ticker.upper().endswith(_CA_SUFFIXES)
+    upper = ticker.upper()
+    if upper in _INDEX_TICKER_IS_CANADIAN:
+        return _INDEX_TICKER_IS_CANADIAN[upper]
+    return upper.endswith(_CA_SUFFIXES)
 
 
 def is_canadian(stock: StockLike | None = None, *, ticker: str | None = None) -> bool:
@@ -204,7 +238,19 @@ CA_CHAINS: dict[str, list[str]] = {
 class Router(StockDataProvider, NewsProvider):
     """Single object DataPipeline.prepare() calls uniformly per stock.
     Resolves CA/US once at construction; every method call below runs its
-    own fallback chain against that branch's provider table."""
+    own fallback chain against that branch's provider table.
+
+    sources_used accumulates method_name -> provider key for this instance's
+    lifetime only — the "per stock" contract above already means a fresh
+    Router per bundle, so nothing extra enforces this, but reusing one
+    instance across bundles would leak an earlier bundle's entries in.
+    Keyed by method_name alone, not method_name+ticker: calling the same
+    method twice on one instance for two different tickers (e.g. reusing a
+    stock's Router to also fetch a benchmark index's price history) makes
+    the second call's entry silently overwrite the first. Harmless under
+    the documented "one Router per ticker of interest" usage every current
+    caller follows; construct a separate Router per ticker if sources_used
+    needs to stay complete across more than one."""
 
     def __init__(
         self,
@@ -220,6 +266,7 @@ class Router(StockDataProvider, NewsProvider):
         peers_path: Path | str | None = None,
     ) -> None:
         self.is_ca = is_canadian(stock, ticker=ticker)
+        self.sources_used: dict[str, str] = {}
         self._providers: dict[str, object] = {}
         # yfinance is on both branches' chains; the API-key-gated providers
         # (fmp, finnhub) are only constructed — and only required to have a
@@ -249,7 +296,17 @@ class Router(StockDataProvider, NewsProvider):
             if hasattr(provider, "__aexit__"):
                 await provider.__aexit__(exc_type, exc_val, exc_tb)
 
-    def _chain(self, method_name: str) -> list[str]:
+    def _chain(self, method_name: str, *args) -> list[str]:
+        # Resolved from the actual ticker passed to *this call* (args[0], for
+        # every Router method that takes one), not from whatever ticker Router
+        # was constructed with — those two can differ if one instance is ever
+        # reused across tickers (e.g. a stock's own Router asked to also fetch
+        # a benchmark index's price history). get_price_history is the only
+        # method with an index-symbol override today.
+        if method_name == "get_price_history" and args:
+            override = _INDEX_PRICE_HISTORY_OVERRIDE.get(str(args[0]).upper())
+            if override is not None:
+                return override
         return (CA_CHAINS if self.is_ca else US_CHAINS)[method_name]
 
     async def _try_chain(self, method_name: str, *args, **kwargs) -> tuple[Any, str | None]:
@@ -260,7 +317,7 @@ class Router(StockDataProvider, NewsProvider):
         swallowed as a per-call failure. Anything else is logged and treated as
         a fallback trigger. Returns (result, provider_key_that_produced_it)."""
         result: Any = None
-        for key in self._chain(method_name):
+        for key in self._chain(method_name, *args):
             provider = self._providers.get(key)
             method = getattr(provider, method_name, None) if provider is not None else None
             if method is None:
@@ -285,6 +342,7 @@ class Router(StockDataProvider, NewsProvider):
                 result = None
                 continue
             if not _is_empty(result):
+                self.sources_used[method_name] = key
                 return result, key
         return result, None
 

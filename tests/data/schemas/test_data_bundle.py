@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from data.schemas.canadian_data_flags import CanadianDataFlags
 from data.schemas.common import StockRef
 from data.schemas.context import AnalysisContext
-from data.schemas.data_bundle import DataBundle, get_benchmark
+from data.schemas.data_bundle import DataBundle, build_data_freshness, get_benchmark
 from data.schemas.macro_sources_bundle import MacroSourcesBundle
 from data.schemas.research_sources_bundle import ManagementSignals, ResearchSourcesBundle
 
@@ -191,6 +191,31 @@ def test_get_benchmark_cad_currency_non_tsx_exchange_still_returns_tsx_composite
 def test_get_benchmark_tsxv_stock_returns_tsx_composite():
     stock = StockRef(stock_id=uuid4(), ticker="PLAN.V", currency="CAD", exchange="TSXV")
     assert get_benchmark(stock) == "^GSPTSE"
+
+
+# ---------- build_data_freshness ----------
+
+
+def test_build_data_freshness_stamps_every_source_with_the_same_timestamp():
+    at = datetime(2026, 9, 15, 12, 0, 0)
+    result = build_data_freshness(
+        {"get_price_history": "yfinance", "get_financials": "edgartools"}, at=at
+    )
+    assert result == {
+        "get_price_history": at.isoformat(),
+        "get_financials": at.isoformat(),
+    }
+
+
+def test_build_data_freshness_defaults_to_now_when_at_omitted():
+    result = build_data_freshness({"get_quote": "fmp"})
+    # Just needs to be a real, recent ISO timestamp — not pinned to an exact
+    # value since `at` wasn't supplied.
+    assert datetime.fromisoformat(result["get_quote"]) is not None
+
+
+def test_build_data_freshness_empty_sources_used_returns_empty_dict():
+    assert build_data_freshness({}) == {}
 
 
 # ---------- DataBundle: valid construction ----------
