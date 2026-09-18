@@ -10,7 +10,7 @@ def test_analysis_context_valid_construction():
     assert context.timeline == "medium_term"
 
 
-@pytest.mark.parametrize("account_type", ["tfsa", "rrsp", "trading", "general"])
+@pytest.mark.parametrize("account_type", ["tfsa", "rrsp", "trading"])
 def test_analysis_context_accepts_all_real_account_types(account_type):
     """Values confirmed live against src/api/tables/analysis_runs.py:13's
     ORM column comment, not assumed from the archived Phase 1 doc (which
@@ -21,7 +21,7 @@ def test_analysis_context_accepts_all_real_account_types(account_type):
 @pytest.mark.parametrize("timeline", ["short_term", "medium_term", "long_term"])
 def test_analysis_context_accepts_all_real_timelines(timeline):
     """Values confirmed live against src/api/tables/analysis_runs.py:14."""
-    AnalysisContext(account_type="general", timeline=timeline)
+    AnalysisContext(account_type="tfsa", timeline=timeline)
 
 
 def test_analysis_context_rejects_stale_archived_timeline_values():
@@ -36,6 +36,14 @@ def test_analysis_context_rejects_stale_archived_account_type_value():
     real "trading" value."""
     with pytest.raises(ValidationError):
         AnalysisContext(account_type="taxable", timeline="medium_term")
+
+
+def test_analysis_context_rejects_removed_general_account_type():
+    """Regression guard: "general" was removed (ClickUp 86bbzqud4) once the
+    CIO/Risk Advisor two-stage design made every real analysis run scope to
+    a specific account. Must not silently start accepting it again."""
+    with pytest.raises(ValidationError):
+        AnalysisContext(account_type="general", timeline="medium_term")
 
 
 def test_analysis_context_is_frozen():

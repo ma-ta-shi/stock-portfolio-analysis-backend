@@ -10,7 +10,7 @@ class AnalysisRun(Base):
     run_id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
     user_id: Mapped[UUID] = mapped_column(ForeignKey("user_profiles.user_id"), index=True)
     stock_id: Mapped[UUID] = mapped_column(ForeignKey("stocks.stock_id"), index=True)
-    account_type: Mapped[str] = mapped_column(String(20))  # tfsa|rrsp|trading|general
+    account_type: Mapped[str] = mapped_column(String(20))  # tfsa|rrsp|trading
     timeline: Mapped[str] = mapped_column(String(20))       # short_term|medium_term|long_term
     triggered_at: Mapped[datetime] = mapped_column(default=func.now())
     triggered_by: Mapped[str] = mapped_column(String(20))    # manual|scheduled|alert
