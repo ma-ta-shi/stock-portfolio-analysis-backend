@@ -124,7 +124,10 @@ class ResearchSourcesBundle(ContractModel):
     # None/empty values elsewhere in this bundle.
     missing_sources_list: list[str]
 
-    # Reliability counters for compute_base_reliability_researcher()
+    # Mechanical-flags inputs (stale_data/data_coverage) per decision D6
+    # (docs/technical/pass1-confidence-model.md) -- the compute_base_reliability_researcher()
+    # function these originally fed was removed by D6, not these fields; they're still real
+    # and still needed, just for the mechanical flags now, not a deleted score formula.
     latest_filing_age_days: NonNegativeInt | None
     latest_transcript_age_days: NonNegativeInt | None
     latest_news_age_days: NonNegativeInt | None
