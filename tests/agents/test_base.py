@@ -84,6 +84,27 @@ def _ollama_chat_response(content: dict, thinking: str = "") -> dict:
     }
 
 
+def _ollama_generate_response(
+    content: dict,
+    thinking: str = "",
+    context: list[int] | None = None,
+    prompt_eval_cached_count: int = 0,
+) -> dict:
+    """86bc2d414: /api/generate's response shape, confirmed live during that
+    ticket's planning -- `response` (text) and `thinking` are separate
+    top-level fields (unlike call_model's nested `message.content`/
+    `message.thinking`), plus `context`, the raw token-ID continuation array."""
+    return {
+        "response": json.dumps(content),
+        "thinking": thinking,
+        "context": context if context is not None else [1, 2, 3],
+        "total_duration": 1_000_000_000,
+        "prompt_eval_count": 100,
+        "prompt_eval_cached_count": prompt_eval_cached_count,
+        "eval_count": 50,
+    }
+
+
 def _tags_response(model_names: list[str]) -> dict:
     return {"models": [{"name": name} for name in model_names]}
 
@@ -379,6 +400,412 @@ class TestCallWithValidation:
         runner.session = FakeSession(FakeResponse(200, _ollama_chat_response({"ok": True})))
         with pytest.raises(OllamaUnavailable):
             await runner.call_with_validation("sys", "usr", _pass_validator)
+
+
+# ---------- _call_generate (86bc2d414) ----------
+
+
+class TestCallGenerate:
+    @pytest.mark.asyncio
+    async def test_happy_path_returns_result_and_context(self):
+        runner = BaseRunner()
+        runner.session = FakeSession(
+            FakeResponse(200, _ollama_generate_response({"answer": "ok"}, context=[1, 2, 3]))
+        )
+        result, context = await runner._call_generate("prompt text", system="sys")
+        assert result == {"answer": "ok"}
+        assert context == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_sends_expected_payload_shape_when_starting(self):
+        runner = BaseRunner()
+        session = FakeSession(FakeResponse(200, _ollama_generate_response({"a": 1})))
+        runner.session = session
+        await runner._call_generate(
+            "usr prompt", system="sys prompt", max_tokens=500, temperature=0.5
+        )
+
+        call = session.calls[0]
+        assert call["url"] == f"{base_module.OLLAMA_HOST}/api/generate"
+        assert call["json"]["model"] == MODEL
+        assert call["json"]["prompt"] == "usr prompt"
+        assert call["json"]["system"] == "sys prompt"
+        assert "context" not in call["json"]
+        assert call["json"]["stream"] is False
+        assert call["json"]["think"] == "low"
+        assert "format" not in call["json"], (
+            "format:'json' corrupts gpt-oss:20b on /api/generate -- see "
+            "docs/technical/ollama-generate-format-json-finding.md"
+        )
+        assert call["json"]["options"]["num_ctx"] == base_module.NUM_CTX
+        assert call["json"]["options"]["num_predict"] == 500
+        assert call["json"]["options"]["temperature"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_sends_expected_payload_shape_when_continuing(self):
+        runner = BaseRunner()
+        session = FakeSession(FakeResponse(200, _ollama_generate_response({"a": 1})))
+        runner.session = session
+        await runner._call_generate("continuation prompt", context=[9, 9, 9])
+
+        call = session.calls[0]
+        assert call["json"]["prompt"] == "continuation prompt"
+        assert call["json"]["context"] == [9, 9, 9]
+        assert "system" not in call["json"], (
+            "confirmed live during 86bc2d414 planning: a continuation call needs "
+            "no system field -- Stage A's role/output are already available via "
+            "context alone"
+        )
+
+    @pytest.mark.asyncio
+    async def test_raises_json_decode_error_on_empty_response(self):
+        runner = BaseRunner()
+        runner.session = FakeSession(
+            FakeResponse(200, {"response": "", "thinking": "lots of reasoning", "context": []})
+        )
+        with pytest.raises(json.JSONDecodeError):
+            await runner._call_generate("prompt")
+
+    @pytest.mark.asyncio
+    async def test_raises_client_error_on_bad_status(self):
+        runner = BaseRunner()
+        runner.session = FakeSession(FakeResponse(500))
+        with pytest.raises(aiohttp.ClientError):
+            await runner._call_generate("prompt")
+
+    @pytest.mark.asyncio
+    async def test_raises_json_decode_error_on_malformed_outer_response_body(self):
+        """Parity with TestCallModel's equivalent test -- a 200 status with a
+        genuinely truncated/malformed body makes response.json() raise
+        json.JSONDecodeError directly, not wrapped in aiohttp.ClientError, the
+        same way it does for call_model's /api/chat path."""
+        runner = BaseRunner()
+        runner.session = FakeSession(FakeResponse(200, raise_outer_decode_error=True))
+        with pytest.raises(json.JSONDecodeError):
+            await runner._call_generate("prompt")
+
+    @pytest.mark.asyncio
+    async def test_records_call_log_entry(self):
+        runner = BaseRunner()
+        runner.session = FakeSession(
+            FakeResponse(200, _ollama_generate_response({"a": 1}, thinking="x"))
+        )
+        await runner._call_generate("prompt")
+        assert len(runner.call_log) == 1
+        entry = runner.call_log[0]
+        assert entry["total_duration_s"] == 1.0
+        assert entry["thinking_chars"] == 1
+        assert entry["agent"] == "BaseRunner"
+
+    @pytest.mark.asyncio
+    async def test_call_log_uses_current_agent_when_set(self):
+        runner = BaseRunner()
+        runner.current_agent = "RISK"
+        runner.session = FakeSession(FakeResponse(200, _ollama_generate_response({"a": 1})))
+        await runner._call_generate("prompt")
+        assert runner.call_log[0]["agent"] == "RISK"
+
+    @pytest.mark.asyncio
+    async def test_thinking_is_captured_separately_from_response(self):
+        runner = BaseRunner()
+        runner.session = FakeSession(
+            FakeResponse(200, _ollama_generate_response({"a": 1}, thinking="some reasoning"))
+        )
+        result, _ = await runner._call_generate("prompt")
+        assert result == {"a": 1}
+        assert runner.last_thinking == "some reasoning"
+
+    @pytest.mark.asyncio
+    async def test_captures_prompt_eval_cached_count(self):
+        """The one deterministic, wording-independent signal that a
+        continuation call actually reused Stage A's context -- see the
+        docstring on _call_generate's timing capture."""
+        runner = BaseRunner()
+        runner.session = FakeSession(
+            FakeResponse(
+                200, _ollama_generate_response({"a": 1}, context=[9, 9], prompt_eval_cached_count=42)
+            )
+        )
+        await runner._call_generate("prompt", context=[1, 2, 3])
+        assert runner.last_timing["prompt_eval_cached_count"] == 42
+
+
+# ---------- call_with_validation_start (86bc2d414) ----------
+
+
+class TestCallWithValidationStart:
+    @pytest.mark.asyncio
+    async def test_passes_on_first_try_and_returns_context(self):
+        runner = BaseRunner()
+        runner.session = FakeSession(
+            FakeResponse(200, _ollama_generate_response({"ok": True}, context=[1, 2, 3]))
+        )
+        result, errors, context = await runner.call_with_validation_start(
+            "sys", "usr", _pass_validator
+        )
+        assert result == {"ok": True}
+        assert errors == []
+        assert context == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_retries_and_shows_previous_response(self):
+        session = FakeSession(
+            [
+                FakeResponse(200, _ollama_generate_response({"narrative": "short"})),
+                FakeResponse(
+                    200,
+                    _ollama_generate_response(
+                        {"narrative": "a much longer narrative now"}, context=[9, 9]
+                    ),
+                ),
+            ]
+        )
+        runner = BaseRunner()
+        runner.session = session
+
+        def validator(result):
+            if result["narrative"] == "short":
+                return False, ["narrative: too short (5 chars, min 10)"]
+            return True, []
+
+        result, errors, context = await runner.call_with_validation_start(
+            "sys", "usr", validator
+        )
+        assert errors == []
+        assert result["narrative"] == "a much longer narrative now"
+        assert context == [9, 9]
+        second_prompt = session.calls[1]["json"]["prompt"]
+        assert "YOUR PREVIOUS RESPONSE" in second_prompt
+        assert '"short"' in second_prompt
+
+    @pytest.mark.asyncio
+    async def test_retries_on_json_parse_error(self):
+        session = FakeSession(
+            [
+                FakeResponse(200, {"response": "not valid json", "thinking": "", "context": []}),
+                FakeResponse(200, _ollama_generate_response({"ok": True}, context=[7])),
+            ]
+        )
+        runner = BaseRunner()
+        runner.session = session
+        result, errors, context = await runner.call_with_validation_start(
+            "sys", "usr", _pass_validator
+        )
+        assert result == {"ok": True}
+        assert errors == []
+        assert context == [7]
+
+    @pytest.mark.asyncio
+    async def test_retries_on_client_error_and_timeout(self):
+        session = FakeSession(
+            [
+                FakeResponse(raise_client_error=True),
+                FakeResponse(raise_timeout=True),
+                FakeResponse(200, _ollama_generate_response({"ok": True}, context=[7])),
+            ]
+        )
+        runner = BaseRunner()
+        runner.session = session
+        result, errors, context = await runner.call_with_validation_start(
+            "sys", "usr", _pass_validator
+        )
+        assert result == {"ok": True}
+        assert errors == []
+        assert context == [7]
+
+    @pytest.mark.asyncio
+    async def test_exhaustion_returns_none_context_not_last_attempts(self):
+        def always_fails(result):
+            return False, ["field: always wrong"]
+
+        session = FakeSession(
+            FakeResponse(200, _ollama_generate_response({"a": 1}, context=[1, 1, 1]))
+        )
+        runner = BaseRunner()
+        runner.session = session
+        result, errors, context = await runner.call_with_validation_start(
+            "sys", "usr", always_fails
+        )
+        assert errors == ["field: always wrong"]
+        assert context is None, (
+            "a caller has no legitimate reason to continue from a Stage A that "
+            "never validated -- must not hand back a never-confirmed context"
+        )
+        assert len(session.calls) == MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_auto_trims_without_a_retry(self):
+        long_summary = "word " * 90  # 90 words, over an 80-word max
+        session = FakeSession(
+            FakeResponse(
+                200,
+                _ollama_generate_response(
+                    {"assessment_summary": long_summary.strip()}, context=[5]
+                ),
+            )
+        )
+        runner = BaseRunner()
+        runner.session = session
+
+        def validator(result):
+            words = result["assessment_summary"].split()
+            if len(words) > 80:
+                return False, [f"assessment_summary: too long ({len(words)} words, max 80)"]
+            return True, []
+
+        result, errors, context = await runner.call_with_validation_start(
+            "sys", "usr", validator
+        )
+        assert errors == []
+        assert context == [5]
+        assert len(session.calls) == 1, "auto-trim must not spend a retry"
+
+    @pytest.mark.asyncio
+    async def test_does_not_catch_ollama_unavailable(self, monkeypatch):
+        async def _always_unavailable(session=None):
+            raise OllamaUnavailable("Ollama isn't running")
+
+        monkeypatch.setattr(base_module, "_preflight", _always_unavailable)
+        runner = BaseRunner()
+        runner.session = FakeSession(FakeResponse(200, _ollama_generate_response({"ok": True})))
+        with pytest.raises(OllamaUnavailable):
+            await runner.call_with_validation_start("sys", "usr", _pass_validator)
+
+
+# ---------- call_with_validation_continue (86bc2d414) ----------
+
+
+class TestCallWithValidationContinue:
+    @pytest.mark.asyncio
+    async def test_passes_on_first_try(self):
+        runner = BaseRunner()
+        runner.session = FakeSession(FakeResponse(200, _ollama_generate_response({"ok": True})))
+        result, errors = await runner.call_with_validation_continue(
+            "prompt", [1, 2, 3], _pass_validator
+        )
+        assert result == {"ok": True}
+        assert errors == []
+
+    @pytest.mark.asyncio
+    async def test_every_retry_reuses_the_same_original_context(self):
+        """The core correctness property of a continuation retry loop: a
+        failed attempt's own new context must never replace the original --
+        that would silently drift the chain away from Stage A's real state
+        with each failed attempt."""
+        session = FakeSession(
+            [
+                FakeResponse(200, _ollama_generate_response({"narrative": "short"})),
+                FakeResponse(200, _ollama_generate_response({"narrative": "a much longer narrative now"})),
+            ]
+        )
+        runner = BaseRunner()
+        runner.session = session
+
+        def validator(result):
+            if result["narrative"] == "short":
+                return False, ["narrative: too short (5 chars, min 10)"]
+            return True, []
+
+        original_context = [42, 43, 44]
+        result, errors = await runner.call_with_validation_continue(
+            "prompt", original_context, validator
+        )
+        assert errors == []
+        assert session.calls[0]["json"]["context"] == original_context
+        assert session.calls[1]["json"]["context"] == original_context
+
+    @pytest.mark.asyncio
+    async def test_omits_system_field(self):
+        runner = BaseRunner()
+        session = FakeSession(FakeResponse(200, _ollama_generate_response({"a": 1})))
+        runner.session = session
+        await runner.call_with_validation_continue("prompt", [1, 2, 3], _pass_validator)
+        assert "system" not in session.calls[0]["json"]
+
+    @pytest.mark.asyncio
+    async def test_retries_on_json_parse_error(self):
+        session = FakeSession(
+            [
+                FakeResponse(200, {"response": "not valid json", "thinking": "", "context": []}),
+                FakeResponse(200, _ollama_generate_response({"ok": True})),
+            ]
+        )
+        runner = BaseRunner()
+        runner.session = session
+        result, errors = await runner.call_with_validation_continue(
+            "prompt", [1, 2, 3], _pass_validator
+        )
+        assert result == {"ok": True}
+        assert errors == []
+
+    @pytest.mark.asyncio
+    async def test_retries_on_client_error_and_timeout(self):
+        session = FakeSession(
+            [
+                FakeResponse(raise_client_error=True),
+                FakeResponse(raise_timeout=True),
+                FakeResponse(200, _ollama_generate_response({"ok": True})),
+            ]
+        )
+        runner = BaseRunner()
+        runner.session = session
+        result, errors = await runner.call_with_validation_continue(
+            "prompt", [1, 2, 3], _pass_validator
+        )
+        assert result == {"ok": True}
+        assert errors == []
+
+    @pytest.mark.asyncio
+    async def test_exhausts_max_retries_and_returns_last_errors(self):
+        def always_fails(result):
+            return False, ["field: always wrong"]
+
+        session = FakeSession(FakeResponse(200, _ollama_generate_response({"a": 1})))
+        runner = BaseRunner()
+        runner.session = session
+        result, errors = await runner.call_with_validation_continue(
+            "prompt", [1, 2, 3], always_fails
+        )
+        assert errors == ["field: always wrong"]
+        assert len(session.calls) == MAX_RETRIES
+
+    @pytest.mark.asyncio
+    async def test_does_not_catch_ollama_unavailable(self, monkeypatch):
+        async def _always_unavailable(session=None):
+            raise OllamaUnavailable("Ollama isn't running")
+
+        monkeypatch.setattr(base_module, "_preflight", _always_unavailable)
+        runner = BaseRunner()
+        runner.session = FakeSession(FakeResponse(200, _ollama_generate_response({"ok": True})))
+        with pytest.raises(OllamaUnavailable):
+            await runner.call_with_validation_continue("prompt", [1, 2, 3], _pass_validator)
+
+
+# ---------- _parse_json_response (86bc2d414 trailing-content tolerance) ----------
+
+
+class TestParseJsonResponse:
+    def test_parses_clean_json(self):
+        assert base_module._parse_json_response('{"a": 1}') == {"a": 1}
+
+    def test_strips_markdown_fences(self):
+        text = '```json\n{"a": 1}\n```'
+        assert base_module._parse_json_response(text) == {"a": 1}
+
+    def test_tolerates_trailing_stray_brace(self):
+        """The trailing-brace failure mode from
+        docs/technical/two-turn-execution-mechanism.md: a continuation
+        successor turn with a flatter schema than its predecessor's has a
+        reproducible tendency to append one stray extra `}`."""
+        assert base_module._parse_json_response('{"a": 1}}') == {"a": 1}
+
+    def test_tolerates_trailing_garbage_text(self):
+        text = '{"a": 1} some trailing note the model appended'
+        assert base_module._parse_json_response(text) == {"a": 1}
+
+    def test_still_raises_on_genuinely_malformed_json(self):
+        with pytest.raises(json.JSONDecodeError):
+            base_module._parse_json_response("not valid json at all")
 
 
 # ---------- _auto_trim ----------

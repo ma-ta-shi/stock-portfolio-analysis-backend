@@ -47,7 +47,22 @@ import sys  # noqa: E402
 
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+from simulation.runners.compression import (  # noqa: E402
+    build_pass2_user_message,
+    compress_pass1_outputs,
+    extract_confidence_levels,
+)
+from simulation.runners.pass1_fundamental_analyst import FundamentalAnalystRunner  # noqa: E402
+from simulation.runners.pass1_macro_economist import MacroEconomistRunner  # noqa: E402
+from simulation.runners.pass1_sentiment_analyst import SentimentAnalystRunner  # noqa: E402
+from simulation.runners.pass1_stock_researcher import StockResearcherRunner  # noqa: E402
+from simulation.runners.pass1_technical_analyst import TechnicalAnalystRunner  # noqa: E402
+from simulation.utils import build_pass1_reliability_warnings, researcher_thesis_archetype  # noqa: E402
 from simulation.validators.pass1 import validate_technical_analyst  # noqa: E402
+from simulation.validators.pass2 import (  # noqa: E402
+    validate_risk_advisor_stage_a,
+    validate_risk_advisor_stage_b,
+)
 
 _FIXTURE_PATH = _REPO_ROOT / "simulation" / "fixtures" / "scenario_02_canadian_large_cap.json"
 
@@ -166,3 +181,122 @@ async def test_technical_analyst_prompt_runs_end_to_end_against_real_ollama():
     summary = runner.timing_summary()
     assert summary["calls"] >= 1
     assert summary["total_llm_s"] > 0
+
+
+def _risk_advisor_precomputed_metrics(fixture: dict) -> str:
+    """Small local copy of pass2_risk_advisor.py's own
+    _precomputed_risk_metrics() -- not imported, for the same reason
+    test_technical_analyst_prompt_runs_end_to_end_against_real_ollama's own
+    _build_user_message is a local copy: this test has zero dependency on
+    that runner module, only on the real prompt templates and the shared
+    compression utilities."""
+    price = fixture["price_data"]
+    oc = fixture.get("orchestrator_precomputed", {})
+    return (
+        f"BETA: beta = {price.get('beta', 'N/A')} (will be injected into output by orchestrator)\n"
+        f"VOL:  52w High={price['price_52w_high']}, 52w Low={price['price_52w_low']}, "
+        f"YTD={price['ytd_return_pct']}%\n"
+        f"DD:   Max drawdown (1yr) = {oc.get('max_drawdown_1yr_pct', 'N/A')}% "
+        f"(will be injected by orchestrator)\n"
+        f"LIQ:  Avg dollar volume (20d) = ${price.get('avg_dollar_volume_20', 0):,.0f}\n"
+        f"CORR: Portfolio correlation = unknown (not provided for this analysis)\n"
+        f"CONC: Standard concentration risk assessment based on position sizing"
+    )
+
+
+@pytest.mark.asyncio
+async def test_risk_advisor_stage_a_to_b_continuation_against_real_ollama():
+    """86bc2d414: the actual deliverable of this ticket, proven end to end --
+    real Risk Advisor Stage A and Stage B prompts, a real fixture, through the
+    real `call_with_validation_start`/`call_with_validation_continue` methods
+    against real Ollama, not the raw `requests.post()` probe used during that
+    ticket's planning (which proved the underlying Ollama API behaves as the
+    spec doc claims, but never exercised this specific interface).
+
+    Pass 1 (5 agents) runs through the simulation harness purely to generate
+    realistic input, same posture as this file's Technical Analyst test
+    reusing simulation validators -- no harness BaseRunner code is under test
+    here, only the production `agents.base.BaseRunner`.
+    """
+    fixture = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+    pass1 = {}
+    for agent_id, cls in {
+        "RSRCH": StockResearcherRunner,
+        "FUND": FundamentalAnalystRunner,
+        "TECH": TechnicalAnalystRunner,
+        "SENT": SentimentAnalystRunner,
+        "MACRO": MacroEconomistRunner,
+    }.items():
+        result, errors = cls().run(fixture)
+        pass1[agent_id] = result
+    compressed = compress_pass1_outputs(pass1)
+
+    ctx = fixture["context"]
+    acct = ctx["account_type"]
+    stage_a_system = fill(
+        load_template("risk_advisor", stage="a"),
+        {
+            "ticker": ctx["ticker"],
+            "company_name": ctx["company_name"],
+            "sector": ctx["sector"],
+            "timeline": ctx["timeline"],
+            "timeline_instruction": f"Timeline: {ctx['timeline']}.",
+            "precomputed_risk_metrics": _risk_advisor_precomputed_metrics(fixture),
+            "researcher_thesis_archetype": researcher_thesis_archetype(compressed),
+            "pass1_reliability_warnings": build_pass1_reliability_warnings(
+                extract_confidence_levels(compressed)
+            ) or "(none)",
+            "accuracy_brief": "",
+            "winning_patterns_brief": "",
+            "memory_brief": "",
+        },
+    )
+    stage_a_user = build_pass2_user_message(fixture, compressed, acct)
+
+    async with BaseRunner() as runner:
+        stage_a_result, stage_a_errors, context = await runner.call_with_validation_start(
+            stage_a_system, stage_a_user, validate_risk_advisor_stage_a,
+            max_tokens=3500, temperature=0.3,
+        )
+        assert stage_a_errors == [], f"Stage A failed validation: {stage_a_errors}"
+        assert context is not None, "a successful Stage A call must return a real context"
+
+        stage_b_prompt = fill(
+            load_template("risk_advisor", stage="b"),
+            {
+                "account_type": acct,
+                "timeline": ctx["timeline"],
+                "account_instruction": f"Account: {acct.upper()}, Timeline: {ctx['timeline']}.",
+                "portfolio_context": "(none provided)",
+                "precomputed_portfolio_fit_metrics": "(none -- no portfolio_context provided)",
+            },
+        )
+        stage_b_result, stage_b_errors = await runner.call_with_validation_continue(
+            stage_b_prompt, context, validate_risk_advisor_stage_b,
+            max_tokens=1500, temperature=0.3,
+        )
+
+    assert stage_b_errors == [], f"Stage B failed validation: {stage_b_errors}"
+
+    # The mechanical, wording-independent proof that continuation actually
+    # reused Stage A's context rather than silently starting fresh -- can't
+    # be faked by a plain separate call, unlike free-text content matching,
+    # which the model's real non-determinism would make brittle to assert on
+    # directly. Confirmed live during planning this reliably lands non-zero
+    # on the immediate next call.
+    stage_b_log_entry = runner.call_log[-1]
+    assert stage_b_log_entry["prompt_eval_cached_count"] > 0, (
+        "Stage B's call reused none of Stage A's context -- continuation may "
+        "have silently degraded to a fresh call"
+    )
+
+    real_stage_b_fields = {
+        "correlation_to_existing_portfolio",
+        "concentration_risk",
+        "liquidity_risk",
+        "position_size_recommendation",
+        "stop_loss_suggestion",
+        "sizing_rationale",
+        "caveats",
+    }
+    assert real_stage_b_fields <= set(stage_b_result.keys())
