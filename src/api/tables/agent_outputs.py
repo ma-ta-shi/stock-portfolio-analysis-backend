@@ -14,7 +14,12 @@ class AgentOutput(Base):
     status: Mapped[str] = mapped_column(String(20))          # completed|failed|timeout|skipped
     recommendation: Mapped[Optional[str]] = mapped_column(String(10))  # bullish|bearish|neutral (null for pass1)
     confidence: Mapped[Optional[int]]                         # 0-100 (null for pass1)
-    reliability_score: Mapped[Optional[int]]                  # 0-100 (pass1 only)
+    # reliability_score (0-100) retired 86bbummwp (decision D6, docs/technical/
+    # pass1-confidence-model.md): removed, not redesigned -- never LLM-produced again.
+    # analysis_confidence (pass1 only) is the real, live replacement signal. Mechanical
+    # flags (stale_data/anomalies/data_coverage) are a separate, not-yet-built orchestrator
+    # computation -- no speculative column added for them here; see the D6 doc.
+    analysis_confidence: Mapped[Optional[str]] = mapped_column(String(20))  # pass1 only
     key_factors: Mapped[Optional[list]] = mapped_column(JSON)
     risks: Mapped[Optional[list]] = mapped_column(JSON)
     narrative: Mapped[Optional[str]] = mapped_column(Text)
