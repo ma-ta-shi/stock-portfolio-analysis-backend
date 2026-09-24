@@ -143,15 +143,32 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
 
 
 def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
-    """One LLMCall row per runner.call_log entry -- every attempt, not just
-    the accepted one (86bbwachy Phase 2, run-instrumentation.md §5.3, §9
-    OQ5). Does not set agent_output_id here -- _agent_output_row (the only
-    caller) backfills that directly onto the returned list's last element,
-    since AgentOutput's own PK is generated client-side (see that
-    function's own comment) and is already known by the time this runs.
+    """One LLMCall row per NEW runner.call_log entry since this runner was
+    last processed -- every attempt, not just the accepted one (86bbwachy
+    Phase 2, run-instrumentation.md §5.3, §9 OQ5). Does not set
+    agent_output_id here -- _agent_output_row (the only caller) backfills
+    that directly onto the returned list's last element, since AgentOutput's
+    own PK is generated client-side (see that function's own comment) and
+    is already known by the time this runs.
+
+    Sliced from `runner._llm_calls_consumed` onward, not the whole log --
+    CIORunner and RiskAdvisorRunner are each a SINGLE shared instance across
+    two stages, and call_log accumulates across both (nothing ever clears
+    it). CIO calls this once after Stage A and again after Stage B; without
+    the slice, the second call reprocesses Stage A's own entries too,
+    inserting a real duplicate llm_calls row (confirmed live, 2026-09-24 AAPL
+    run: two identical seq=15 "agent:cio_stage_a" rows, one correctly
+    carrying agent_output_id from the first call, one blank from the
+    second). `_prime_runner` sets the counter to 0 once per runner
+    construction; `getattr(..., 0)` covers any runner that predates that
+    (none in production today, but keeps this function safe standalone).
     """
+    consumed = getattr(runner, "_llm_calls_consumed", 0)
+    new_entries = runner.call_log[consumed:]
+    runner._llm_calls_consumed = len(runner.call_log)
+
     rows = []
-    for entry in runner.call_log:
+    for entry in new_entries:
         total_duration_s = entry.get("total_duration_s")
         rows.append(LLMCall(
             run_id=run_id,
@@ -685,6 +702,12 @@ class AnalysisOrchestrator:
         runner.run_id = self._run_id
         runner.ticker = self._ticker
         runner.seq_counter = self._seq_counter
+        # See _llm_call_rows' own docstring: tracks how much of this
+        # runner's call_log has already become LLMCall rows, so a
+        # two-stage runner (CIO, Risk Advisor) sharing one instance across
+        # both stages doesn't get its earlier stage's entries re-inserted
+        # when the later stage's own write happens.
+        runner._llm_calls_consumed = 0
 
     async def _run_pass1(self, run: AnalysisRun, bundle: DataBundle, db: AsyncSession) -> dict:
         runners = {

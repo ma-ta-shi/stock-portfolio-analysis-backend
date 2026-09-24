@@ -19,13 +19,14 @@ from agents.base import OllamaUnavailable
 from api.database import Base
 from api.tables.agent_outputs import AgentOutput
 from api.tables.analysis_runs import AnalysisRun, RunStatus
+from api.tables.llm_calls import LLMCall
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: F401 -- Prediction's mapper needs this reachable
 from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
 from api.tables.shadow_predictions import ShadowPrediction
 from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile  # noqa: F401 -- AnalysisRun.user_id FK needs this reachable
-from services.orchestrator import AnalysisOrchestrator, _market_cap_bucket
+from services.orchestrator import AnalysisOrchestrator, _add_agent_output_and_calls, _market_cap_bucket
 from sqlalchemy import select
 
 
@@ -134,6 +135,7 @@ class _StubRunner:
         self.run_id = None
         self.ticker = None
         self.seq_counter = None
+        self._llm_calls_consumed = 0
         # None by default, matching BaseRunner's own pre-first-call state --
         # exercises _close_runner()'s real "session is None -> no-op"
         # branch. Tests that need to assert a session was actually closed
@@ -172,6 +174,60 @@ class _StubRunner:
 )
 def test_market_cap_bucket(market_cap, expected):
     assert _market_cap_bucket(market_cap) == expected
+
+
+@pytest.mark.asyncio
+async def test_two_stage_runner_does_not_duplicate_llm_calls_rows():
+    """Regression test for a real bug caught on a live AAPL run
+    (2026-09-24): CIORunner (and RiskAdvisorRunner) is ONE shared instance
+    across Stage A and Stage B, and BaseRunner.call_log accumulates across
+    both -- nothing ever clears it. orchestrator.py calls
+    _add_agent_output_and_calls once per stage; without _llm_calls_consumed
+    tracking which call_log entries were already turned into rows, the
+    second call re-processed Stage A's own entries too, producing a real
+    duplicate llm_calls row in the database (same seq/call_site, one with
+    agent_output_id set from the first write, one blank from the second).
+    This test drives that exact two-call pattern against a fake runner
+    whose call_log grows between calls, the way the real BaseRunner's does,
+    and asserts every seq appears exactly once.
+    """
+    session = await _make_session()
+    run = await _make_run(session)
+
+    class _FakeTwoStageRunner:
+        def __init__(self):
+            self.call_log = []
+            self.run_id = run.run_id
+            self.ticker = "AAPL"
+            self.seq_counter = None
+            self._llm_calls_consumed = 0
+            self.last_timing = {"total_duration_s": 1.0, "eval_count": 100}
+
+    runner = _FakeTwoStageRunner()
+
+    # Stage A: one real attempt lands in call_log, then gets written.
+    runner.call_log.append({"seq": 0, "call_site": "agent:cio_stage_a", "attempt": 1})
+    _add_agent_output_and_calls(
+        session, run, "cio_stage_a", "synthesis", {"stock_outlook": "neutral"}, [], runner
+    )
+    await session.commit()
+
+    # Stage B: call_log now holds Stage A's entry PLUS Stage B's own new
+    # one -- the real shape after BaseRunner keeps accumulating and nothing
+    # resets it between the two orchestrator-level writes.
+    runner.call_log.append({"seq": 1, "call_site": "agent:cio_stage_b", "attempt": 1})
+    _add_agent_output_and_calls(
+        session, run, "cio_stage_b", "synthesis", {"synthesis_narrative": "n"}, [], runner
+    )
+    await session.commit()
+
+    rows = (await session.execute(select(LLMCall).where(LLMCall.run_id == run.run_id))).scalars().all()
+    seqs = sorted(r.seq for r in rows)
+    assert seqs == [0, 1], f"expected exactly one row per seq, got {seqs}"
+
+    by_seq = {r.seq: r for r in rows}
+    assert by_seq[0].agent_output_id is not None  # Stage A's own winning attempt
+    assert by_seq[1].agent_output_id is not None  # Stage B's own winning attempt
 
 
 @pytest.mark.asyncio
