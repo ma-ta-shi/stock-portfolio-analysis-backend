@@ -768,9 +768,36 @@ class AnalysisOrchestrator:
         agent_outputs = (
             await db.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))
         ).scalars().all()
-        agents_with_empty_key_factors = [a.agent_name for a in agent_outputs if not a.key_factors]
-        agents_with_empty_risks = [a.agent_name for a in agent_outputs if not a.risks]
-        agents_with_empty_narrative = [a.agent_name for a in agent_outputs if not a.narrative]
+        # Confirmed live (real MSFT run, 2026-09-24), not assumed: without
+        # these exclusions, every one of the excluded agent_names showed up
+        # in the corresponding list on EVERY real run regardless of actual
+        # quality, drowning the real signal in structural noise. Verified
+        # directly against each agent's own validator source, not guessed:
+        # - key_factors: never referenced anywhere in validators/cio.py or
+        #   validators/shadow_cio.py -- only the synthesis-pass agents lack it.
+        # - risks: never referenced anywhere outside validators/pass1.py --
+        #   the four Pass 2 advocates and all three synthesis-pass agents
+        #   structurally never produce it, confirmed by direct grep.
+        # - narrative: cio_stage_a's own validator (validate_cio_stage_a)
+        #   never checks synthesis_narrative (only Stage B's does), and
+        #   shadow_cio's validator never checks narrative/synthesis_narrative
+        #   at all -- both structural, unlike bull/bear/tax/risk_stage_a and
+        #   cio_stage_b, which all have real, validated narrative fields.
+        _NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio"}
+        _NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b", "shadow_cio"}
+        _NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
+        agents_with_empty_key_factors = [
+            a.agent_name for a in agent_outputs
+            if a.agent_name not in _NO_KEY_FACTORS_EXPECTED and not a.key_factors
+        ]
+        agents_with_empty_risks = [
+            a.agent_name for a in agent_outputs
+            if a.agent_name not in _NO_RISKS_EXPECTED and not a.risks
+        ]
+        agents_with_empty_narrative = [
+            a.agent_name for a in agent_outputs
+            if a.agent_name not in _NO_NARRATIVE_EXPECTED and not a.narrative
+        ]
 
         recommendation = (
             await db.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))

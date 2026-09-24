@@ -919,6 +919,28 @@ async def test_run_quality_summary_written_on_happy_path():
     assert summary.total_llm_ms == 0
     assert summary.slowest_call_ms is None
 
+    # None of this fixture's Pass 2/CIO/Shadow CIO results set key_factors/
+    # risks/narrative (_completed() doesn't add them) -- real regression
+    # coverage for the exclusion sets caught on a live MSFT run: without
+    # them, EVERY one of bull/bear/tax/risk/cio_stage_a/cio_stage_b/
+    # shadow_cio showed up in agents_with_empty_risks on every real run
+    # regardless of actual quality, since none of those agents' own
+    # validators ever check for a "risks" field at all.
+    assert "bull" not in summary.agents_with_empty_risks
+    assert "bear" not in summary.agents_with_empty_risks
+    assert "tax" not in summary.agents_with_empty_risks
+    assert "risk" not in summary.agents_with_empty_risks
+    assert "cio_stage_a" not in summary.agents_with_empty_key_factors
+    assert "cio_stage_b" not in summary.agents_with_empty_key_factors
+    assert "shadow_cio" not in summary.agents_with_empty_key_factors
+    assert "cio_stage_a" not in summary.agents_with_empty_narrative
+    assert "shadow_cio" not in summary.agents_with_empty_narrative
+    # But the 5 Pass 1 agents genuinely have none of these three fields in
+    # this fixture, and Pass 1 IS where all three are real, validated
+    # fields -- they must still show up, not get swept away by the fix.
+    assert set(summary.agents_with_empty_key_factors) >= {"RSRCH", "FUND", "TECH", "SENT", "MACRO"}
+    assert set(summary.agents_with_empty_risks) >= {"RSRCH", "FUND", "TECH", "SENT", "MACRO"}
+
 
 @pytest.mark.asyncio
 async def test_run_quality_summary_written_on_gate1_failure():
