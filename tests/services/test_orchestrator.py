@@ -25,6 +25,7 @@ from api.tables.analysis_runs import AnalysisRun, RunStatus
 from api.tables.llm_calls import LLMCall
 from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
+from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
 from api.tables.stock import Stock
 from services.orchestrator import AnalysisOrchestrator, _add_agent_output_and_calls, _market_cap_bucket
@@ -849,3 +850,249 @@ async def test_data_pipeline_failure_marks_run_failed_and_reraises():
 
     assert run.status == RunStatus.FAILED
     assert run.error_log[0]["stage"] == "data_pipeline"
+
+
+# ---------- run_quality_summary (86bbwachy Phase 5) ----------
+
+
+async def _summary_for(session, run) -> RunQualitySummary:
+    return (
+        await session.execute(select(RunQualitySummary).where(RunQualitySummary.run_id == run.run_id))
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_run_quality_summary_written_on_happy_path():
+    session = await _make_session()
+    run = await _make_run(session)
+    bundle = _fake_bundle()
+
+    cio_stage_a = _completed(
+        stock_outlook="somewhat_bullish", expected_return_tier="outperform",
+        thesis_summary="Strong momentum.", key_decision_factors=[{"factor": "growth"}],
+    )
+    cio_stage_b = {
+        "synthesis_narrative": "Buy on strength.",
+        "position_sizing_recommendation": "3-5%",
+        "expected_return_tier": "outperform",
+        "tax_summary": {}, "risk_profile_summary": {},
+    }
+    shadow_result = _completed(stock_outlook="neutral", expected_return_tier="market_perform")
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch("services.orchestrator.StockResearcherRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(_completed(recommendation="bullish"))),
+        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
+        patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
+        patch(
+            "services.orchestrator.RiskAdvisorRunner",
+            _StubRunner(_completed(risk_profile={}), stage_b_result={"position_size_recommendation": "3-5%"}),
+        ),
+        patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
+        patch("services.orchestrator.ShadowCIORunner", _StubRunner(shadow_result)),
+        patch("services.orchestrator.Router") as MockRouter,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        router_instance = AsyncMock()
+        router_instance.get_quote = AsyncMock(return_value={"current_price": 5800.0})
+        MockRouter.return_value.__aenter__ = AsyncMock(return_value=router_instance)
+        MockRouter.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await AnalysisOrchestrator().run(run, session)
+
+    summary = await _summary_for(session, run)
+    assert summary.wall_clock_ms >= 0
+    assert summary.gate1_passed is True
+    assert summary.gate2_passed is True
+    assert summary.stock_outlook == "somewhat_bullish"
+    assert summary.overall_confidence == 70
+    # _StubRunner's call_log defaults to [] -- no real llm_calls rows exist
+    # for this fixture, so the aggregate counts are honestly zero, not
+    # missing data. See test_run_quality_summary_llm_execution_stats_reflect_real_llm_calls
+    # for the dedicated aggregation-math test against populated call_log entries.
+    assert summary.total_calls == 0
+    assert summary.total_llm_ms == 0
+    assert summary.slowest_call_ms is None
+
+
+@pytest.mark.asyncio
+async def test_run_quality_summary_written_on_gate1_failure():
+    """A Gate 1 failure never reaches Pass 2/CIO -- gate2_*/stock_outlook
+    must stay null, not some stale or fabricated value."""
+    session = await _make_session()
+    run = await _make_run(session)
+    bundle = _fake_bundle()
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch("services.orchestrator.StockResearcherRunner", _StubRunner(None, ["failed"])),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(None, ["failed"])),
+        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(None, ["failed"])),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(None, ["failed"])),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(None, ["failed"])),
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        await AnalysisOrchestrator().run(run, session)
+
+    summary = await _summary_for(session, run)
+    assert summary.gate1_passed is False
+    assert summary.gate1_reason
+    assert summary.gate2_passed is None
+    assert summary.gate2_reason is None
+    assert summary.stock_outlook is None
+    assert summary.overall_confidence is None
+
+
+@pytest.mark.asyncio
+async def test_run_quality_summary_written_when_data_pipeline_raises():
+    """The one exit that never reaches gate1_check() at all -- both gate
+    fields, and everything downstream, must stay null, and a row still
+    gets written (a near-empty row is still a real, distinct signal)."""
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with patch("services.orchestrator.DataPipeline") as MockPipeline:
+        MockPipeline.return_value.prepare = AsyncMock(side_effect=ValueError("no data"))
+        with pytest.raises(ValueError):
+            await AnalysisOrchestrator().run(run, session)
+
+    summary = await _summary_for(session, run)
+    assert summary.gate1_passed is None
+    assert summary.gate2_passed is None
+    assert summary.stock_outlook is None
+    assert summary.total_calls == 0
+    assert summary.wall_clock_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_run_quality_summary_write_failure_does_not_mask_original_exception():
+    """Matches the Shadow CIO precedent (test_shadow_cio_db_write_failure_
+    does_not_break_the_session_for_later_writes): a bug in this SECONDARY
+    write must never replace or swallow whatever _run_pipeline itself
+    raised."""
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch(
+            "services.orchestrator.AnalysisOrchestrator._write_run_quality_summary",
+            AsyncMock(side_effect=RuntimeError("summary write bug")),
+        ),
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(side_effect=ValueError("no data"))
+        with pytest.raises(ValueError):
+            await AnalysisOrchestrator().run(run, session)
+
+    # The original ValueError propagated, not the summary write's RuntimeError.
+    assert run.status == RunStatus.FAILED
+    summary_rows = (
+        await session.execute(select(RunQualitySummary).where(RunQualitySummary.run_id == run.run_id))
+    ).scalars().all()
+    assert summary_rows == []  # the write never succeeded, and that's fine -- it's non-fatal
+
+
+@pytest.mark.asyncio
+async def test_run_quality_summary_degenerate_output_flags():
+    """Empty key_factors/risks/narrative on a stored AgentOutput row --
+    entirely new logic (86bbwachy Phase 5), no existing precedent -- must
+    be reported by agent_name, and an agent with real content must NOT be
+    flagged."""
+    session = await _make_session()
+    run = await _make_run(session)
+    bundle = _fake_bundle()
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch(
+            "services.orchestrator.StockResearcherRunner",
+            _StubRunner(_completed(key_factors=[{"factor": "real"}], risks=[{"risk": "real"}], narrative="A real narrative.")),
+        ),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(_completed())),  # no key_factors/risks/narrative at all
+        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(_completed(key_factors=[], risks=[], narrative=""))),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(None, ["failed"])),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(None, ["failed"])),
+        # Gate 1 passes on RSRCH/FUND/TECH alone -- Pass 2 still runs, so
+        # Bull/Bear/Tax/Risk need real stubs too, not just Pass 1's. Bull
+        # fails here deliberately (matching test_gate2_failure_skips_cio_
+        # entirely's own pattern) so Gate 2 fails and CIO/Shadow CIO never
+        # run -- bounds the mocking surface to exactly what this test needs.
+        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(None, ["bull failed"])),
+        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
+        patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
+        patch("services.orchestrator.RiskAdvisorRunner", _StubRunner(_completed(risk_profile={}))),
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        await AnalysisOrchestrator().run(run, session)
+
+    assert run.status == RunStatus.FAILED  # Gate 2 failure -- confirms the bounded mocking worked
+
+    summary = await _summary_for(session, run)
+    assert "RSRCH" not in summary.agents_with_empty_key_factors
+    assert "RSRCH" not in summary.agents_with_empty_risks
+    assert "RSRCH" not in summary.agents_with_empty_narrative
+    assert set(summary.agents_with_empty_key_factors) >= {"FUND", "TECH", "SENT", "MACRO"}
+    assert set(summary.agents_with_empty_risks) >= {"FUND", "TECH", "SENT", "MACRO"}
+    assert set(summary.agents_with_empty_narrative) >= {"FUND", "TECH", "SENT", "MACRO"}
+
+
+@pytest.mark.asyncio
+async def test_run_quality_summary_llm_execution_stats_reflect_real_llm_calls():
+    """Dedicated aggregation-math test against a runner with real call_log
+    entries -- the happy-path fixture's _StubRunner defaults to an empty
+    call_log, so this is the only test that actually exercises the
+    SELECT-and-aggregate logic against real llm_calls rows."""
+    session = await _make_session()
+    run = await _make_run(session)
+    bundle = _fake_bundle()
+
+    rsrch_runner = _StubRunner(_completed())
+    rsrch_runner.call_log = [
+        {"seq": 0, "call_site": "agent:RSRCH", "attempt": 1, "model": "gpt-oss:20b",
+         "total_duration_s": 2.0, "prompt_eval_count": 500, "eval_count": 100,
+         "thinking_chars": 50, "finish_reason": "stop", "validator_passed": False},
+        {"seq": 1, "call_site": "agent:RSRCH", "attempt": 2, "model": "gpt-oss:20b",
+         "total_duration_s": 3.5, "prompt_eval_count": 500, "eval_count": 120,
+         "thinking_chars": 60, "finish_reason": "length", "validator_passed": True},
+    ]
+    tech_runner = _StubRunner(_completed())
+    tech_runner.call_log = [
+        {"seq": 2, "call_site": "agent:TECH", "attempt": 1, "model": "gpt-oss:20b",
+         "total_duration_s": 1.0, "prompt_eval_count": 300, "eval_count": 80,
+         "thinking_chars": 10, "finish_reason": "empty_content", "validator_passed": None},
+    ]
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch("services.orchestrator.StockResearcherRunner", rsrch_runner),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(None, ["failed"])),
+        patch("services.orchestrator.TechnicalAnalystRunner", tech_runner),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(None, ["failed"])),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(None, ["failed"])),
+        # Gate 1 passes on RSRCH/TECH alone -- Pass 2 still runs; Bull fails
+        # to trigger Gate 2 failure and skip CIO/Shadow CIO, same bounded-
+        # mocking approach as test_run_quality_summary_degenerate_output_flags.
+        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(None, ["bull failed"])),
+        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
+        patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
+        patch("services.orchestrator.RiskAdvisorRunner", _StubRunner(_completed(risk_profile={}))),
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        await AnalysisOrchestrator().run(run, session)
+
+    summary = await _summary_for(session, run)
+    assert summary.total_calls == 3
+    assert summary.retry_calls == 1  # only RSRCH's attempt=2 row
+    assert summary.total_llm_ms == round((2.0 + 3.5 + 1.0) * 1000)
+    assert summary.slowest_call_ms == round(3.5 * 1000)
+    assert summary.total_prompt_tokens == 500 + 500 + 300
+    assert summary.total_completion_tokens == 100 + 120 + 80
+    assert summary.total_thinking_chars == 50 + 60 + 10
+    assert summary.truncated_calls == 1  # finish_reason == "length"
+    assert summary.empty_content_calls == 1  # finish_reason == "empty_content"
+    assert summary.validator_failures == 1  # validator_passed is False (not None)

@@ -32,6 +32,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.base import MODEL, OllamaUnavailable
@@ -59,6 +60,7 @@ from api.tables.analysis_runs import AnalysisRun, RunStatus
 from api.tables.llm_calls import LLMCall
 from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
+from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
 from data.pipeline import DataPipeline
 from data.precompute.tax_metrics import (
@@ -434,6 +436,33 @@ class AnalysisOrchestrator:
     """
 
     async def run(self, run: AnalysisRun, db: AsyncSession) -> None:
+        """Public entry point -- a thin wrapper around _run_pipeline() so a
+        run_quality_summary row (86bbwachy Phase 5) gets written exactly
+        once regardless of which of _run_pipeline's own several
+        return/raise exits actually fires. `finally` runs on every one of
+        them (success, a `return`, or a propagating `raise`) without
+        touching _run_pipeline's own internals at all -- this method's own
+        signature is unchanged from before this phase, so every existing
+        caller (api/routes/analysis.py's _run_analysis_background) needs no
+        changes.
+
+        The inner try/except around the summary write is the same
+        defensive posture already used below for Shadow CIO: a bug in this
+        SECONDARY write must never mask or replace whatever _run_pipeline
+        itself raised or returned.
+        """
+        try:
+            await self._run_pipeline(run, db)
+        finally:
+            try:
+                await self._write_run_quality_summary(run, db)
+            except Exception as exc:
+                await db.rollback()
+                logger.warning(
+                    "run_quality_summary_write_failed", run_id=str(run.run_id), error=str(exc)
+                )
+
+    async def _run_pipeline(self, run: AnalysisRun, db: AsyncSession) -> None:
         # Captured once, as a plain UUID, and used in every log call below
         # instead of re-reading run.run_id each time -- a primary key that
         # will never actually change, but SQLAlchemy expires ALL of an
@@ -465,6 +494,15 @@ class AnalysisOrchestrator:
         # its own precompute LLM calls happen.
         self._run_id = run_id
         self._seq_counter = itertools.count()
+        # 86bbwachy Phase 5 -- initialized here, before DataPipeline.prepare()
+        # is even attempted, not at the gate1_check()/gate2_check() call
+        # sites below. _write_run_quality_summary() (called from run()'s own
+        # finally, after this method returns or raises) reads these
+        # unconditionally; without this early init, a run that fails inside
+        # prepare() -- before either gate check ever runs -- would
+        # AttributeError instead of just leaving them None.
+        self._gate1_passed = self._gate1_reason = None
+        self._gate2_passed = self._gate2_reason = None
 
         try:
             bundle = await DataPipeline().prepare(
@@ -513,6 +551,7 @@ class AnalysisOrchestrator:
         await db.commit()
 
         gate1_passed, gate1_reason = gate1_check(pass1_outputs)
+        self._gate1_passed, self._gate1_reason = gate1_passed, gate1_reason
         if not gate1_passed:
             logger.warning("gate1_failed", run_id=str(run_id), reason=gate1_reason)
             run.status = RunStatus.FAILED
@@ -538,6 +577,7 @@ class AnalysisOrchestrator:
         await db.commit()
 
         gate2_passed, gate2_reason = gate2_check(pass2_outputs)
+        self._gate2_passed, self._gate2_reason = gate2_passed, gate2_reason
         if not gate2_passed:
             logger.warning("gate2_failed", run_id=str(run_id), reason=gate2_reason)
             run.status = RunStatus.FAILED
@@ -693,6 +733,86 @@ class AnalysisOrchestrator:
 
         run.status = RunStatus.COMPLETED
         run.completed_at = datetime.now(UTC)
+        await db.commit()
+
+    async def _write_run_quality_summary(self, run: AnalysisRun, db: AsyncSession) -> None:
+        """86bbwachy Phase 5 -- called from run()'s own finally block, so
+        this fires exactly once per real run() invocation regardless of
+        which of _run_pipeline's several return/raise exits actually fired.
+
+        Everything here is either a fresh query against already-committed
+        rows (every write earlier in _run_pipeline is immediately followed
+        by its own db.commit(), so nothing here can be stale) or an
+        instance attribute with nowhere else to live (self._gate1_passed
+        etc.) -- _run_pipeline's own local scope (pass1_outputs,
+        stage_a_result, ...) is long gone by the time this runs. Must
+        db.add()+commit() its own row -- nothing upstream does that for it.
+        A failure here is caught by run()'s own wrapper, not this method's
+        job to guard against.
+        """
+        llm_calls = (
+            await db.execute(select(LLMCall).where(LLMCall.run_id == run.run_id))
+        ).scalars().all()
+        total_calls = len(llm_calls)
+        retry_calls = sum(1 for c in llm_calls if c.attempt > 1)
+        total_llm_ms = sum(c.latency_ms or 0 for c in llm_calls)
+        call_latencies = [c.latency_ms for c in llm_calls if c.latency_ms is not None]
+        slowest_call_ms = max(call_latencies) if call_latencies else None
+        total_prompt_tokens = sum(c.prompt_tokens or 0 for c in llm_calls)
+        total_completion_tokens = sum(c.completion_tokens or 0 for c in llm_calls)
+        total_thinking_chars = sum(c.thinking_chars or 0 for c in llm_calls)
+        truncated_calls = sum(1 for c in llm_calls if c.finish_reason == "length")
+        empty_content_calls = sum(1 for c in llm_calls if c.finish_reason == "empty_content")
+        validator_failures = sum(1 for c in llm_calls if c.validator_passed is False)
+
+        agent_outputs = (
+            await db.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))
+        ).scalars().all()
+        agents_with_empty_key_factors = [a.agent_name for a in agent_outputs if not a.key_factors]
+        agents_with_empty_risks = [a.agent_name for a in agent_outputs if not a.risks]
+        agents_with_empty_narrative = [a.agent_name for a in agent_outputs if not a.narrative]
+
+        recommendation = (
+            await db.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))
+        ).scalar_one_or_none()
+
+        # run.triggered_at is a NAIVE datetime -- confirmed live: it's
+        # populated via the column's own `default=func.now()` (a DB-side
+        # CURRENT_TIMESTAMP under SQLite), which round-trips with no tzinfo
+        # attached, unlike completed_at/pass1_completed_at/pass2_completed_at
+        # (always set in Python via datetime.now(UTC)). Every timestamp in
+        # this app is UTC in practice; attach it explicitly rather than let
+        # a naive-minus-aware TypeError crash this method the first time it
+        # runs against a real row.
+        triggered_at = run.triggered_at
+        if triggered_at.tzinfo is None:
+            triggered_at = triggered_at.replace(tzinfo=UTC)
+        wall_clock_ms = round((datetime.now(UTC) - triggered_at).total_seconds() * 1000)
+
+        summary = RunQualitySummary(
+            run_id=run.run_id,
+            wall_clock_ms=wall_clock_ms,
+            total_llm_ms=total_llm_ms,
+            slowest_call_ms=slowest_call_ms,
+            total_calls=total_calls,
+            retry_calls=retry_calls,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            total_thinking_chars=total_thinking_chars,
+            truncated_calls=truncated_calls,
+            empty_content_calls=empty_content_calls,
+            validator_failures=validator_failures,
+            gate1_passed=self._gate1_passed,
+            gate1_reason=self._gate1_reason,
+            gate2_passed=self._gate2_passed,
+            gate2_reason=self._gate2_reason,
+            stock_outlook=recommendation.stock_outlook_direction if recommendation else None,
+            overall_confidence=recommendation.overall_confidence if recommendation else None,
+            agents_with_empty_key_factors=agents_with_empty_key_factors or None,
+            agents_with_empty_risks=agents_with_empty_risks or None,
+            agents_with_empty_narrative=agents_with_empty_narrative or None,
+        )
+        db.add(summary)
         await db.commit()
 
     def _prime_runner(self, runner) -> None:
