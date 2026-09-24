@@ -97,6 +97,7 @@ class AnalysisRun(Base):
     stock: Mapped["Stock"] = relationship(back_populates="analysis_runs")
     agent_outputs: Mapped[list["AgentOutput"]] = relationship(back_populates="run")
     recommendation: Mapped[Optional["Recommendation"]] = relationship(back_populates="run")
+    run_quality_summary: Mapped[Optional["RunQualitySummary"]] = relationship(back_populates="run")
 
     # Real TOCTOU race, confirmed live (2026-09-23): api/routes/analysis.py's
     # create_analysis() checks for an in-progress run, then inserts a new
