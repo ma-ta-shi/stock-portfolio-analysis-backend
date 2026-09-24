@@ -143,6 +143,14 @@ class _StubRunner:
         # it. _StubRunner isn't a BaseRunner subclass, so it needs its own
         # copy of that same default.
         self._llm_calls_consumed = 0
+        # last_field_coverage: 86bbwachy Phase 4 -- set by the 7 in-scope
+        # real runners' own run(), None for the rest (including every
+        # runner these tests stub out, none of which are in that 7).
+        # _agent_output_row() reads it via getattr(..., None), so this
+        # isn't strictly required for existing tests to pass, but kept
+        # explicit here to match every other optional attribute's own
+        # documented-default style in this class.
+        self.last_field_coverage = None
         # None by default, matching BaseRunner's own pre-first-call state --
         # exercises _close_runner()'s real "session is None -> no-op"
         # branch. Tests that need to assert a session was actually closed
@@ -241,6 +249,43 @@ async def test_two_stage_runner_does_not_duplicate_llm_calls_rows():
     by_seq = {r.seq: r for r in rows}
     assert by_seq[0].agent_output_id is not None  # Stage A's own winning attempt
     assert by_seq[1].agent_output_id is not None  # Stage B's own winning attempt
+
+
+async def test_agent_output_persists_input_field_coverage_when_runner_sets_it():
+    """86bbwachy Phase 4: a runner that stamps last_field_coverage (the 7
+    in-scope agents' own run(), after build_user_message() returns) gets it
+    persisted onto the AgentOutput row. Real producer shape: a runner
+    in this ticket's own scope."""
+    session = await _make_session()
+    run = await _make_run(session)
+    runner = _StubRunner(result={"recommendation": "bullish", "confidence": 70})
+    runner.last_field_coverage = {"dividend_context": True, "business_description": False}
+
+    _add_agent_output_and_calls(session, run, "FUND", "pass1", runner._result, [], runner)
+    await session.commit()
+
+    row = (
+        await session.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))
+    ).scalar_one()
+    assert row.input_field_coverage == {"dividend_context": True, "business_description": False}
+
+
+async def test_agent_output_input_field_coverage_null_for_out_of_scope_agent():
+    """Bull/Bear/CIO/Shadow CIO never set last_field_coverage -- confirms
+    the column stays null (not an empty dict) for them, matching the
+    column's own documented nullability."""
+    session = await _make_session()
+    run = await _make_run(session)
+    runner = _StubRunner(result={"recommendation": "bullish", "confidence": 70})
+    assert runner.last_field_coverage is None  # the _StubRunner default itself
+
+    _add_agent_output_and_calls(session, run, "bull", "pass2", runner._result, [], runner)
+    await session.commit()
+
+    row = (
+        await session.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))
+    ).scalar_one()
+    assert row.input_field_coverage is None
 
 
 @pytest.mark.asyncio

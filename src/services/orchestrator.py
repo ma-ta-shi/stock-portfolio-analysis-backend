@@ -234,6 +234,13 @@ def _agent_output_row(
         tokens_used=timing.get("eval_count"),
         latency_ms=round(timing.get("total_duration_s", 0) * 1000) if timing.get("total_duration_s") else None,
         error_detail="; ".join(errors) if errors else None,
+        # 86bbwachy Phase 4 -- set by the 7 in-scope runners' own run()
+        # right after build_user_message() returns (before the LLM call is
+        # even attempted), None for every other agent. Deliberately read
+        # here regardless of `completed` -- a failed call still had a real
+        # (possibly incomplete) input, and knowing that is exactly the
+        # point (see this field's own column comment).
+        input_field_coverage=getattr(runner, "last_field_coverage", None),
     )
 
     llm_calls = _llm_call_rows(run.run_id, agent_pass, runner)
