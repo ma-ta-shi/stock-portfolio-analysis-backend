@@ -101,7 +101,13 @@ class RiskAdvisorRunner(BaseRunner):
         compressed_pass1: dict,
         account_type: str | None = None,
     ) -> tuple[dict, list[str]]:
-        self.current_agent = "risk"
+        # Stage-specific, not just "risk" -- call_site (86bbwachy Phase 2) is
+        # derived from current_agent, so llm_calls can trace Stage A and
+        # Stage B as the two distinct round trips they really are, even
+        # though AgentOutput still merges them into one row (orchestrator.py's
+        # own _run_risk) -- llm_calls is the finer-grained trace that row
+        # doesn't need to be.
+        self.current_agent = "risk_stage_a"
         acct = account_type or bundle.context.account_type
         user_msg = build_user_message(bundle, compressed_pass1, acct)
         ctx = bundle.context
@@ -157,6 +163,7 @@ class RiskAdvisorRunner(BaseRunner):
         "(none provided)" for every real scenario today -- not a stand-in
         for missing wiring.
         """
+        self.current_agent = "risk_stage_b"  # see run()'s own comment on why
         ctx = bundle.context
         acct = account_type or ctx.account_type
         stage_b_prompt = fill(

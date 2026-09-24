@@ -75,12 +75,13 @@ class FakeSession:
         self.closed = True
 
 
-def _ollama_chat_response(content: dict, thinking: str = "") -> dict:
+def _ollama_chat_response(content: dict, thinking: str = "", done_reason: str = "stop") -> dict:
     return {
         "message": {"content": json.dumps(content), "thinking": thinking},
         "total_duration": 1_000_000_000,  # 1s in nanoseconds
         "prompt_eval_count": 100,
         "eval_count": 50,
+        "done_reason": done_reason,
     }
 
 
@@ -89,6 +90,7 @@ def _ollama_generate_response(
     thinking: str = "",
     context: list[int] | None = None,
     prompt_eval_cached_count: int = 0,
+    done_reason: str = "stop",
 ) -> dict:
     """86bc2d414: /api/generate's response shape, confirmed live during that
     ticket's planning -- `response` (text) and `thinking` are separate
@@ -102,6 +104,7 @@ def _ollama_generate_response(
         "prompt_eval_count": 100,
         "prompt_eval_cached_count": prompt_eval_cached_count,
         "eval_count": 50,
+        "done_reason": done_reason,
     }
 
 
@@ -249,6 +252,98 @@ class TestCallModel:
         runner.session = FakeSession(FakeResponse(200, _ollama_chat_response({"a": 1})))
         await runner.call_model("sys", "usr")
         assert runner.call_log[0]["agent"] == "TECH"
+
+    @pytest.mark.asyncio
+    async def test_capture_disabled_without_ticker(self):
+        """86bbwachy Phase 2: ticker is the gate. Every pre-existing test in
+        this class never sets it, and must keep passing with no artifact
+        writes and no crash -- this pins that behavior explicitly rather
+        than relying on it being implicit."""
+        runner = BaseRunner()
+        runner.session = FakeSession(FakeResponse(200, _ollama_chat_response({"a": 1})))
+        await runner.call_model("sys", "usr")
+        entry = runner.call_log[0]
+        assert entry["prompt_path"] is None
+        assert entry["context_path"] is None
+        assert entry["response_path"] is None
+        assert entry["seq"] is None  # no seq_counter set either
+
+    @pytest.mark.asyncio
+    async def test_capture_writes_real_artifacts_when_ticker_is_set(self, tmp_path, monkeypatch):
+        import agents.capture as capture_module
+
+        monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+        runner = BaseRunner()
+        runner.ticker = "AAPL"
+        runner.run_id = "11111111-2222-3333-4444-555555555555"
+        runner.current_agent = "FUND"
+        runner.session = FakeSession(
+            FakeResponse(200, _ollama_chat_response({"a": 1}, thinking="reasoning"))
+        )
+        await runner.call_model("system text", "user text")
+
+        entry = runner.call_log[0]
+        assert entry["call_site"] == "agent:fund"
+        assert entry["context_tag"] == "analysis"
+        assert entry["model"] == MODEL
+        assert entry["options_json"]["num_ctx"] > 0
+        assert entry["finish_reason"] == "stop"
+        assert entry["parsed_ok"] is True
+
+        prompt_path = tmp_path / entry["prompt_path"]
+        response_path = tmp_path / entry["response_path"]
+        assert prompt_path.exists()
+        assert "system text" in prompt_path.read_text()
+        assert "user text" in prompt_path.read_text()
+        assert json.loads(response_path.read_text())["message"]["content"] == json.dumps({"a": 1})
+        assert entry["context_path"] is None  # no structured context for /api/chat
+
+    @pytest.mark.asyncio
+    async def test_capture_records_parse_failure(self, tmp_path, monkeypatch):
+        import agents.capture as capture_module
+
+        monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+        runner = BaseRunner()
+        runner.ticker = "AAPL"
+        runner.session = FakeSession(FakeResponse(200, _ollama_chat_response({}, thinking="only reasoning")))
+        # Empty content -- real failure mode already covered by
+        # test_raises_json_decode_error_on_empty_content; this test is about
+        # what capture records, not the exception itself.
+        runner.session._responses[0]._json_data["message"]["content"] = ""
+        with pytest.raises(json.JSONDecodeError):
+            await runner.call_model("sys", "usr")
+        entry = runner.call_log[0]
+        assert entry["parsed_ok"] is False
+        assert entry["finish_reason"] == "empty_content"
+        assert entry["parse_error"]
+
+    @pytest.mark.asyncio
+    async def test_capture_seq_increments_across_calls_via_shared_counter(self, tmp_path, monkeypatch):
+        """A shared itertools.count() (matching orchestrator.py's own
+        real, run-wide counter) must keep incrementing across separate
+        runner instances, not reset per runner -- the whole point of seq
+        being run-scoped, not runner-scoped (spec §5.2)."""
+        import itertools
+
+        import agents.capture as capture_module
+
+        monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+        shared_counter = itertools.count()
+
+        runner_a = BaseRunner()
+        runner_a.ticker = "AAPL"
+        runner_a.seq_counter = shared_counter
+        runner_a.session = FakeSession(FakeResponse(200, _ollama_chat_response({"a": 1})))
+        await runner_a.call_model("sys", "usr")
+
+        runner_b = BaseRunner()
+        runner_b.ticker = "AAPL"
+        runner_b.seq_counter = shared_counter
+        runner_b.session = FakeSession(FakeResponse(200, _ollama_chat_response({"b": 2})))
+        await runner_b.call_model("sys", "usr")
+
+        assert runner_a.call_log[0]["seq"] == 0
+        assert runner_b.call_log[0]["seq"] == 1
 
     @pytest.mark.asyncio
     async def test_uses_injected_session_without_creating_a_new_one(self):
@@ -482,6 +577,32 @@ class TestSoftErrorAcceptance:
 
 
 class TestCallGenerate:
+    @pytest.mark.asyncio
+    async def test_capture_writes_artifacts_for_a_continuation_call(self, tmp_path, monkeypatch):
+        """86bbwachy Phase 2, the /api/generate path -- a continuation
+        successor turn (system=None, context passed in) only has the
+        incremental prompt text to capture, not the full effective
+        context. Confirms that's what actually gets written, not a crash
+        or a silently-empty file."""
+        import agents.capture as capture_module
+
+        monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+        runner = BaseRunner()
+        runner.ticker = "SHOP.TO"
+        runner.run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        runner.current_agent = "risk_stage_b"
+        runner.session = FakeSession(
+            FakeResponse(200, _ollama_generate_response({"b": 2}, context=[9, 9, 9]))
+        )
+        await runner._call_generate("continuation increment", context=[1, 2, 3])
+
+        entry = runner.call_log[0]
+        assert entry["call_site"] == "agent:risk_stage_b"
+        assert entry["parsed_ok"] is True
+        prompt_path = tmp_path / entry["prompt_path"]
+        assert prompt_path.read_text() == "continuation increment"
+        assert entry["context_path"] is None
+
     @pytest.mark.asyncio
     async def test_happy_path_returns_result_and_context(self):
         runner = BaseRunner()

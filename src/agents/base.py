@@ -50,6 +50,7 @@ from collections.abc import Awaitable, Callable
 import aiohttp
 import structlog
 
+from agents.capture import map_finish_reason, write_call_artifacts
 from agents.validators.cio import SOFT_ERROR_PREFIXES as _SOFT_CIO
 from agents.validators.pass2 import SOFT_ERROR_PREFIXES as _SOFT_P2
 
@@ -223,6 +224,19 @@ class BaseRunner:
         self.current_agent: str | None = None
         self.current_attempt: int = 1
 
+        # 86bbwachy Phase 2 capture attributes -- set by the orchestrator
+        # after construction, matching current_agent's own already-
+        # established pattern (set post-init, not threaded through every
+        # constructor). All default to None/"analysis" so every existing
+        # test that constructs a BaseRunner subclass directly, without
+        # knowing about capture at all, keeps working unchanged: capture is
+        # gated on self.ticker being set (see call_model/_call_generate),
+        # not on these attributes existing.
+        self.run_id = None
+        self.ticker: str | None = None
+        self.seq_counter = None  # a shared itertools.count(), one per run
+        self.context_tag: str = "analysis"
+
     async def __aenter__(self) -> "BaseRunner":
         # Delegates to _get_session() rather than duplicating the
         # ClientSession(...) construction here -- one place decides how a
@@ -252,6 +266,11 @@ class BaseRunner:
     ) -> dict:
         await _preflight()
 
+        options = {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+            "num_ctx": NUM_CTX,
+        }
         payload = {
             "model": MODEL,
             "messages": [
@@ -260,11 +279,7 @@ class BaseRunner:
             ],
             "stream": False,
             "think": THINK,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
-                "num_ctx": NUM_CTX,
-            },
+            "options": options,
         }
         session = await self._get_session()
         async with session.post(f"{OLLAMA_HOST}/api/chat", json=payload) as response:
@@ -280,6 +295,36 @@ class BaseRunner:
             "eval_count": body.get("eval_count"),
         }
 
+        text = message.get("content", "")
+        empty_content = not text.strip()
+        call_site = f"agent:{(self.current_agent or type(self).__name__).lower()}"
+        seq = next(self.seq_counter) if self.seq_counter is not None else None
+        # Gated on self.ticker, not on run_id/seq individually -- ticker is
+        # the one attribute with no sensible default, so its absence is the
+        # real signal that this call is happening outside a real, capture-
+        # enabled run (e.g. every existing unit test that constructs a
+        # runner directly and never sets these -- see __init__'s own
+        # comment for why that must keep working unchanged).
+        artifact_paths = {"prompt_path": None, "context_path": None, "response_path": None}
+        if self.ticker is not None:
+            artifact_paths = write_call_artifacts(
+                run_id=self.run_id,
+                ticker=self.ticker,
+                seq=seq or 0,
+                call_site=call_site,
+                attempt=self.current_attempt,
+                prompt_text=f"SYSTEM:\n{system_prompt}\n\nUSER:\n{user_message}",
+                # No structured context payload for the plain /api/chat path
+                # -- context.json is for template-iteration replay (spec
+                # §6), which only applies where a real values dict rendered
+                # the prompt. This path's user_message is already a plain
+                # f-string, matching every agent's own build_user_message()
+                # (86bbwachy planning finding #8) -- nothing structured to
+                # snapshot here beyond the rendered text itself.
+                context_payload=None,
+                response_body=body,
+            )
+
         self.call_log.append(
             {
                 "agent": self.current_agent or type(self).__name__,
@@ -289,16 +334,30 @@ class BaseRunner:
                 # a non-zero count here on a `think: "low"` run is the regression
                 # CLAUDE.md warns about.
                 "thinking_chars": len(message.get("thinking") or ""),
+                # 86bbwachy Phase 2 additions -- see agents/capture.py.
+                "call_site": call_site,
+                "seq": seq,
+                "context_tag": self.context_tag,
+                "model": MODEL,
+                "options_json": options,
+                "finish_reason": map_finish_reason(body.get("done_reason"), empty_content=empty_content),
+                **artifact_paths,
             }
         )
 
-        text = message.get("content", "")
-        if not text.strip():
-            # A blank content with a populated thinking field means the model
-            # spent its budget reasoning and never emitted an answer -- usually
-            # num_predict too low, or `think` set too high.
-            raise json.JSONDecodeError("empty content from model", text or "", 0)
-        return _parse_json_response(text)
+        try:
+            if empty_content:
+                # A blank content with a populated thinking field means the model
+                # spent its budget reasoning and never emitted an answer -- usually
+                # num_predict too low, or `think` set too high.
+                raise json.JSONDecodeError("empty content from model", text or "", 0)
+            result = _parse_json_response(text)
+        except json.JSONDecodeError as exc:
+            self.call_log[-1]["parsed_ok"] = False
+            self.call_log[-1]["parse_error"] = str(exc)
+            raise
+        self.call_log[-1]["parsed_ok"] = True
+        return result
 
     async def _call_generate(
         self,
@@ -336,16 +395,17 @@ class BaseRunner:
         """
         await _preflight()
 
+        options = {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+            "num_ctx": NUM_CTX,
+        }
         payload: dict = {
             "model": MODEL,
             "prompt": prompt,
             "stream": False,
             "think": THINK,
-            "options": {
-                "temperature": temperature,
-                "num_predict": max_tokens,
-                "num_ctx": NUM_CTX,
-            },
+            "options": options,
         }
         if system is not None:
             payload["system"] = system
@@ -375,19 +435,59 @@ class BaseRunner:
             # though it's explicitly not a cost lever.
             "prompt_eval_cached_count": body.get("prompt_eval_cached_count"),
         }
+
+        text = body.get("response", "")
+        empty_content = not text.strip()
+        call_site = f"agent:{(self.current_agent or type(self).__name__).lower()}"
+        seq = next(self.seq_counter) if self.seq_counter is not None else None
+        artifact_paths = {"prompt_path": None, "context_path": None, "response_path": None}
+        if self.ticker is not None:
+            # Continuation successor turns (context is not None, system is
+            # None) only capture the NEW incremental prompt text here, not
+            # the full effective context -- the prior turn's content lives
+            # in Ollama's own opaque token-ID array, not recoverable as
+            # text from this call alone. A known, disclosed limitation of
+            # what's capturable, not a bug: the predecessor turn's own
+            # artifact files already have its own full prompt/response.
+            prompt_text = f"SYSTEM:\n{system}\n\nPROMPT:\n{prompt}" if system else prompt
+            artifact_paths = write_call_artifacts(
+                run_id=self.run_id,
+                ticker=self.ticker,
+                seq=seq or 0,
+                call_site=call_site,
+                attempt=self.current_attempt,
+                prompt_text=prompt_text,
+                context_payload=None,
+                response_body=body,
+            )
+
         self.call_log.append(
             {
                 "agent": self.current_agent or type(self).__name__,
                 "attempt": self.current_attempt,
                 **self.last_timing,
                 "thinking_chars": len(body.get("thinking") or ""),
+                # 86bbwachy Phase 2 additions -- see agents/capture.py.
+                "call_site": call_site,
+                "seq": seq,
+                "context_tag": self.context_tag,
+                "model": MODEL,
+                "options_json": options,
+                "finish_reason": map_finish_reason(body.get("done_reason"), empty_content=empty_content),
+                **artifact_paths,
             }
         )
 
-        text = body.get("response", "")
-        if not text.strip():
-            raise json.JSONDecodeError("empty response from model", text or "", 0)
-        return _parse_json_response(text), body.get("context", [])
+        try:
+            if empty_content:
+                raise json.JSONDecodeError("empty response from model", text or "", 0)
+            result = _parse_json_response(text)
+        except json.JSONDecodeError as exc:
+            self.call_log[-1]["parsed_ok"] = False
+            self.call_log[-1]["parse_error"] = str(exc)
+            raise
+        self.call_log[-1]["parsed_ok"] = True
+        return result, body.get("context", [])
 
     # Per-agent reminder appended to the retry message. Runners may override with
     # the "Retry Prompt Injection" text from their own prompt spec. Left empty by
@@ -626,14 +726,26 @@ class BaseRunner:
                 if self.call_log:
                     self.call_log[-1]["passed"] = passed
                     self.call_log[-1]["errors"] = errors
+                    # 86bbwachy Phase 2: same values, llm_calls' own field
+                    # names -- added alongside passed/errors rather than
+                    # renaming them, since an existing test
+                    # (test_base.py:431) already asserts on "passed" by
+                    # that exact name.
+                    self.call_log[-1]["validator_passed"] = passed
+                    self.call_log[-1]["validator_errors"] = errors
                 if passed:
                     return result, [], context
                 # Salvage small length overshoots locally rather than spending a
                 # retry the model demonstrably cannot win (see _auto_trim).
                 if self._auto_trim(result, errors):
+                    if self.call_log:
+                        self.call_log[-1]["auto_trimmed"] = True
                     passed, errors = validator(result)
                     if passed:
                         logger.info("auto_trimmed_length_bound")
+                        if self.call_log:
+                            self.call_log[-1]["validator_passed"] = True
+                            self.call_log[-1]["validator_errors"] = []
                         return result, [], context
                 # On the final attempt only, accept output whose only remaining
                 # errors are soft (SOFT_ERROR_PREFIXES) rather than spending this
@@ -650,6 +762,8 @@ class BaseRunner:
                         if self.call_log:
                             self.call_log[-1]["passed"] = True
                             self.call_log[-1]["soft_errors"] = soft
+                            self.call_log[-1]["validator_passed"] = True
+                            self.call_log[-1]["validator_errors"] = soft
                         return result, [], context
                 last_result = result
                 last_errors = errors
