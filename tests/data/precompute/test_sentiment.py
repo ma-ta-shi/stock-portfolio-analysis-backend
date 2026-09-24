@@ -178,6 +178,21 @@ async def test_score_article_none_on_missing_message_shape():
     assert result is None
 
 
+@pytest.mark.asyncio
+async def test_score_article_none_on_top_level_json_null_body():
+    """Regression: a 200 status whose body is the bare JSON value `null`
+    (not `{}`) is still valid JSON -- response.json() succeeds and returns
+    Python None. A rewrite done for capture's sake (86bbwachy Phase 3)
+    moved message/content extraction outside the try/except that used to
+    catch the TypeError None["message"] raises, which would have let this
+    crash the whole summarize_news() batch instead of degrading to a
+    single None score. Caught on review, not by this test failing first --
+    written after the fix to lock in the real failure mode found."""
+    session = FakeSession(FakeResponse(200, None))
+    result = await _score_article(session, "headline", "text")
+    assert result is None
+
+
 # ---------- capture (86bbwachy Phase 3) ----------
 
 
@@ -251,6 +266,26 @@ async def test_score_article_captures_no_http_response_at_all(tmp_path, monkeypa
 
     assert result is None
     assert capture.call_log == []
+
+
+@pytest.mark.asyncio
+async def test_score_article_captures_a_top_level_json_null_body_without_raising(tmp_path, monkeypatch):
+    """Same real regression as test_score_article_none_on_top_level_json_null_body
+    above, but through the capture path specifically -- record_call's own
+    response_body.get(...) calls needed the identical isinstance guard,
+    one layer deeper (agents/capture.py's own fix)."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, None))
+    capture = _capture()
+
+    result = await _score_article(session, "headline", "text", capture=capture)
+
+    assert result is None
+    assert len(capture.call_log) == 1
+    entry = capture.call_log[0]
+    assert entry["parsed_ok"] is False
+    assert entry["total_duration_s"] is None
+    assert entry["prompt_eval_count"] is None
 
 
 class _FakeClientSessionCM:

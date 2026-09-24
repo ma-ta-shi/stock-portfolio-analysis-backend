@@ -203,6 +203,22 @@ async def test_malformed_outer_body_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_none_on_top_level_json_null_body():
+    """Regression: a 200 status whose body is the bare JSON value `null`
+    (not `{}`) is still valid JSON -- response.json() succeeds and returns
+    Python None, distinct from test_malformed_outer_body_returns_none's
+    genuine decode failure above. Caught on review of a rewrite done for
+    capture's sake (86bbwachy Phase 3): the malformed-response try/except
+    already tolerated this (None["response"] raises TypeError, already
+    caught), but the capture block built alongside it called data.get(...)
+    directly with no such guard -- would have crashed the whole
+    build_filing_digests() call on this input instead of degrading to a
+    missing digest."""
+    session = FakeSession(FakeResponse(200, None))
+    assert await summarize_filing_section(session, "text", "MDA") is None
+
+
+@pytest.mark.asyncio
 async def test_missing_response_key_returns_none():
     session = FakeSession(FakeResponse(200, {"eval_count": 40, "done_reason": "stop"}))
     assert await summarize_filing_section(session, "text", "MDA") is None
@@ -360,6 +376,25 @@ async def test_captures_no_http_response_at_all(tmp_path, monkeypatch):
 
     assert result is None
     assert capture.call_log == []
+
+
+@pytest.mark.asyncio
+async def test_captures_a_top_level_json_null_body_without_raising(tmp_path, monkeypatch):
+    """Same real regression as test_none_on_top_level_json_null_body above,
+    but through the capture path specifically -- record_call's own
+    response_body.get(...) calls needed the identical isinstance guard,
+    one layer deeper (agents/capture.py's own fix)."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, None))
+    capture = _capture()
+
+    result = await summarize_filing_section(session, "text", "MDA", capture=capture)
+
+    assert result is None
+    assert len(capture.call_log) == 1
+    entry = capture.call_log[0]
+    assert entry["parsed_ok"] is False
+    assert entry["total_duration_s"] is None
 
 
 @pytest.mark.asyncio

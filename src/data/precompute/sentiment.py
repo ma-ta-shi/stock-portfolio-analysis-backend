@@ -153,8 +153,22 @@ async def _score_article(
     # behavior change: a missing "message"/"content" key still ends up as
     # the same sentiment_score_malformed_response warning via json.loads("")
     # raising JSONDecodeError (a ValueError subclass), still caught below.
-    message = data.get("message", {})
+    #
+    # isinstance guards, not bare .get() -- real regression caught on
+    # review: response.json() succeeding only means `data` is valid JSON,
+    # not that it's a dict (a top-level JSON null/string/list/number is
+    # just as valid). The ORIGINAL code's data["message"]["content"] was
+    # inside a try/except that already caught the TypeError a None/non-dict
+    # `data` raises; moving this out for capture's sake would have lost
+    # that protection and let one weird Ollama response crash the entire
+    # summarize_news() batch instead of degrading to a single None score.
+    safe_data = data if isinstance(data, dict) else {}
+    message = safe_data.get("message")
+    message = message if isinstance(message, dict) else {}
     content = message.get("content", "")
+    content = content if isinstance(content, str) else ""
+    thinking = message.get("thinking")
+    thinking = thinking if isinstance(thinking, str) else ""
 
     sentiment: str | None = None
     parse_error: str | None = None
@@ -181,7 +195,7 @@ async def _score_article(
             options=payload["options"],
             prompt_text=prompt_text,
             response_body=data,
-            thinking_chars=len(message.get("thinking") or ""),
+            thinking_chars=len(thinking),
             empty_content=not content.strip(),
             parsed_ok=sentiment is not None,
             parse_error=parse_error,

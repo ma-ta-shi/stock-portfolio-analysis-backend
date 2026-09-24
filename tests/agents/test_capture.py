@@ -135,6 +135,41 @@ class TestRecordCall:
         assert entry["prompt_eval_count"] is None
         assert entry["eval_count"] is None
 
+    def test_non_dict_response_body_does_not_raise(self, tmp_path, monkeypatch):
+        """Real regression, found on review: response.json() succeeding
+        only guarantees valid JSON, not a dict -- a malformed/unexpected
+        Ollama response (top-level null, a bare string, a list) is exactly
+        the case this whole module exists to record, not one it can
+        assume away. Both sentiment.py's and filing_summarizer.py's own
+        callers already got the identical fix for their own local
+        extraction; this is the one place inside record_call itself doing
+        response_body.get(...) directly."""
+        monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+        capture = self._capture(tmp_path)
+
+        record_call(
+            capture,
+            call_site="precompute:sentiment",
+            model="gpt-oss:20b",
+            options={},
+            prompt_text="x",
+            response_body=None,
+            thinking_chars=0,
+            empty_content=True,
+            parsed_ok=False,
+            parse_error="malformed response",
+        )
+
+        entry = capture.call_log[0]
+        assert entry["total_duration_s"] is None
+        assert entry["prompt_eval_count"] is None
+        assert entry["eval_count"] is None
+        assert entry["finish_reason"] == "empty_content"
+        # the raw (weird) response is still written to disk for real
+        # debugging, not silently swallowed by the same guard
+        response_path = tmp_path / entry["response_path"]
+        assert response_path.read_text() == "null"
+
     def test_seq_increments_across_calls_via_the_shared_counter(self, tmp_path, monkeypatch):
         monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
         capture = self._capture(tmp_path)

@@ -186,6 +186,22 @@ async def summarize_filing_section(
         digest = None
 
     if capture is not None:
+        # isinstance/type guards, not bare .get() -- real regression caught
+        # on review: response.json() succeeding only means `data` is valid
+        # JSON, not that it's a dict with string-valued fields (a top-level
+        # JSON null/string/list/number, or a "response"/"thinking" field
+        # that isn't itself a string, are all just as valid). The malformed-
+        # response try/except above already tolerates this for
+        # digest/eval_count; this capture block needs the same tolerance so
+        # one weird Ollama response can't crash the entire
+        # build_filing_digests() call instead of degrading to a missing
+        # digest -- same class of bug as sentiment.py's own fix, see that
+        # function's own comment for the full reasoning.
+        safe_data = data if isinstance(data, dict) else {}
+        raw_thinking = safe_data.get("thinking")
+        thinking = raw_thinking if isinstance(raw_thinking, str) else ""
+        raw_response = safe_data.get("response")
+        response_text = raw_response if isinstance(raw_response, str) else ""
         record_call(
             capture,
             call_site=f"precompute:filing_{section.lower()}",
@@ -193,8 +209,8 @@ async def summarize_filing_section(
             options=payload["options"],
             prompt_text=prompt_text,
             response_body=data,
-            thinking_chars=len(data.get("thinking") or ""),
-            empty_content=not (data.get("response") or "").strip(),
+            thinking_chars=len(thinking),
+            empty_content=not response_text.strip(),
             parsed_ok=parse_error is None,
             parse_error=parse_error,
         )

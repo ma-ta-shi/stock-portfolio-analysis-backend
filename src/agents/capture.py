@@ -191,7 +191,14 @@ def record_call(
         context_payload=None,
         response_body=response_body,
     )
-    total_duration = response_body.get("total_duration")
+    # response.json() succeeding only guarantees valid JSON, not a dict --
+    # a top-level JSON null/string/list/number is just as valid, and a
+    # malformed/unexpected Ollama response is exactly the case this
+    # function exists to record, not one it can assume away. Guarded here,
+    # once, rather than trusting every caller to pre-sanitize response_body
+    # before passing it in.
+    safe_body = response_body if isinstance(response_body, dict) else {}
+    total_duration = safe_body.get("total_duration")
     capture.call_log.append({
         "call_site": call_site,
         "seq": seq,
@@ -199,11 +206,11 @@ def record_call(
         "model": model,
         "options_json": options,
         "attempt": 1,
-        "total_duration_s": round(total_duration / 1e9, 2) if total_duration is not None else None,
-        "prompt_eval_count": response_body.get("prompt_eval_count"),
-        "eval_count": response_body.get("eval_count"),
+        "total_duration_s": round(total_duration / 1e9, 2) if isinstance(total_duration, (int, float)) else None,
+        "prompt_eval_count": safe_body.get("prompt_eval_count"),
+        "eval_count": safe_body.get("eval_count"),
         "thinking_chars": thinking_chars,
-        "finish_reason": map_finish_reason(response_body.get("done_reason"), empty_content=empty_content),
+        "finish_reason": map_finish_reason(safe_body.get("done_reason"), empty_content=empty_content),
         "parsed_ok": parsed_ok,
         "parse_error": parse_error,
         **paths,
