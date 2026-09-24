@@ -42,7 +42,7 @@ def _bundle(**overrides) -> ResearchSourcesBundle:
         management_signals=_signals(),
         dual_class_flag=False,
         cik_verified=True,
-        sedar_filing_available=False,
+        has_filing_digest=False,
         latest_filing_age_days=10,
         latest_transcript_age_days=30,
         latest_news_age_days=1,

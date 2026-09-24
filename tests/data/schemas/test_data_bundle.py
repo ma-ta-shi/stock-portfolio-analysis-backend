@@ -41,7 +41,7 @@ def _empty_research_sources() -> ResearchSourcesBundle:
         ),
         dual_class_flag=False,
         cik_verified=False,
-        sedar_filing_available=False,
+        has_filing_digest=False,
         latest_filing_age_days=None,
         latest_transcript_age_days=None,
         latest_news_age_days=None,

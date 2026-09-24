@@ -29,6 +29,7 @@ No caching here: summarize_filing_section is the single-section primitive
 
 import asyncio
 import json
+import os
 import re
 from typing import Literal
 
@@ -55,7 +56,16 @@ _NON_ANSWER_RE = re.compile(
 )
 _PLACEHOLDER_RE = re.compile(r"[$€£]\s?[\d,]*[?xX—]{1,}\b|\b\d[?]\s|\b\d+,[?]")
 
-_OLLAMA_URL = "http://localhost:11434/api/generate"  # /generate: one prompt, no chat turns
+# Real bug, confirmed live 2026-09-23 (found while live-testing the
+# OllamaUnavailable abort path): this used to hardcode localhost:11434
+# instead of reading OLLAMA_HOST from the environment the way
+# agents/base.py already does -- same real consequence and same fix as
+# precompute/sentiment.py's own OLLAMA_HOST constant, see that module's
+# docstring for the live reproduction. Same env var name/default as
+# agents/base.py, duplicated rather than imported -- data/precompute/ has
+# no existing dependency on agents/ anywhere in this codebase.
+_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_OLLAMA_URL = f"{_OLLAMA_HOST}/api/generate"  # /generate: one prompt, no chat turns
 _MODEL = "gpt-oss:20b"
 _THINK = "low"  # gpt-oss reasoning-effort is a string ("low"/"medium"/"high"), not the
 # boolean qwen used - a bool would silently be the wrong shape here.

@@ -402,6 +402,82 @@ class TestCallWithValidation:
             await runner.call_with_validation("sys", "usr", _pass_validator)
 
 
+# ---------- soft-error acceptance (86bbuhjup) ----------
+
+
+class TestSoftErrorAcceptance:
+    """SOFT_ERROR_PREFIXES/split_soft_errors -- CIO §122.5 / Pass 2 Rule 12:
+    citation-breadth and narrative-length leniency should apply retry pressure
+    on earlier attempts but not cost the agent its whole output once attempts
+    run out. Confirmed live during 86bbuhjup that neither this file nor the
+    harness's own simulation/runners/base.py actually wired this in before now
+    -- SOFT_ERROR_PREFIXES was imported and combined but never referenced in
+    _retry_loop, in either place."""
+
+    @pytest.mark.asyncio
+    async def test_accepts_on_final_attempt_when_only_soft_errors_remain(self):
+        session = FakeSession(
+            [FakeResponse(200, _ollama_chat_response({"a": i})) for i in range(MAX_RETRIES)]
+        )
+        runner = BaseRunner()
+        runner.session = session
+
+        def validator(result):
+            return False, ["synthesis_narrative: too short (1200 chars, min 1500)"]
+
+        result, errors = await runner.call_with_validation("sys", "usr", validator)
+        assert errors == []
+        assert len(session.calls) == MAX_RETRIES
+        assert runner.call_log[-1]["passed"] is True
+        assert runner.call_log[-1]["soft_errors"] == [
+            "synthesis_narrative: too short (1200 chars, min 1500)"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_does_not_accept_early_when_only_soft_errors_present(self):
+        """Only the FINAL attempt gets soft-error leniency -- an earlier attempt
+        must still see the error and get a real chance to fix it, not be let
+        off early."""
+        session = FakeSession(
+            [
+                FakeResponse(200, _ollama_chat_response({"narrative": "short"})),
+                FakeResponse(200, _ollama_chat_response({"narrative": "long enough now"})),
+            ]
+        )
+        runner = BaseRunner()
+        runner.session = session
+        seen = {"count": 0}
+
+        def validator(result):
+            seen["count"] += 1
+            if seen["count"] == 1:
+                return False, ["synthesis_narrative: too short (1200 chars, min 1500)"]
+            return True, []
+
+        result, errors = await runner.call_with_validation("sys", "usr", validator)
+        assert errors == []
+        assert len(session.calls) == 2, "the first attempt must retry, not get soft-accepted"
+
+    @pytest.mark.asyncio
+    async def test_hard_error_on_final_attempt_still_fails(self):
+        """A hard error mixed in with a soft one on the final attempt is still
+        a real failure -- leniency only applies when NOTHING but soft errors
+        remain."""
+        session = FakeSession(FakeResponse(200, _ollama_chat_response({"a": 1})))
+        runner = BaseRunner()
+        runner.session = session
+
+        def validator(result):
+            return False, [
+                "synthesis_narrative: too short (1200 chars, min 1500)",
+                "stock_outlook: must be one of bullish|bearish, got 'sideways'",
+            ]
+
+        result, errors = await runner.call_with_validation("sys", "usr", validator)
+        assert len(session.calls) == MAX_RETRIES
+        assert "stock_outlook: must be one of bullish|bearish, got 'sideways'" in errors
+
+
 # ---------- _call_generate (86bc2d414) ----------
 
 

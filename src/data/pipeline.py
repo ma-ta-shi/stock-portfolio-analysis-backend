@@ -242,10 +242,43 @@ class DataPipeline:
             # follow both research_sources and macro_sources, and is only
             # ever built for a CA stock (DataBundle's own validator requires
             # None for a US stock).
-            sentiment_result, research_sources_bundle, insider_transactions = await asyncio.gather(
+            #
+            # research_sources is deliberately NOT in this gather (was, until
+            # 2026-09-23) -- real bug, confirmed live via a real AAPL run:
+            # sentiment.summarize_news() calls Ollama at num_ctx=8192 (up to
+            # 10 concurrent article-scoring calls), build_research_sources()
+            # calls it at num_ctx=32768 (via filing_summarizer.py, itself
+            # already an internal background task inside that function -- see
+            # its own docstring). Both hit the SAME single-generation-slot
+            # Ollama instance (docs/technical/ollama-concurrency-finding.md).
+            # docs/technical/ollama-num-ctx-finding.md already documents that
+            # Ollama reloads the model on any num_ctx CHANGE -- confirmed live
+            # here: `ollama ps` showed context_length=8192 at the exact moment
+            # both AAPL filing-digest calls failed (empty-string error,
+            # consistent with a bare asyncio.TimeoutError()) after ~2 minutes
+            # in prepare(), vs. a much faster prepare() for a quieter CA
+            # ticker earlier the same session. A busier ticker (more news ->
+            # more concurrent 8192-ctx sentiment calls) makes this worse, not
+            # rarer -- a real CA/US asymmetry, not a fluke.
+            #
+            # Considered and rejected: raising sentiment.py's _NUM_CTX to
+            # match (32768) only removes the reload tax -- it does NOT remove
+            # the deeper issue that this is still one real GPU generation
+            # slot, so up to 10 queued sentiment calls could still starve
+            # research_sources's 90s timeout on a heavily-covered ticker
+            # through pure queue depth, reload-free. Sequencing removes both
+            # risks at once and leaves each module's own already-validated
+            # num_ctx untouched. sentiment+insider run first (insider doesn't
+            # call Ollama at all, so gathering it here costs nothing); running
+            # research_sources last means its 32768 call is also the LAST
+            # Ollama call before Pass 1 begins (also 32768) -- no third
+            # reload transitioning into Pass 1.
+            sentiment_result, insider_transactions = await asyncio.gather(
                 sentiment.summarize_news(id_assigned_articles),
-                build_research_sources(ticker, id_assigned_articles, stock),
                 router.get_insider_trading(ticker),
+            )
+            research_sources_bundle = await build_research_sources(
+                ticker, id_assigned_articles, stock
             )
 
             fred = FredMacroDataProvider()

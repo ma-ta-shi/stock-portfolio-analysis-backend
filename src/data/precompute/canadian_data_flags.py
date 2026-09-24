@@ -53,10 +53,11 @@ def build_canadian_data_flags(
     exist). Confirmed live for RY.TO: 155 items, 7 distinct real sources.
 
     sedar_filing_available: copied directly from
-    ResearchSourcesBundle.sedar_filing_available, not re-derived - both
-    fields mean the same real fact (research_sources.py's own
-    has_filing_digest), and computing them independently risks the two
-    silently disagreeing. Confirmed live True for RY.TO.
+    ResearchSourcesBundle.has_filing_digest (renamed from
+    sedar_filing_available 2026-09-23 - see that field's own docstring),
+    not re-derived - both fields mean the same real fact, and computing
+    them independently risks the two silently disagreeing. Confirmed live
+    True for RY.TO.
 
     statcan_available: MacroSourcesBundle.statcan_age_days is already None
     exactly when the StatCan fetch failed or the stock isn't Canadian, per
@@ -75,6 +76,6 @@ def build_canadian_data_flags(
         analyst_count=analyst_count,
         news_article_count=research_sources.news_item_count,
         news_sources=sorted({item.source for item in research_sources.news_items}),
-        sedar_filing_available=research_sources.sedar_filing_available,
+        sedar_filing_available=research_sources.has_filing_digest,
         statcan_available=macro_sources.statcan_age_days is not None,
     )

@@ -50,7 +50,36 @@ from collections.abc import Awaitable, Callable
 import aiohttp
 import structlog
 
+from agents.validators.cio import SOFT_ERROR_PREFIXES as _SOFT_CIO
+from agents.validators.pass2 import SOFT_ERROR_PREFIXES as _SOFT_P2
+
 logger = structlog.get_logger(__name__)
+
+# Soft-error prefixes, unioned from both validator modules that declare them (CIO's
+# citation/length leniency at §122.5, Pass 2's citation-breadth Rule 12). Imported
+# rather than copied so this cannot drift from the validators that define what's
+# soft -- same reasoning as agents/utils.py's CONFIDENCE_STATUS_LABELS sharing.
+#
+# NOT a port of a working reference: confirmed by reading `simulation/runners/base.py`
+# directly (86bbuhjup) that the harness imports and combines this exact constant but
+# never actually calls split_soft_errors() or references it in `_retry_loop` -- it's
+# dead code there too, imported but never wired into the retry flow. Both the harness
+# and this file get the real wiring in the same pass below, so they don't silently
+# diverge on it a second time.
+SOFT_ERROR_PREFIXES = tuple(sorted(set(_SOFT_CIO) | set(_SOFT_P2)))
+
+
+def split_soft_errors(errors: list[str]) -> tuple[list[str], list[str]]:
+    """(hard, soft) -- soft errors are retry pressure, not a terminal failure.
+
+    Shared across every agent (not just CIO/Pass 2, whose validators declare the
+    prefixes) since `_retry_loop` is generic infrastructure every runner goes
+    through. An agent whose validator never produces a soft-prefixed error simply
+    always gets an empty `soft` list here -- this costs nothing to apply uniformly.
+    """
+    soft = [e for e in errors if e.startswith(SOFT_ERROR_PREFIXES)]
+    hard = [e for e in errors if not e.startswith(SOFT_ERROR_PREFIXES)]
+    return hard, soft
 
 # Overridable for local A/B comparison against another Ollama model. Default
 # matches CLAUDE.md's current LLM Routing decision (2026-08-26) exactly.
@@ -605,6 +634,22 @@ class BaseRunner:
                     passed, errors = validator(result)
                     if passed:
                         logger.info("auto_trimmed_length_bound")
+                        return result, [], context
+                # On the final attempt only, accept output whose only remaining
+                # errors are soft (SOFT_ERROR_PREFIXES) rather than spending this
+                # as a hard terminal failure -- these exist specifically so
+                # citation-breadth/length leniency rules apply retry pressure on
+                # earlier attempts without costing the agent its whole output when
+                # attempts run out (CIO §122.5, Pass 2 Rule 12). Final-attempt-only,
+                # not every attempt: earlier attempts should still see the error and
+                # get a chance to fix it for real.
+                if attempt == MAX_RETRIES - 1:
+                    hard, soft = split_soft_errors(errors)
+                    if soft and not hard:
+                        logger.warning("soft_errors_accepted_on_final_attempt", errors=soft)
+                        if self.call_log:
+                            self.call_log[-1]["passed"] = True
+                            self.call_log[-1]["soft_errors"] = soft
                         return result, [], context
                 last_result = result
                 last_errors = errors
