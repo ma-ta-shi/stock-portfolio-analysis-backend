@@ -418,6 +418,8 @@ class DataPipeline:
                 dividend_history=dividend_history,
                 peer_metrics=fundamentals_result["peer_metrics"],
                 price_info=price_info,
+                missing_fields=fundamentals_result["missing_fields"],
+                currency_mismatch=fundamentals_result["currency_mismatch"],
                 technical_indicators=technicals_result["technical_indicators"],
                 support_resistance=technicals_result["support_resistance"],
                 trend_structure=technicals_result["trend_structure"],

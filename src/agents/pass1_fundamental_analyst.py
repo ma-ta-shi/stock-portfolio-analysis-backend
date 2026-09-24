@@ -40,11 +40,45 @@ NOT a clean port -- field-by-field notes, each verified against
   way Stock Researcher already reads price_info/dividend_info.
 - "BASE RELIABILITY SCORE" block: omitted, same D6-retirement reasoning as
   pass1_stock_researcher.py.
+- `missing_fields`/`currency_mismatch` (86bbwachy Phase 4): now persisted onto
+  DataBundle (`data/schemas/data_bundle.py` + `data/pipeline.py`'s bundle
+  assembly) -- the module docstring note above about them being discarded is
+  now stale, kept only as history of why this was the one agent needing a
+  schema change for input_field_coverage. `_data_coverage_line()` itself is
+  UNCHANGED -- deliberately not wired to the new fields, per this ticket's own
+  scope split: that prompt line is D6's `data_coverage` concept, explicitly
+  deferred as its own unit; `missing_fields` here feeds only the new, separate
+  `input_field_coverage` signal build_user_message() returns.
 """
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
+from agents.utils import RenderedField
 from agents.validators.pass1 import validate_fundamental_analyst
 from data.schemas.data_bundle import DataBundle
+
+# Maps this prompt's own rendered field name to its "bucket.key" entry in
+# compute_all()'s missing_fields list (data/precompute/fundamentals.py) --
+# only the valuation/growth/profitability/balance_sheet buckets are scanned
+# there (confirmed by reading compute_all() directly); dividend_info/
+# peer_metrics/analyst_consensus are never in missing_fields at all, tracked
+# separately below instead.
+_MISSING_FIELDS_MAP = {
+    "pe_ratio": "valuation_metrics.pe_ratio",
+    "forward_pe": "valuation_metrics.forward_pe",
+    "peg_ratio": "valuation_metrics.peg_ratio",
+    "revenue_growth_yoy": "growth_metrics.revenue_growth_yoy",
+    "revenue_growth_3yr_cagr": "growth_metrics.revenue_growth_3yr_cagr",
+    "eps_growth_yoy": "growth_metrics.eps_growth_yoy",
+    "gross_margin": "profitability_metrics.gross_margin",
+    "operating_margin": "profitability_metrics.operating_margin",
+    "net_margin": "profitability_metrics.net_margin",
+    "roe": "profitability_metrics.roe",
+    "fcf_to_net_income": "profitability_metrics.fcf_to_net_income",
+    "debt_to_equity": "balance_sheet_metrics.debt_to_equity",
+    "current_ratio": "balance_sheet_metrics.current_ratio",
+    "interest_coverage": "balance_sheet_metrics.interest_coverage",
+    "cash_position": "balance_sheet_metrics.cash_position",
+}
 
 
 def _fmt(v, suffix: str = "", pct: bool = False):
@@ -56,29 +90,32 @@ def _fmt(v, suffix: str = "", pct: bool = False):
 
 
 def _data_coverage_line() -> str:
-    # missing_fields/currency_mismatch live on compute_all()'s own return but
-    # are never persisted onto DataBundle (see module docstring) -- no real
-    # per-run signal is available here today, so this stays the harness's
-    # literal default rather than fabricating one from a field that doesn't
-    # exist on the bundle.
+    # D6's own data_coverage concept, deliberately deferred as a whole unit
+    # (86bbwachy Phase 4) -- stays the harness's literal default, not wired
+    # to the now-real missing_fields/currency_mismatch fields below.
     return "standard."
 
 
-def _peers_text(bundle: DataBundle) -> str:
+def _missing_fields_presence(bundle: DataBundle) -> dict[str, bool]:
+    missing = set(bundle.missing_fields)
+    return {name: full_key not in missing for name, full_key in _MISSING_FIELDS_MAP.items()}
+
+
+def _peers_text(bundle: DataBundle) -> RenderedField:
     records = bundle.peer_metrics.get("peer_records", [])
     if not records:
-        return ""
+        return RenderedField(text="", present=False)
     lines = []
     for i, r in enumerate(records, 1):
         metrics = ", ".join(f"{k}={v}" for k, v in r.items() if v is not None and k != "ticker")
         lines.append(f"  PEER_{i} ({r.get('ticker', '?')}): {metrics}")
-    return "PEER DATA:\n" + "\n".join(lines)
+    return RenderedField(text="PEER DATA:\n" + "\n".join(lines), present=True)
 
 
-def _earnings_surprises_text(bundle: DataBundle) -> str:
+def _earnings_surprises_text(bundle: DataBundle) -> RenderedField:
     surprises = bundle.growth_metrics.get("earnings_surprises") or []
     if not surprises:
-        return "N/A — no earnings surprise history available."
+        return RenderedField(text="N/A — no earnings surprise history available.", present=False)
     lines = []
     for s in surprises[:2]:  # newest first, per get_earnings_surprises' own contract
         eps_actual = s.get("eps_actual")
@@ -89,10 +126,10 @@ def _earnings_surprises_text(bundle: DataBundle) -> str:
             f"  {s.get('period_end', '?')}: EPS actual {eps_actual if eps_actual is not None else 'N/A'} "
             f"vs estimate {eps_est if eps_est is not None else 'N/A'} ({surprise_str} surprise)"
         )
-    return "\n".join(lines)
+    return RenderedField(text="\n".join(lines), present=True)
 
 
-def build_user_message(bundle: DataBundle) -> str:
+def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     ctx = bundle.context
     company_info = bundle.company_info
     val = bundle.valuation_metrics
@@ -103,8 +140,10 @@ def build_user_message(bundle: DataBundle) -> str:
     price = bundle.price_info
     analyst = bundle.analyst_consensus
     sector_medians = bundle.peer_metrics.get("sector_medians", {})
+    earnings_surprises = _earnings_surprises_text(bundle)
+    peers = _peers_text(bundle)
 
-    return f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
+    text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}
 
 VALUATION (VAL):
@@ -135,16 +174,25 @@ ANALYST CONSENSUS (ANALYST):
   Consensus: {_fmt(analyst.get('consensus_rating'))} | Avg target: {_fmt(analyst.get('target_mean'))} {bundle.stock.currency}
 
 EARNINGS SURPRISE HISTORY (for your own guidance-vs-consensus judgment):
-{_earnings_surprises_text(bundle)}
+{earnings_surprises.text}
 
-{_peers_text(bundle)}"""
+{peers.text}"""
+
+    field_presence = _missing_fields_presence(bundle)
+    field_presence["earnings_surprises"] = earnings_surprises.present
+    field_presence["peers_block"] = peers.present
+    return text, field_presence
 
 
 class FundamentalAnalystRunner(BaseRunner):
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "FUND"
         ctx = bundle.context
-        user_msg = build_user_message(bundle)
+        user_msg, field_presence = build_user_message(bundle)
+        # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
+        # failed call still records whether its own input was already
+        # incomplete.
+        self.last_field_coverage = field_presence
         system_prompt = fill(
             load_template("fundamental_analyst"),
             {

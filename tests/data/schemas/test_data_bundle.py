@@ -131,6 +131,8 @@ def _bundle(**overrides) -> DataBundle:
         dividend_history=[],
         peer_metrics={},
         price_info={},
+        missing_fields=[],
+        currency_mismatch=None,
         technical_indicators={},
         support_resistance={},
         trend_structure={},

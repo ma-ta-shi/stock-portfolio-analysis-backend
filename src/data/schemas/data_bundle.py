@@ -96,6 +96,20 @@ class DataBundle(ContractModel):
     dividend_history: list[dict]  # [{ex_date, payment_date, amount_per_share}]
     peer_metrics: dict
     price_info: dict
+    missing_fields: list[str]  # fundamentals.py::compute_all()'s own return -- "bucket.key"
+    # entries for every None value across valuation_metrics/growth_metrics/
+    # profitability_metrics/balance_sheet_metrics (86bbwachy Phase 4). Computed there
+    # already, previously discarded before reaching DataBundle -- persisted here rather
+    # than re-derived. Does NOT cover dividend_info/peer_metrics/analyst_consensus
+    # (compute_all()'s own scan never touched those buckets) -- input_field_coverage
+    # reads presence for those directly off the dict values instead, same as every
+    # other in-scope agent.
+    currency_mismatch: dict | None  # {financials_currency, quote_currency} when a
+    # CA-listed company reports in a different currency than its quote (e.g. ATD.TO
+    # reports in USD) -- every price-vs-statement multiple is then FX-distorted, not
+    # missing. A quality/distortion flag, not a presence flag -- deliberately NOT folded
+    # into input_field_coverage's {field: bool} map, which only answers "was this
+    # present," not "is this present value trustworthy."
 
     # --- Technical Analyst (Pass 1) ---
     technical_indicators: dict

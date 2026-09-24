@@ -177,6 +177,8 @@ def _fake_fundamentals_compute_all(**kwargs):
         "balance_sheet_metrics": {"health_rating": "healthy"},
         "dividend_info": {"dividend_yield": None},
         "peer_metrics": {},
+        "missing_fields": [],
+        "currency_mismatch": None,
     }
 
 
