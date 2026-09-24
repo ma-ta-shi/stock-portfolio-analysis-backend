@@ -70,28 +70,28 @@ def _bundle(**overrides) -> SimpleNamespace:
 
 
 def test_renders_real_header_fields():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "Technology | TSX | CAD" in msg
     assert "Timeline: medium_term | Account: tfsa" in msg
     assert "2026-09-23" in msg
 
 
 def test_renders_business_description_from_business_digest():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "Business digest content." in msg
 
 
 def test_business_description_honest_when_no_business_digest():
     bundle = _bundle()
     bundle.research_sources.filing_digests = [_filing_digest(section="MDA", content="MDA only.")]
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "N/A — no filing digest available" in msg
 
 
 def test_renders_news_item_with_real_citation_id():
     bundle = _bundle()
     bundle.research_sources.news_items = [_news_item(id_="N7", headline="Real headline")]
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "N7: Real headline" in msg
 
 
@@ -101,7 +101,7 @@ def test_low_quality_tier_news_is_filtered_out():
         _news_item(id_="N1", headline="Good story", tier="primary"),
         _news_item(id_="N2", headline="Low tier story", tier="low"),
     ]
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "Good story" in msg
     assert "Low tier story" not in msg
 
@@ -111,7 +111,7 @@ def test_renders_management_signals_from_structured_fields():
     bundle.research_sources.management_signals = _management_signals(
         insider="selling", buyback="suspended", dividend="cut", c_suite=2
     )
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "Insider activity (90d): selling" in msg
     assert "Buyback activity: suspended" in msg
     assert "Dividend activity: cut" in msg
@@ -121,27 +121,27 @@ def test_renders_management_signals_from_structured_fields():
 def test_renders_beta_from_risk_metrics_not_price_info():
     bundle = _bundle()
     bundle.risk_metrics = {"beta": 1.42}
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "Beta: 1.42" in msg
 
 
 def test_missing_beta_renders_honestly_not_fabricated():
     bundle = _bundle()
     bundle.risk_metrics = {}
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "Beta: N/A" in msg
 
 
 def test_renders_dividend_yield_as_percentage():
     bundle = _bundle()
     bundle.dividend_info = {"dividend_yield": 0.032, "payout_ratio": 0.45}
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "Yield: 3.20%" in msg
     assert "Payout ratio: 45.00%" in msg
 
 
 def test_no_dividend_data_renders_honestly_not_fabricated():
-    msg = build_user_message(_bundle())  # defaults: both None
+    msg, _ = build_user_message(_bundle())  # defaults: both None
     assert "Yield: N/A" in msg
     assert "Payout ratio: N/A" in msg
 
@@ -149,14 +149,14 @@ def test_no_dividend_data_renders_honestly_not_fabricated():
 def test_no_peers_renders_honestly():
     bundle = _bundle()
     bundle.research_sources.peer_blocks = []
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "PEER COMPARABLES: N/A" in msg
 
 
 def test_no_transcript_excerpts_renders_honestly_not_fabricated():
     """transcript_excerpts is permanently [] today (D3) -- must render as
     honestly unavailable, never a fabricated placeholder."""
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "EARNINGS TRANSCRIPT:" in msg
     assert "not available" in msg
 
@@ -164,13 +164,13 @@ def test_no_transcript_excerpts_renders_honestly_not_fabricated():
 def test_data_coverage_line_reflects_real_missing_sources():
     bundle = _bundle()
     bundle.research_sources.missing_sources_list = ["filing_digests", "peer_blocks"]
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "no filing digest available" in msg
     assert "no peer comparables available" in msg
 
 
 def test_data_coverage_line_standard_when_nothing_missing_except_permanent_gap():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     # Nothing in missing_sources_list, but the permanent transcript gap always
     # applies -- data_coverage_line is never a bare "standard." today.
     assert "earnings transcript excerpts are not available" in msg
@@ -179,12 +179,81 @@ def test_data_coverage_line_standard_when_nothing_missing_except_permanent_gap()
 def test_canadian_data_limited_flag_appears_when_sedar_unavailable():
     bundle = _bundle()
     bundle.canadian_data_flags = SimpleNamespace(sedar_filing_available=False)
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "CANADIAN DATA LIMITED: true" in msg
 
 
 def test_canadian_data_limited_flag_absent_for_us_stock():
     """canadian_data_flags is None for US stocks (DataBundle's own
     None-for-US enforcement) -- must not raise or fabricate a flag."""
-    msg = build_user_message(_bundle())  # canadian_data_flags=None by default
+    msg, _ = build_user_message(_bundle())  # canadian_data_flags=None by default
     assert "CANADIAN DATA LIMITED" not in msg
+
+
+# ---------- field_presence (86bbwachy Phase 4) ----------
+
+
+def test_field_presence_all_true_when_default_bundle_is_fully_populated():
+    """_bundle()'s own defaults have a real filing digest, news item, and
+    peer block -- only dividend data is None by default (see _bundle()'s
+    own dividend_info default)."""
+    _, presence = build_user_message(_bundle())
+    assert presence["business_description"] is True
+    assert presence["recent_developments"] is True
+    assert presence["filing_highlights"] is True
+    assert presence["peers_block"] is True
+    assert presence["beta"] is True
+    assert presence["dividend_context"] is False  # yield/payout both None by default
+    assert presence["earnings_transcript"] is False  # permanent D3 gap, transcript_excerpts=[]
+
+
+def test_field_presence_business_description_false_without_a_business_section():
+    bundle = _bundle()
+    bundle.research_sources.filing_digests = [_filing_digest(section="MDA", content="MDA only.")]
+    _, presence = build_user_message(bundle)
+    assert presence["business_description"] is False
+    # filing_highlights renders ALL sections, so a real MDA-only digest
+    # still counts as present there even though business_description (the
+    # Business-section-specific field) does not -- confirms the two track
+    # genuinely different things, not the same signal under two names.
+    assert presence["filing_highlights"] is True
+
+
+def test_field_presence_beta_false_when_missing():
+    bundle = _bundle()
+    bundle.risk_metrics = {}
+    _, presence = build_user_message(bundle)
+    assert presence["beta"] is False
+
+
+def test_field_presence_dividend_context_true_when_only_one_component_present():
+    """yield/payout are independent signals -- either one alone is enough
+    to count as present, not "both or nothing" (see _dividend_context's
+    own comment)."""
+    bundle = _bundle()
+    bundle.dividend_info = {"dividend_yield": 0.032, "payout_ratio": None}
+    _, presence = build_user_message(bundle)
+    assert presence["dividend_context"] is True
+
+
+def test_field_presence_peers_block_false_when_no_peers():
+    bundle = _bundle()
+    bundle.research_sources.peer_blocks = []
+    _, presence = build_user_message(bundle)
+    assert presence["peers_block"] is False
+
+
+def test_field_presence_recent_developments_false_when_all_news_is_low_tier():
+    bundle = _bundle()
+    bundle.research_sources.news_items = [_news_item(id_="N1", tier="low")]
+    _, presence = build_user_message(bundle)
+    assert presence["recent_developments"] is False
+
+
+def test_field_presence_has_no_entry_for_management_signals_or_whole_price_context():
+    """Neither block ever renders a genuine "N/A" as a whole (see each
+    helper's own code) -- no meaningful present/absent distinction to
+    report, so neither key exists in the map at all."""
+    _, presence = build_user_message(_bundle())
+    assert "management_signals" not in presence
+    assert "price_context" not in presence

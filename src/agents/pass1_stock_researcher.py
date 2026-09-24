@@ -54,6 +54,7 @@ against `data/schemas/research_sources_bundle.py` and
 """
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
+from agents.utils import RenderedField
 from agents.validators.pass1 import validate_stock_researcher
 from data.schemas.data_bundle import DataBundle
 
@@ -72,39 +73,51 @@ def _data_coverage_line(bundle: DataBundle) -> str:
     return "standard." if not gaps else "; ".join(gaps) + "."
 
 
-def _business_description(bundle: DataBundle) -> str:
+def _business_description(bundle: DataBundle) -> RenderedField:
     business = next(
         (d for d in bundle.research_sources.filing_digests if d.section == "Business"), None
     )
-    return business.content if business else "N/A — no filing digest available for this name."
+    if business:
+        return RenderedField(text=business.content, present=True)
+    return RenderedField(text="N/A — no filing digest available for this name.", present=False)
 
 
-def _filing_highlights(bundle: DataBundle) -> str:
+def _filing_highlights(bundle: DataBundle) -> RenderedField:
     digests = bundle.research_sources.filing_digests
     if not digests:
-        return "N/A"
-    return "\n".join(f"FILING:{d.section}: {d.content}" for d in digests)
+        return RenderedField(text="N/A", present=False)
+    text = "\n".join(f"FILING:{d.section}: {d.content}" for d in digests)
+    return RenderedField(text=text, present=True)
 
 
-def _earnings_transcript(bundle: DataBundle) -> str:
+def _earnings_transcript(bundle: DataBundle) -> RenderedField:
+    # Permanently absent today, not a per-run data problem (D3, see module
+    # docstring: transcript_excerpts is a deliberate, permanent [] until a
+    # future ticket builds real transcript sourcing) -- present will always
+    # be False here for every real run, not a bug in this field.
     excerpts = bundle.research_sources.transcript_excerpts
     if not excerpts:
-        return "N/A — earnings transcript excerpts are not available (not yet built into the data pipeline)."
-    return "\n".join(f"[{t.quarter} {t.type}] {t.content}" for t in excerpts)
+        return RenderedField(
+            text="N/A — earnings transcript excerpts are not available (not yet built into the data pipeline).",
+            present=False,
+        )
+    text = "\n".join(f"[{t.quarter} {t.type}] {t.content}" for t in excerpts)
+    return RenderedField(text=text, present=True)
 
 
-def _recent_developments(bundle: DataBundle) -> str:
+def _recent_developments(bundle: DataBundle) -> RenderedField:
     # v1.3 drops "low" quality_tier headlines before the LLM sees them
     # (precompute/research_sources.py's own documented behavior) -- this is
     # the "still-unbuilt code" that module's docstring names as responsible
     # for that filter.
     items = [i for i in bundle.research_sources.news_items if i.quality_tier != "low"]
     if not items:
-        return "  (none available)"
-    return "\n".join(
+        return RenderedField(text="  (none available)", present=False)
+    text = "\n".join(
         f"  {item.id}: {item.headline} ({item.source}, {item.date.date().isoformat()})"
         for item in items
     )
+    return RenderedField(text=text, present=True)
 
 
 def _management_signals(bundle: DataBundle) -> str:
@@ -119,36 +132,60 @@ def _management_signals(bundle: DataBundle) -> str:
     return "\n".join(lines)
 
 
-def _peers_block(bundle: DataBundle) -> str:
+def _peers_block(bundle: DataBundle) -> RenderedField:
     peers = bundle.research_sources.peer_blocks
     if not peers:
-        return "PEER COMPARABLES: N/A — no peer data available for this name."
+        return RenderedField(text="PEER COMPARABLES: N/A — no peer data available for this name.", present=False)
     lines = [f"  {p.peer_id}: {p.content}" for p in peers]
-    return "PEER COMPARABLES:\n" + "\n".join(lines)
+    return RenderedField(text="PEER COMPARABLES:\n" + "\n".join(lines), present=True)
+
+
+def _beta_line(bundle: DataBundle) -> RenderedField:
+    # Split out of _price_context on its own -- beta is a real, sometimes-
+    # missing field (module docstring's own note), unlike current_price/
+    # market_cap/52w range, which are plain quote passthroughs virtually
+    # always present for any real, already-resolved ticker. Tracking
+    # presence at the whole-block level would conflate an always-there
+    # field with a genuinely sometimes-absent one.
+    beta = bundle.risk_metrics.get("beta")
+    text = f"  Beta: {beta if beta is not None else 'N/A'}"
+    return RenderedField(text=text, present=beta is not None)
 
 
 def _price_context(bundle: DataBundle) -> str:
     p = bundle.price_info
-    beta = bundle.risk_metrics.get("beta")
     currency = p.get("currency")
     lines = [
         f"  Current: {p.get('current_price')} {currency} | 52w High: {p.get('high_52w')} | 52w Low: {p.get('low_52w')}",
         f"  Market Cap: {p.get('market_cap', 'N/A')}",
-        f"  Beta: {beta if beta is not None else 'N/A'}",
+        _beta_line(bundle).text,
     ]
     return "\n".join(lines)
 
 
-def _dividend_context(bundle: DataBundle) -> str:
+def _dividend_context(bundle: DataBundle) -> RenderedField:
     d = bundle.dividend_info
     yield_pct = d.get("dividend_yield")
     payout_pct = d.get("payout_ratio")
     yield_str = f"{yield_pct * 100:.2f}%" if yield_pct is not None else "N/A"
     payout_str = f"{payout_pct * 100:.2f}%" if payout_pct is not None else "N/A"
-    return f"  Yield: {yield_str} | Payout ratio: {payout_str}"
+    text = f"  Yield: {yield_str} | Payout ratio: {payout_str}"
+    # present if either component is real -- the two are independent
+    # signals (a name could have a real yield but no payout ratio data, or
+    # vice versa), so "both missing" is the honest absent case, not "both
+    # required."
+    return RenderedField(text=text, present=yield_pct is not None or payout_pct is not None)
 
 
-def build_user_message(bundle: DataBundle) -> str:
+def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
+    """Returns (rendered user message, field presence map) -- the second
+    element is 86bbwachy Phase 4's own new addition, collected from each
+    RenderedField-returning helper's own `.present` flag as it's rendered,
+    not re-derived separately afterward. management_signals/price_context
+    (beyond beta, split out into its own entry) are deliberately NOT in the
+    map -- neither ever renders a genuine "N/A" for the whole block (see
+    each helper's own code), so there's no meaningful present/absent
+    distinction to report for them."""
     ctx = bundle.context
     company_info = bundle.company_info
 
@@ -166,33 +203,52 @@ def build_user_message(bundle: DataBundle) -> str:
     if flags is not None and not flags.sedar_filing_available:
         canadian_flag = "\nCANADIAN DATA LIMITED: true — Finnhub sentiment unavailable, social_sentiment=unknown."
 
-    return f"""COMPANY_X (TICKER_X) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
+    business = _business_description(bundle)
+    recent_developments = _recent_developments(bundle)
+    filing_highlights = _filing_highlights(bundle)
+    earnings_transcript = _earnings_transcript(bundle)
+    peers = _peers_block(bundle)
+    beta = _beta_line(bundle)
+    dividend = _dividend_context(bundle)
+
+    text = f"""COMPANY_X (TICKER_X) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{canadian_flag}
 
 DATA COVERAGE: {_data_coverage_line(bundle)}
 
 BUSINESS DESCRIPTION:
-{_business_description(bundle)}
+{business.text}
 
 RECENT DEVELOPMENTS (NEWS):
-{_recent_developments(bundle)}
+{recent_developments.text}
 
 MANAGEMENT SIGNALS:
 {_management_signals(bundle)}
 
 FILING HIGHLIGHTS:
-{_filing_highlights(bundle)}
+{filing_highlights.text}
 
 EARNINGS TRANSCRIPT:
-{_earnings_transcript(bundle)}
+{earnings_transcript.text}
 
-{_peers_block(bundle)}
+{peers.text}
 
 PRICE CONTEXT:
 {_price_context(bundle)}
 
 DIVIDEND / INCOME:
-{_dividend_context(bundle)}"""
+{dividend.text}"""
+
+    field_presence = {
+        "business_description": business.present,
+        "recent_developments": recent_developments.present,
+        "filing_highlights": filing_highlights.present,
+        "earnings_transcript": earnings_transcript.present,
+        "peers_block": peers.present,
+        "beta": beta.present,
+        "dividend_context": dividend.present,
+    }
+    return text, field_presence
 
 
 class StockResearcherRunner(BaseRunner):
@@ -200,7 +256,12 @@ class StockResearcherRunner(BaseRunner):
         self.current_agent = "RSRCH"
         ctx = bundle.context
         peers = bundle.research_sources.peer_blocks
-        user_msg = build_user_message(bundle)
+        user_msg, field_presence = build_user_message(bundle)
+        # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
+        # failed call still records whether its own input was already
+        # incomplete (see _agent_output_row's own comment on why that's
+        # read regardless of completion status).
+        self.last_field_coverage = field_presence
         system_prompt = fill(
             load_template("stock_researcher"),
             {
