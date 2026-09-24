@@ -54,6 +54,34 @@ class AnalysisRun(Base):
     disagreement_score: Mapped[Optional[int]]
     disagreement_class: Mapped[Optional[str]] = mapped_column(String(20))
     error_log: Mapped[Optional[list]] = mapped_column(JSON)
+
+    # Run context tags (86bbwachy Phase 1) -- ephemeral, cannot be backfilled
+    # onto a historical run once it's past, so they land in this migration
+    # rather than being added opportunistically later (run-instrumentation.md
+    # §5.6). Populated once, in orchestrator.py's run(), right after
+    # DataPipeline.prepare() returns a real bundle -- not at AnalysisRun
+    # creation time in api/routes/analysis.py, because instrument_type/
+    # market_cap_bucket have no reliable source that early (Stock's own ORM
+    # row carries neither asset_type nor market_cap; both only exist on
+    # DataBundle.company_info, which doesn't exist until prepare() runs).
+    # exchange/currency COULD be set earlier from the Stock row alone, but
+    # are set here too so all five context tags come from one place, at one
+    # point in the run, rather than a split design.
+    exchange: Mapped[Optional[str]] = mapped_column(String(20))  # from bundle.stock.exchange
+    currency: Mapped[Optional[str]] = mapped_column(String(3))  # from bundle.stock.currency
+    instrument_type: Mapped[Optional[str]] = mapped_column(String(20))  # equity|etf|other, from company_info["asset_type"]
+    # Large/mid/small-cap bucketing thresholds are new logic this ticket owns
+    # (company_info["market_cap"] is a raw number; nothing else in this
+    # codebase buckets it) -- see orchestrator.py's own bucketing helper for
+    # the actual thresholds and their reasoning.
+    market_cap_bucket: Mapped[Optional[str]] = mapped_column(String(20))  # large|mid|small|micro
+    # Stays null until Milestone 5's regime-detection work exists -- nothing
+    # in this codebase computes bull/bear/sideways/high_volatility/crisis/
+    # transition classifications yet (market_regime_history.py is a coded,
+    # currently-unwired table with zero writers). Added now anyway because
+    # it can't be backfilled once that work lands; not a bug that it's
+    # always null today.
+    market_regime: Mapped[Optional[str]] = mapped_column(String(20))
     # relationships
     stock: Mapped["Stock"] = relationship(back_populates="analysis_runs")
     agent_outputs: Mapped[list["AgentOutput"]] = relationship(back_populates="run")
