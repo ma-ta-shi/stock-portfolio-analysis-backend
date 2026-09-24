@@ -88,40 +88,22 @@ class StockNotFoundError(Exception):
 def _precompute_llm_call_rows(capture: CaptureContext) -> list[LLMCall]:
     """Converts one run's worth of precompute capture records into
     llm_calls rows (86bbwachy Phase 3) -- the precompute counterpart to
-    services/orchestrator.py's own _llm_call_rows, not shared with it:
-    that function's consumed-index slicing exists specifically for a
+    services/orchestrator.py's own _llm_call_rows, not sharing that
+    function's own consumed-index slicing: that exists specifically for a
     runner object reused across two stages (CIO, Risk Advisor), which has
     no precompute equivalent -- capture.call_log here is built once, by
-    one prepare() call, and read exactly once, right here. agent_output_id
+    one prepare() call, and read exactly once, right here. Both functions
+    do share the actual field mapping, via LLMCall.from_call_log_entry
+    (86bbwachy Phase 3 consolidation, api/tables/llm_calls.py) -- the two
+    were near-identical duplicates of each other before that. agent_output_id
     stays None for every row this returns -- these are, by definition,
     "non-agent calls" (llm_calls.py's own column comment), so there is no
     AgentOutput row for any of them to ever link to.
     """
-    rows = []
-    for entry in capture.call_log:
-        total_duration_s = entry.get("total_duration_s")
-        rows.append(LLMCall(
-            run_id=capture.run_id,
-            context_tag=entry.get("context_tag", "analysis"),
-            seq=entry.get("seq"),
-            call_site=entry["call_site"],
-            agent_pass="precompute",
-            attempt=entry.get("attempt", 1),
-            model=entry["model"],
-            options_json=entry.get("options_json") or {},
-            prompt_path=entry.get("prompt_path"),
-            context_path=entry.get("context_path"),
-            response_path=entry.get("response_path"),
-            prompt_tokens=entry.get("prompt_eval_count"),
-            completion_tokens=entry.get("eval_count"),
-            thinking_chars=entry.get("thinking_chars"),
-            latency_ms=round(total_duration_s * 1000) if total_duration_s is not None else None,
-            finish_reason=entry.get("finish_reason"),
-            parsed_ok=entry.get("parsed_ok"),
-            parse_error=entry.get("parse_error"),
-            auto_trimmed=False,  # no auto-trim concept in precompute's one-shot calls
-        ))
-    return rows
+    return [
+        LLMCall.from_call_log_entry(entry, run_id=capture.run_id, agent_pass="precompute")
+        for entry in capture.call_log
+    ]
 
 
 class DataPipeline:

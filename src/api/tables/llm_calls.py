@@ -84,3 +84,51 @@ class LLMCall(Base):
     # relationships
     run: Mapped[Optional["AnalysisRun"]] = relationship()
     agent_output: Mapped[Optional["AgentOutput"]] = relationship()
+
+    @classmethod
+    def from_call_log_entry(cls, entry: dict, *, run_id, agent_pass: str) -> "LLMCall":
+        """Builds one row from a call_log-shaped dict -- the one place this
+        mapping happens, shared by both real producers of that shape:
+        agents/base.py's BaseRunner.call_log (services/orchestrator.py's
+        own _llm_call_rows) and agents/capture.py's CaptureContext.call_log
+        for precompute (data/pipeline.py's own _precompute_llm_call_rows).
+
+        86bbwachy Phase 3, consolidated from what was two near-identical
+        ~20-line field mappings in those two files (found on review) --
+        call_site/model are hard requirements here (entry["x"], no
+        fallback default), not defensive .get(key, default) reads: both
+        real producers always set them (agents/base.py's call_model/
+        _call_generate, agents/capture.py's record_call), so a fallback
+        was only ever masking a test fixture that hadn't bothered to set
+        them, not a real production gap.
+        """
+        total_duration_s = entry.get("total_duration_s")
+        return cls(
+            run_id=run_id,
+            context_tag=entry.get("context_tag", "analysis"),
+            seq=entry.get("seq"),
+            call_site=entry["call_site"],
+            agent_pass=agent_pass,
+            attempt=entry.get("attempt", 1),
+            model=entry["model"],
+            options_json=entry.get("options_json") or {},
+            prompt_path=entry.get("prompt_path"),
+            context_path=entry.get("context_path"),
+            response_path=entry.get("response_path"),
+            prompt_tokens=entry.get("prompt_eval_count"),
+            completion_tokens=entry.get("eval_count"),
+            thinking_chars=entry.get("thinking_chars"),
+            # `is not None`, not a bare truthiness check -- a genuine 0.0s
+            # duration (unrealistic for a real network call, but not
+            # impossible in a test) must not silently become a "missing"
+            # None the same way _market_cap_bucket's own comment (in
+            # services/orchestrator.py) already warns against for a
+            # different field.
+            latency_ms=round(total_duration_s * 1000) if total_duration_s is not None else None,
+            finish_reason=entry.get("finish_reason"),
+            parsed_ok=entry.get("parsed_ok"),
+            parse_error=entry.get("parse_error"),
+            validator_passed=entry.get("validator_passed"),
+            validator_errors=entry.get("validator_errors"),
+            auto_trimmed=entry.get("auto_trimmed", False),
+        )

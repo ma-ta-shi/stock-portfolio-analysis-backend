@@ -162,41 +162,16 @@ def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
     second). `BaseRunner.__init__` defaults the counter to 0 for every real
     runner; `getattr(..., 0)` only exists for a duck-typed test double that
     isn't a real BaseRunner (e.g. test_orchestrator.py's own _StubRunner).
+
+    The actual entry->LLMCall field mapping lives on LLMCall.from_call_log_entry
+    itself (86bbwachy Phase 3 consolidation, api/tables/llm_calls.py) --
+    this function's own job is the slicing/consumed-index bookkeeping above,
+    which has no precompute equivalent (data/pipeline.py's own
+    _precompute_llm_call_rows shares the same classmethod but not this).
     """
     consumed = getattr(runner, "_llm_calls_consumed", 0)
     new_entries = runner.call_log[consumed:]
-
-    rows = []
-    for entry in new_entries:
-        total_duration_s = entry.get("total_duration_s")
-        rows.append(LLMCall(
-            run_id=run_id,
-            context_tag=entry.get("context_tag", "analysis"),
-            seq=entry.get("seq"),
-            call_site=entry.get("call_site") or f"agent:{(entry.get('agent') or '').lower()}",
-            agent_pass=agent_pass,
-            attempt=entry.get("attempt", 1),
-            model=entry.get("model", MODEL),
-            options_json=entry.get("options_json") or {},
-            prompt_path=entry.get("prompt_path"),
-            context_path=entry.get("context_path"),
-            response_path=entry.get("response_path"),
-            prompt_tokens=entry.get("prompt_eval_count"),
-            completion_tokens=entry.get("eval_count"),
-            thinking_chars=entry.get("thinking_chars"),
-            # `is not None`, not a bare truthiness check -- a genuine 0.0s
-            # duration (unrealistic for a real network call, but not
-            # impossible in a test) must not silently become a "missing"
-            # None the same way _market_cap_bucket's own comment already
-            # warns against for a different field.
-            latency_ms=round(total_duration_s * 1000) if total_duration_s is not None else None,
-            finish_reason=entry.get("finish_reason"),
-            parsed_ok=entry.get("parsed_ok"),
-            parse_error=entry.get("parse_error"),
-            validator_passed=entry.get("validator_passed"),
-            validator_errors=entry.get("validator_errors"),
-            auto_trimmed=entry.get("auto_trimmed", False),
-        ))
+    rows = [LLMCall.from_call_log_entry(entry, run_id=run_id, agent_pass=agent_pass) for entry in new_entries]
     # Only advance the consumed marker once every row above was built
     # successfully -- doing this before the loop would permanently drop
     # entries from ever becoming a row if construction raised partway

@@ -8,20 +8,10 @@ import pytest
 
 import data.pipeline as pipeline_module
 from agents.capture import CaptureContext
-from api.tables.agent_outputs import AgentOutput  # noqa: F401 -- LLMCall's mapper needs this reachable
-from api.tables.analysis_runs import AnalysisRun  # noqa: F401 -- LLMCall's mapper needs this reachable
+# Mapper-reachability for constructing a real LLMCall() (this file's own
+# Phase 3 tests) is handled once, globally, by tests/conftest.py -- see
+# its own comment for why.
 from api.tables.llm_calls import LLMCall
-# The rest of this block is the same "make every mapper in the
-# AnalysisRun/LLMCall relationship graph reachable" set test_orchestrator.py
-# already needed and solved -- copied, not rediscovered, since constructing
-# a real LLMCall() (this file's own new Phase 3 tests) triggers SQLAlchemy's
-# full mapper configuration pass the same way constructing an AnalysisRun
-# does there.
-from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: F401 -- Prediction's mapper needs this reachable
-from api.tables.predictions import Prediction  # noqa: F401 -- Recommendation's mapper needs this reachable
-from api.tables.recommendations import Recommendation  # noqa: F401 -- AnalysisRun's mapper needs this reachable
-from api.tables.shadow_predictions import ShadowPrediction  # noqa: F401 -- AnalysisRun's mapper needs this reachable
-from api.tables.user_profile import UserProfile  # noqa: F401 -- AnalysisRun.user_id FK needs this reachable
 from data.pipeline import DataPipeline, StockNotFoundError, _precompute_llm_call_rows, resolve_sector_etf
 from data.schemas.canadian_data_flags import CanadianDataFlags
 from data.schemas.context import AnalysisContext

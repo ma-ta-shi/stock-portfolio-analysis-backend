@@ -17,15 +17,16 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agents.base import OllamaUnavailable
 from api.database import Base
+# PredictionCheckpoint/UserProfile mapper-reachability (neither is used
+# directly in this file) is handled once, globally, by tests/conftest.py --
+# see its own comment for why.
 from api.tables.agent_outputs import AgentOutput
 from api.tables.analysis_runs import AnalysisRun, RunStatus
 from api.tables.llm_calls import LLMCall
-from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: F401 -- Prediction's mapper needs this reachable
 from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
 from api.tables.shadow_predictions import ShadowPrediction
 from api.tables.stock import Stock
-from api.tables.user_profile import UserProfile  # noqa: F401 -- AnalysisRun.user_id FK needs this reachable
 from services.orchestrator import AnalysisOrchestrator, _add_agent_output_and_calls, _market_cap_bucket
 from sqlalchemy import select
 
@@ -212,7 +213,11 @@ async def test_two_stage_runner_does_not_duplicate_llm_calls_rows():
     runner = _FakeTwoStageRunner()
 
     # Stage A: one real attempt lands in call_log, then gets written.
-    runner.call_log.append({"seq": 0, "call_site": "agent:cio_stage_a", "attempt": 1})
+    # model is a hard requirement on LLMCall.from_call_log_entry (real
+    # producers always set it) -- included here for the same reason.
+    runner.call_log.append(
+        {"seq": 0, "call_site": "agent:cio_stage_a", "attempt": 1, "model": "gpt-oss:20b"}
+    )
     _add_agent_output_and_calls(
         session, run, "cio_stage_a", "synthesis", {"stock_outlook": "neutral"}, [], runner
     )
@@ -221,7 +226,9 @@ async def test_two_stage_runner_does_not_duplicate_llm_calls_rows():
     # Stage B: call_log now holds Stage A's entry PLUS Stage B's own new
     # one -- the real shape after BaseRunner keeps accumulating and nothing
     # resets it between the two orchestrator-level writes.
-    runner.call_log.append({"seq": 1, "call_site": "agent:cio_stage_b", "attempt": 1})
+    runner.call_log.append(
+        {"seq": 1, "call_site": "agent:cio_stage_b", "attempt": 1, "model": "gpt-oss:20b"}
+    )
     _add_agent_output_and_calls(
         session, run, "cio_stage_b", "synthesis", {"synthesis_narrative": "n"}, [], runner
     )
