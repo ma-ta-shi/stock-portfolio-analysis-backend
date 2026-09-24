@@ -58,3 +58,26 @@ class AnalysisRun(Base):
     stock: Mapped["Stock"] = relationship(back_populates="analysis_runs")
     agent_outputs: Mapped[list["AgentOutput"]] = relationship(back_populates="run")
     recommendation: Mapped[Optional["Recommendation"]] = relationship(back_populates="run")
+
+    # Real TOCTOU race, confirmed live (2026-09-23): api/routes/analysis.py's
+    # create_analysis() checks for an in-progress run, then inserts a new
+    # one -- nothing serialized that check-then-write across two concurrent
+    # requests, and two genuinely concurrent httpx requests for the same
+    # brand-new ticker (tests/api/test_analysis_routes.py) reproduced
+    # exactly that: both passed the check, both got 202, two AnalysisRun
+    # rows landed for the same stock. A partial unique index (DB-enforced,
+    # not just app-level) closes this the same way stocks.canonical_ticker's
+    # own UNIQUE constraint already closes the analogous Stock race -- only
+    # one NON-terminal run per stock can ever exist at the database level,
+    # regardless of request timing. Only excludes completed/failed, matching
+    # RunStatus's own docstring: those are the only two terminal states, and
+    # a stock legitimately accumulates many of them over time.
+    __table_args__ = (
+        Index(
+            "ix_analysis_runs_one_active_per_stock",
+            "stock_id",
+            unique=True,
+            sqlite_where=text("status NOT IN ('completed', 'failed')"),
+            postgresql_where=text("status NOT IN ('completed', 'failed')"),
+        ),
+    )
