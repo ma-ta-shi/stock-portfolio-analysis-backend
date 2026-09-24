@@ -37,7 +37,7 @@ key_factors: sentiment must be negative|neutral only.
 from agents.base import BaseRunner
 from agents.compression import build_pass2_user_message, extract_confidence_levels
 from agents.prompts import fill, load_template
-from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
+from agents.utils import RenderedField, build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.pass2 import validate_risk_advisor_stage_a, validate_risk_advisor_stage_b
 from data.schemas.data_bundle import DataBundle
 
@@ -46,10 +46,24 @@ def _fmt(v, suffix: str = ""):
     return "N/A" if v is None else f"{v}{suffix}"
 
 
-def _precomputed_risk_metrics(bundle: DataBundle) -> str:
+def _precomputed_risk_metrics(bundle: DataBundle) -> RenderedField:
+    """One combined block, not per-field helpers like Stock Researcher's --
+    confirmed by direct reading: risk_metrics.py's own compute_all() has no
+    single aggregate 'why' field, each metric independently degrades to
+    None on its own insufficient-history threshold (module docstring: 1yr
+    drawdown needs ~1yr of bars at 80% coverage, 3yr needs ~3yr, ADV needs
+    20 days). 52w High/Low (VOL's first half) come from price_position, a
+    plain quote passthrough virtually always present for a resolved ticker
+    -- not tracked separately, unlike annualized_vol (VOL's second half),
+    which shares BETA's own 60-bar minimum and genuinely can be absent.
+    CORR/CONC are permanent placeholders (no portfolio system exists yet,
+    same reasoning as this file's own module docstring) -- not tracked at
+    all, since neither is a real precompute field that becomes present or
+    absent based on this run's own data.
+    """
     rm = bundle.risk_metrics
     pp = bundle.price_position
-    return (
+    text = (
         f"BETA: beta = {_fmt(rm.get('beta'))} (will be injected into output by orchestrator)\n"
         f"VOL:  52w High={_fmt(pp.get('high_52w'))}, 52w Low={_fmt(pp.get('low_52w'))}, "
         f"Annualized vol={_fmt(rm.get('annualized_vol_pct'), '%')}\n"
@@ -61,13 +75,35 @@ def _precomputed_risk_metrics(bundle: DataBundle) -> str:
         f"CORR: Portfolio correlation = unknown (not provided for this analysis)\n"
         f"CONC: Standard concentration risk assessment based on position sizing"
     )
+    present = all(
+        rm.get(k) is not None
+        for k in ("beta", "annualized_vol_pct", "max_drawdown_1yr_pct", "max_drawdown_3yr_pct", "adv_millions")
+    )
+    return RenderedField(text=text, present=present)
+
+
+def _risk_metrics_field_presence(bundle: DataBundle) -> dict[str, bool]:
+    """Fine-grained per-field presence, computed alongside (not derived
+    separately from) _precomputed_risk_metrics's own text -- same source
+    values, split out since the whole-block `present` flag above answers
+    a coarser "was everything here real" question, while
+    input_field_coverage wants per-field granularity like every other
+    in-scope agent."""
+    rm = bundle.risk_metrics
+    return {
+        "beta": rm.get("beta") is not None,
+        "annualized_vol": rm.get("annualized_vol_pct") is not None,
+        "max_drawdown_1yr": rm.get("max_drawdown_1yr_pct") is not None,
+        "max_drawdown_3yr": rm.get("max_drawdown_3yr_pct") is not None,
+        "avg_dollar_volume": rm.get("adv_millions") is not None,
+    }
 
 
 def build_user_message(
     bundle: DataBundle,
     compressed_pass1: dict,
     account_type: str | None = None,
-) -> str:
+) -> tuple[str, dict[str, bool]]:
     base = build_pass2_user_message(bundle, compressed_pass1, account_type)
     confidence_levels = extract_confidence_levels(compressed_pass1)
     warnings = build_pass1_reliability_warnings(confidence_levels)
@@ -76,16 +112,17 @@ def build_user_message(
 
     ctx = bundle.context
     acct = account_type or ctx.account_type
+    risk_metrics = _precomputed_risk_metrics(bundle)
 
     base += f"""
 
 RISK METRIC TOKENS (ORCHESTRATOR PRE-COMPUTED):
-{_precomputed_risk_metrics(bundle)}
+{risk_metrics.text}
 
 ACCOUNT: {acct.upper()} | TIMELINE: {ctx.timeline}
 STOP-LOSS NOTE: {"null is appropriate (TFSA/RRSP medium/long-term)" if acct in ("tfsa", "rrsp") and ctx.timeline in ("medium_term", "long_term") else "numeric stop-loss may be appropriate"}"""
 
-    return base
+    return base, _risk_metrics_field_presence(bundle)
 
 
 class RiskAdvisorRunner(BaseRunner):
@@ -109,7 +146,11 @@ class RiskAdvisorRunner(BaseRunner):
         # doesn't need to be.
         self.current_agent = "risk_stage_a"
         acct = account_type or bundle.context.account_type
-        user_msg = build_user_message(bundle, compressed_pass1, acct)
+        user_msg, field_presence = build_user_message(bundle, compressed_pass1, acct)
+        # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
+        # failed call still records whether its own input was already
+        # incomplete.
+        self.last_field_coverage = field_presence
         ctx = bundle.context
         confidence_levels = extract_confidence_levels(compressed_pass1)
         system_prompt = fill(
@@ -120,7 +161,7 @@ class RiskAdvisorRunner(BaseRunner):
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "precomputed_risk_metrics": _precomputed_risk_metrics(bundle),
+                "precomputed_risk_metrics": _precomputed_risk_metrics(bundle).text,
                 "researcher_thesis_archetype": researcher_thesis_archetype(compressed_pass1),
                 "pass1_reliability_warnings": build_pass1_reliability_warnings(confidence_levels) or "(none)",
                 "accuracy_brief": "",
