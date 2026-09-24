@@ -28,7 +28,7 @@ def _bundle(**overrides) -> SimpleNamespace:
 
 
 def test_precomputed_risk_metrics_renders_real_fields():
-    text = _precomputed_risk_metrics(_bundle()).text
+    text, _ = _precomputed_risk_metrics(_bundle())
     assert "BETA: beta = 1.8" in text
     assert "Annualized vol=42.5%" in text
     assert "Max drawdown (1yr) = -28.4%" in text
@@ -42,14 +42,14 @@ def test_missing_risk_metrics_render_honestly_not_fabricated():
                                     "max_drawdown_1yr_pct": None, "recovery_1yr_days": None,
                                     "max_drawdown_3yr_pct": None, "recovery_3yr_days": None,
                                     "adv_millions": None, "adv_currency": None})
-    text = _precomputed_risk_metrics(bundle).text
+    text, _ = _precomputed_risk_metrics(bundle)
     assert "BETA: beta = N/A" in text
     assert "Max drawdown (1yr) = N/A" in text
 
 
 def test_no_ytd_return_fabricated():
     """No precompute source for YTD return anywhere -- must never appear."""
-    text = _precomputed_risk_metrics(_bundle()).text
+    text, _ = _precomputed_risk_metrics(_bundle())
     assert "YTD" not in text
     assert "ytd_return" not in text
 
@@ -57,7 +57,7 @@ def test_no_ytd_return_fabricated():
 def test_correlation_and_concentration_stay_honest_placeholders():
     """No portfolio system exists yet -- these must stay explicit
     placeholders, not fabricated numbers."""
-    text = _precomputed_risk_metrics(_bundle()).text
+    text, _ = _precomputed_risk_metrics(_bundle())
     assert "CORR: Portfolio correlation = unknown" in text
     assert "CONC: Standard concentration risk assessment" in text
 
@@ -76,16 +76,19 @@ def test_stop_loss_note_numeric_for_trading_short_term():
 # ---------- field_presence (86bbwachy Phase 4) ----------
 
 
-def test_precomputed_risk_metrics_present_true_when_all_five_fields_real():
-    assert _precomputed_risk_metrics(_bundle()).present is True
-
-
-def test_precomputed_risk_metrics_present_false_when_any_field_missing():
-    bundle = _bundle(risk_metrics={"beta": None, "annualized_vol_pct": 42.5,
-                                    "max_drawdown_1yr_pct": -28.4, "recovery_1yr_days": 120,
-                                    "max_drawdown_3yr_pct": -45.1, "recovery_3yr_days": 300,
-                                    "adv_millions": 85.2, "adv_currency": "CAD"})
-    assert _precomputed_risk_metrics(bundle).present is False
+def test_precomputed_risk_metrics_returns_field_presence_directly():
+    """_precomputed_risk_metrics is the one source of truth for both the
+    rendered text and the per-field presence map -- build_user_message()
+    doesn't re-derive presence separately, so this locks in that the
+    function's own second return value is real and correct on its own."""
+    _, field_presence = _precomputed_risk_metrics(_bundle())
+    assert field_presence == {
+        "beta": True,
+        "annualized_vol": True,
+        "max_drawdown_1yr": True,
+        "max_drawdown_3yr": True,
+        "avg_dollar_volume": True,
+    }
 
 
 def test_field_presence_all_true_with_default_bundle():

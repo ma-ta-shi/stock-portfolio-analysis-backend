@@ -37,7 +37,7 @@ key_factors: sentiment must be negative|neutral only.
 from agents.base import BaseRunner
 from agents.compression import build_pass2_user_message, extract_confidence_levels
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField, build_pass1_reliability_warnings, researcher_thesis_archetype
+from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.pass2 import validate_risk_advisor_stage_a, validate_risk_advisor_stage_b
 from data.schemas.data_bundle import DataBundle
 
@@ -46,15 +46,21 @@ def _fmt(v, suffix: str = ""):
     return "N/A" if v is None else f"{v}{suffix}"
 
 
-def _precomputed_risk_metrics(bundle: DataBundle) -> RenderedField:
-    """One combined block, not per-field helpers like Stock Researcher's --
-    confirmed by direct reading: risk_metrics.py's own compute_all() has no
-    single aggregate 'why' field, each metric independently degrades to
-    None on its own insufficient-history threshold (module docstring: 1yr
-    drawdown needs ~1yr of bars at 80% coverage, 3yr needs ~3yr, ADV needs
-    20 days). 52w High/Low (VOL's first half) come from price_position, a
-    plain quote passthrough virtually always present for a resolved ticker
-    -- not tracked separately, unlike annualized_vol (VOL's second half),
+def _precomputed_risk_metrics(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
+    """(rendered text, per-field presence map). One combined text block, not
+    per-field helpers like Stock Researcher's -- confirmed by direct
+    reading: risk_metrics.py's own compute_all() has no single aggregate
+    'why' field, each metric independently degrades to None on its own
+    insufficient-history threshold (module docstring: 1yr drawdown needs
+    ~1yr of bars at 80% coverage, 3yr needs ~3yr, ADV needs 20 days). No
+    RenderedField wrapper here (unlike every other in-scope agent's
+    per-field helpers) -- a single coarse text+bool pair would answer only
+    "was everything here real," and input_field_coverage needs the
+    per-field map returned below instead, so the presence side is a dict
+    from the start rather than a bool this function would otherwise never
+    use. 52w High/Low (VOL's first half) come from price_position, a plain
+    quote passthrough virtually always present for a resolved ticker --
+    not tracked separately, unlike annualized_vol (VOL's second half),
     which shares BETA's own 60-bar minimum and genuinely can be absent.
     CORR/CONC are permanent placeholders (no portfolio system exists yet,
     same reasoning as this file's own module docstring) -- not tracked at
@@ -75,28 +81,14 @@ def _precomputed_risk_metrics(bundle: DataBundle) -> RenderedField:
         f"CORR: Portfolio correlation = unknown (not provided for this analysis)\n"
         f"CONC: Standard concentration risk assessment based on position sizing"
     )
-    present = all(
-        rm.get(k) is not None
-        for k in ("beta", "annualized_vol_pct", "max_drawdown_1yr_pct", "max_drawdown_3yr_pct", "adv_millions")
-    )
-    return RenderedField(text=text, present=present)
-
-
-def _risk_metrics_field_presence(bundle: DataBundle) -> dict[str, bool]:
-    """Fine-grained per-field presence, computed alongside (not derived
-    separately from) _precomputed_risk_metrics's own text -- same source
-    values, split out since the whole-block `present` flag above answers
-    a coarser "was everything here real" question, while
-    input_field_coverage wants per-field granularity like every other
-    in-scope agent."""
-    rm = bundle.risk_metrics
-    return {
+    field_presence = {
         "beta": rm.get("beta") is not None,
         "annualized_vol": rm.get("annualized_vol_pct") is not None,
         "max_drawdown_1yr": rm.get("max_drawdown_1yr_pct") is not None,
         "max_drawdown_3yr": rm.get("max_drawdown_3yr_pct") is not None,
         "avg_dollar_volume": rm.get("adv_millions") is not None,
     }
+    return text, field_presence
 
 
 def build_user_message(
@@ -112,17 +104,17 @@ def build_user_message(
 
     ctx = bundle.context
     acct = account_type or ctx.account_type
-    risk_metrics = _precomputed_risk_metrics(bundle)
+    risk_metrics_text, field_presence = _precomputed_risk_metrics(bundle)
 
     base += f"""
 
 RISK METRIC TOKENS (ORCHESTRATOR PRE-COMPUTED):
-{risk_metrics.text}
+{risk_metrics_text}
 
 ACCOUNT: {acct.upper()} | TIMELINE: {ctx.timeline}
 STOP-LOSS NOTE: {"null is appropriate (TFSA/RRSP medium/long-term)" if acct in ("tfsa", "rrsp") and ctx.timeline in ("medium_term", "long_term") else "numeric stop-loss may be appropriate"}"""
 
-    return base, _risk_metrics_field_presence(bundle)
+    return base, field_presence
 
 
 class RiskAdvisorRunner(BaseRunner):
@@ -153,6 +145,7 @@ class RiskAdvisorRunner(BaseRunner):
         self.last_field_coverage = field_presence
         ctx = bundle.context
         confidence_levels = extract_confidence_levels(compressed_pass1)
+        precomputed_risk_metrics_text, _ = _precomputed_risk_metrics(bundle)
         system_prompt = fill(
             load_template("risk_advisor", stage="a"),
             {
@@ -161,7 +154,7 @@ class RiskAdvisorRunner(BaseRunner):
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "precomputed_risk_metrics": _precomputed_risk_metrics(bundle).text,
+                "precomputed_risk_metrics": precomputed_risk_metrics_text,
                 "researcher_thesis_archetype": researcher_thesis_archetype(compressed_pass1),
                 "pass1_reliability_warnings": build_pass1_reliability_warnings(confidence_levels) or "(none)",
                 "accuracy_brief": "",

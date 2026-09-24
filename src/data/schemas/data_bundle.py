@@ -101,9 +101,12 @@ class DataBundle(ContractModel):
     # profitability_metrics/balance_sheet_metrics (86bbwachy Phase 4). Computed there
     # already, previously discarded before reaching DataBundle -- persisted here rather
     # than re-derived. Does NOT cover dividend_info/peer_metrics/analyst_consensus
-    # (compute_all()'s own scan never touched those buckets) -- input_field_coverage
-    # reads presence for those directly off the dict values instead, same as every
-    # other in-scope agent.
+    # (compute_all()'s own scan never touched those buckets). Of those three,
+    # pass1_fundamental_analyst.py's own input_field_coverage tracks peer_metrics
+    # separately (a direct dict-value check, not missing_fields-derived); dividend_info
+    # and analyst_consensus aren't tracked there at all -- dividend_regularity="none" is
+    # itself an honest "no dividend" answer, not a gap, and analyst_consensus is already
+    # tracked by Sentiment Analyst's own input_field_coverage.
     currency_mismatch: dict | None  # {financials_currency, quote_currency} when a
     # CA-listed company reports in a different currency than its quote (e.g. ATD.TO
     # reports in USD) -- every price-vs-statement multiple is then FX-distorted, not
