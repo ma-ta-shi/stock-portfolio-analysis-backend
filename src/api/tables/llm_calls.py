@@ -70,9 +70,11 @@ class LLMCall(Base):
     # FK -> agent_outputs.output_id, set only on the attempt that produced
     # the accepted output (null for superseded retries and non-agent calls)
     # -- non-null therefore also marks "this was the accepted attempt".
-    # Backfilled via UPDATE after AgentOutput exists, not set at insert
-    # time -- AgentOutput's own PK doesn't exist until after the retry loop
-    # finishes, which is after this row's own insert.
+    # Set directly at construction, not backfilled via a post-insert UPDATE
+    # as originally planned: AgentOutput.output_id's own uuid4() default is
+    # client-side, so orchestrator.py's _agent_output_row generates that PK
+    # itself before either row is ever added to the session, and both rows
+    # go in already fully formed. See that function's own docstring.
     agent_output_id: Mapped[Optional[UUID]] = mapped_column(ForeignKey("agent_outputs.output_id"))
     created_at: Mapped[datetime] = mapped_column(default=func.now())
     # relationships

@@ -221,6 +221,15 @@ class BaseRunner:
         # `call_log` accumulates instead, one record per HTTP round trip, so
         # retry cost stays visible.
         self.call_log: list[dict] = []
+        # How much of call_log the orchestrator has already turned into
+        # llm_calls DB rows (86bbwachy Phase 2, services/orchestrator.py's
+        # _llm_call_rows). Lives here, next to call_log itself, rather than
+        # only being set post-construction by the orchestrator (like
+        # run_id/ticker/seq_counter below) -- a two-stage runner (CIO, Risk
+        # Advisor) is a single shared instance whose call_log keeps growing
+        # across stages, and this index is what stops the second stage's
+        # write from re-inserting the first stage's already-written rows.
+        self._llm_calls_consumed = 0
         self.current_agent: str | None = None
         self.current_attempt: int = 1
 

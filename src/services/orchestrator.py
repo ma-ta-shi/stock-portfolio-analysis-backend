@@ -165,7 +165,6 @@ def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
     """
     consumed = getattr(runner, "_llm_calls_consumed", 0)
     new_entries = runner.call_log[consumed:]
-    runner._llm_calls_consumed = len(runner.call_log)
 
     rows = []
     for entry in new_entries:
@@ -185,7 +184,12 @@ def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
             prompt_tokens=entry.get("prompt_eval_count"),
             completion_tokens=entry.get("eval_count"),
             thinking_chars=entry.get("thinking_chars"),
-            latency_ms=round(total_duration_s * 1000) if total_duration_s else None,
+            # `is not None`, not a bare truthiness check -- a genuine 0.0s
+            # duration (unrealistic for a real network call, but not
+            # impossible in a test) must not silently become a "missing"
+            # None the same way _market_cap_bucket's own comment already
+            # warns against for a different field.
+            latency_ms=round(total_duration_s * 1000) if total_duration_s is not None else None,
             finish_reason=entry.get("finish_reason"),
             parsed_ok=entry.get("parsed_ok"),
             parse_error=entry.get("parse_error"),
@@ -193,6 +197,13 @@ def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
             validator_errors=entry.get("validator_errors"),
             auto_trimmed=entry.get("auto_trimmed", False),
         ))
+    # Only advance the consumed marker once every row above was built
+    # successfully -- doing this before the loop would permanently drop
+    # entries from ever becoming a row if construction raised partway
+    # through (unlikely given every field read above is a defaulted
+    # .get(), but free to get right and a real footgun for whatever field
+    # gets added here next).
+    runner._llm_calls_consumed = len(runner.call_log)
     return rows
 
 
@@ -702,12 +713,14 @@ class AnalysisOrchestrator:
         runner.run_id = self._run_id
         runner.ticker = self._ticker
         runner.seq_counter = self._seq_counter
-        # See _llm_call_rows' own docstring: tracks how much of this
-        # runner's call_log has already become LLMCall rows, so a
-        # two-stage runner (CIO, Risk Advisor) sharing one instance across
-        # both stages doesn't get its earlier stage's entries re-inserted
-        # when the later stage's own write happens.
-        runner._llm_calls_consumed = 0
+        # _llm_calls_consumed is NOT set here -- BaseRunner.__init__ already
+        # defaults it to 0 (see that class's own comment on why it lives
+        # there, next to call_log). Re-zeroing it here would be harmless for
+        # every real runner (this always runs right after construction,
+        # before any call), but would be actively wrong for a duck-typed
+        # test double that pre-seeds call_log/_llm_calls_consumed before
+        # calling this -- none do today, but there's no reason to couple
+        # this method to owning that field when BaseRunner already does.
 
     async def _run_pass1(self, run: AnalysisRun, bundle: DataBundle, db: AsyncSession) -> dict:
         runners = {
