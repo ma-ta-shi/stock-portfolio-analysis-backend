@@ -11,6 +11,7 @@ fredapi==0.5.2
 h11==0.16.0
 httpx==0.28.1
 idna==3.11
+numpy==2.2.6
 pandas==3.0.5
 pandas-datareader==0.11.1
 pandas-ta==0.4.71b0

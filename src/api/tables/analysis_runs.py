@@ -1,9 +1,41 @@
-from sqlalchemy import ForeignKey, String, JSON, func
+from enum import StrEnum
+from sqlalchemy import ForeignKey, String, JSON, func, Index, text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from api.database import Base
 from uuid import UUID, uuid4
 from datetime import datetime
 from typing import Optional
+
+
+class RunStatus(StrEnum):
+    """The real value set for AnalysisRun.status (86bbuhjup) -- the column
+    itself has no enum/CHECK constraint (plain String(30)); this is the
+    guard, used by the orchestrator rather than relying on it as free text.
+
+    Values track docs/technical/orchestration-engine.md's "Execution flow"
+    section's own status naming (queued -> pass1_running -> pass1_complete ->
+    pass2_running -> pass2_complete -> synthesis_running -> completed), not
+    that same doc's gate-threshold PROSE alongside it (still describes the
+    pre-2026-09-16 "minimum 3/5 reliable" Gate 1 contract, settled otherwise
+    -- see docs/decision-log.md) or its RunStatus pseudocode (runs the CIO
+    unconditionally and only distinguishes COMPLETE/COMPLETE_WITH_WARNINGS
+    after the fact, contradicting the settled Gate 2 rule that a Gate 2
+    failure skips the CIO entirely, audit E78). `failed` is this enum's own
+    addition, covering both a Gate 1 failure (no usable Pass 1 output at
+    all) and a Gate 2 failure (a mandatory advocate missing) as one terminal
+    non-error outcome -- there is no separate "completed with warnings"
+    state, since Gate 2 failure means the CIO never runs and no
+    Recommendation is ever created."""
+
+    QUEUED = "queued"
+    PASS1_RUNNING = "pass1_running"
+    PASS1_COMPLETE = "pass1_complete"
+    PASS2_RUNNING = "pass2_running"
+    PASS2_COMPLETE = "pass2_complete"
+    SYNTHESIS_RUNNING = "synthesis_running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
 
 class AnalysisRun(Base):
     __tablename__ = "analysis_runs"
