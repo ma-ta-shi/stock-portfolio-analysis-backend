@@ -297,7 +297,12 @@ def _market_cap_bucket(market_cap: float | None) -> str | None:
     $2B-$10B, small $300M-$2B, micro < $300M); revisit if CA-specific
     buckets ever turn out to matter more than this.
     """
-    if market_cap is None:
+    # Found on review: a non-positive market cap (bad data, never a real
+    # value) used to fall through every >= check and land on "micro" --
+    # silently mislabeling corrupt data as a real, small classification
+    # instead of surfacing it as missing. "Missing over wrong" applies here
+    # the same as everywhere else in this codebase.
+    if market_cap is None or market_cap <= 0:
         return None
     if market_cap >= 10_000_000_000:
         return "large"

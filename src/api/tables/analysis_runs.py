@@ -78,9 +78,20 @@ class AnalysisRun(Base):
     # Stays null until Milestone 5's regime-detection work exists -- nothing
     # in this codebase computes bull/bear/sideways/high_volatility/crisis/
     # transition classifications yet (market_regime_history.py is a coded,
-    # currently-unwired table with zero writers). Added now anyway because
-    # it can't be backfilled once that work lands; not a bug that it's
-    # always null today.
+    # currently-unwired table with zero writers). Not a bug that it's always
+    # null today.
+    #
+    # Correction on review: unlike exchange/currency/instrument_type/
+    # market_cap_bucket, this one is NOT necessarily unbackfillable later --
+    # market_regime_history is keyed by classification_date, not by stock or
+    # run, so a future regime-detection system given real historical data
+    # could in principle backfill this column for every past run by looking
+    # up whichever regime was active on that run's triggered_at date. Added
+    # here anyway to match the spec's own decision and because a nullable,
+    # currently-unused column costs nothing -- but "added from the first
+    # migration because it can't be backfilled" (the reasoning that's
+    # actually correct for the other four tags) does not apply to this one
+    # specifically, and shouldn't be assumed to if this column is revisited.
     market_regime: Mapped[Optional[str]] = mapped_column(String(20))
     # relationships
     stock: Mapped["Stock"] = relationship(back_populates="analysis_runs")

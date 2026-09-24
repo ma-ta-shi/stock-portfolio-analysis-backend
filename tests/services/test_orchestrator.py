@@ -153,7 +153,9 @@ class _StubRunner:
         (1_999_999_999, "small"),
         (300_000_000, "small"),  # exact boundary -- small is inclusive
         (299_999_999, "micro"),
-        (0, "micro"),
+        (1, "micro"),
+        (0, None),  # non-positive is bad data, not a real "micro" classification
+        (-100, None),
     ],
 )
 def test_market_cap_bucket(market_cap, expected):
