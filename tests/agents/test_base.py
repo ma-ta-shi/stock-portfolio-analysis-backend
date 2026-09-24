@@ -290,6 +290,18 @@ class TestCallModel:
         assert entry["finish_reason"] == "stop"
         assert entry["parsed_ok"] is True
 
+        # call_site's own colon ("agent:fund") must never reach the
+        # filesystem-facing path -- on Windows/NTFS a colon inside a
+        # filename (not the drive letter) starts an Alternate Data Stream,
+        # so write_text()/read_text() through the same Python Path object
+        # round-trip "successfully" while every external tool (ls, git,
+        # backups) sees a 0-byte file and the real content hidden in an
+        # invisible stream. Confirmed live 2026-09-24 on a real AAPL run --
+        # this assertion on the returned path STRING (not a round-trip
+        # through the same API that wrote it) is what actually catches it.
+        assert ":" not in entry["prompt_path"]
+        assert ":" not in entry["response_path"]
+
         prompt_path = tmp_path / entry["prompt_path"]
         response_path = tmp_path / entry["response_path"]
         assert prompt_path.exists()
@@ -599,6 +611,7 @@ class TestCallGenerate:
         entry = runner.call_log[0]
         assert entry["call_site"] == "agent:risk_stage_b"
         assert entry["parsed_ok"] is True
+        assert ":" not in entry["prompt_path"]  # see the sibling test's own comment on why
         prompt_path = tmp_path / entry["prompt_path"]
         assert prompt_path.read_text() == "continuation increment"
         assert entry["context_path"] is None

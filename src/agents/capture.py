@@ -63,7 +63,21 @@ def write_call_artifacts(
     """
     directory = artifact_dir(run_id, ticker)
     directory.mkdir(parents=True, exist_ok=True)
-    prefix = f"{seq}_{call_site}.{attempt}"
+    # call_site (e.g. "agent:tech") keeps its colon in the llm_calls DB
+    # column -- only the filesystem-facing prefix needs it stripped.
+    # Confirmed live (2026-09-24, real AAPL run on this Windows dev box):
+    # a literal ":" in a Windows/NTFS filename is not a normal character,
+    # it starts an Alternate Data Stream. `Path.write_text()` on
+    # "0_agent:tech.1.prompt.txt" silently succeeds -- but it creates a
+    # 0-byte file literally named "0_agent" plus a *hidden* ADS named
+    # "tech.1.prompt.txt" attached to it, invisible to ls/dir/git/backup
+    # tools (confirmed via `Get-Item -Stream *`). Pytest's own read-back
+    # in the same process didn't catch this because Python's open() on
+    # Windows applies the exact same ADS interpretation on both the write
+    # and the read, so the round trip "succeeds" even though the artifact
+    # is corrupted from every other tool's point of view.
+    safe_call_site = call_site.replace(":", "-")
+    prefix = f"{seq}_{safe_call_site}.{attempt}"
 
     prompt_path = directory / f"{prefix}.prompt.txt"
     prompt_path.write_text(prompt_text, encoding="utf-8")
