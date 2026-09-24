@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sys
 from logging.config import fileConfig
 from pathlib import Path
@@ -45,7 +46,7 @@ if config.config_file_name is not None:
 # When a future ticket wires a new table into main.py (by any import path),
 # add the same import here in the same change -- see this file's own git
 # history for 86bbwachy's own tables landing this way.
-from api.database import Base  # noqa: E402
+from api.database import ASYNC_DATABASE_URL, Base  # noqa: E402
 from api.tables.stock import Stock  # noqa: E402, F401
 from api.tables.analysis_runs import AnalysisRun  # noqa: E402, F401
 from api.tables.agent_outputs import AgentOutput  # noqa: E402, F401
@@ -63,10 +64,6 @@ target_metadata = Base.metadata
 # is an escape hatch for generating/testing a migration against a scratch DB
 # (e.g. an empty file, to autogenerate a from-scratch CREATE migration)
 # without touching the real app.db -- unset in normal use.
-import os  # noqa: E402
-
-from api.database import ASYNC_DATABASE_URL  # noqa: E402
-
 config.set_main_option(
     "sqlalchemy.url", os.environ.get("SP_ALEMBIC_DB_URL", ASYNC_DATABASE_URL)
 )

@@ -17,6 +17,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+import sqlalchemy
 from alembic import command
 from alembic.config import Config
 
@@ -101,8 +102,6 @@ def test_alembic_upgrade_matches_create_all(alembic_config, tmp_path):
     command.upgrade(cfg, "head")
 
     create_all_db_path = tmp_path / "create_all_test.db"
-    import sqlalchemy
-
     engine = sqlalchemy.create_engine(f"sqlite:///{create_all_db_path}")
     Base.metadata.create_all(bind=engine)
     engine.dispose()
