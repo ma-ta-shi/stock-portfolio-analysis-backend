@@ -54,7 +54,7 @@ async def test_crosslisted_ticker_uses_ca_crosslisting_path(monkeypatch):
     )
     monkeypatch.setattr("data.precompute.research_sources.get_crosslisted_mda", fake_mda)
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         return _digest(section, text)
 
     monkeypatch.setattr("data.precompute.research_sources.summarize_filing_section", fake_summarize)
@@ -78,7 +78,7 @@ async def test_non_crosslisted_non_canadian_uses_edgartools_path(monkeypatch):
         "data.precompute.research_sources.EdgarToolsDataProvider", _FakeEdgarProvider
     )
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         return _digest(section, text)
 
     monkeypatch.setattr("data.precompute.research_sources.summarize_filing_section", fake_summarize)
@@ -94,7 +94,7 @@ async def test_pure_unmapped_ca_ticker_has_no_filing_source(monkeypatch):
     monkeypatch.setattr("data.precompute.research_sources.is_canadian", lambda stock, ticker: True)
     calls = []
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         calls.append("called")
         return _digest(section, text)
 
@@ -141,7 +141,7 @@ async def test_both_sections_missing_returns_empty_without_summarizing(monkeypat
     )
     calls = []
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         calls.append("called")
         return _digest(section, text)
 
@@ -176,7 +176,7 @@ async def test_summarization_failure_excluded_from_survivors_and_date(monkeypatc
         "data.precompute.research_sources.EdgarToolsDataProvider", _FakeEdgarProvider
     )
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         return None if section == "MDA" else _digest(section, text)
 
     monkeypatch.setattr("data.precompute.research_sources.summarize_filing_section", fake_summarize)
@@ -200,7 +200,7 @@ async def test_all_summarizations_fail_returns_empty(monkeypatch):
         "data.precompute.research_sources.EdgarToolsDataProvider", _FakeEdgarProvider
     )
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         return None
 
     monkeypatch.setattr("data.precompute.research_sources.summarize_filing_section", fake_summarize)
@@ -228,7 +228,7 @@ async def test_one_raw_section_missing_other_still_summarized(monkeypatch):
     )
     calls = []
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         calls.append(section)
         return _digest(section, text)
 
@@ -1217,7 +1217,7 @@ async def test_build_research_sources_full_assembly(monkeypatch):
         "data.precompute.research_sources.EdgarToolsDataProvider", _FakeEdgarProvider
     )
 
-    async def fake_summarize(session, text, section):
+    async def fake_summarize(session, text, section, **kwargs):
         return _digest(section, text)
 
     monkeypatch.setattr("data.precompute.research_sources.summarize_filing_section", fake_summarize)

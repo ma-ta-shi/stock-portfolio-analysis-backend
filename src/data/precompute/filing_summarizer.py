@@ -36,6 +36,13 @@ from typing import Literal
 import aiohttp
 import structlog
 
+# agents/capture.py, not agents/base.py -- see sentiment.py's own comment
+# on its identical import for the full reasoning (capture.py was always
+# the one shared, DB-agnostic primitive 86bbwachy's plan scoped for both
+# agents/base.py's retry-wrapped calls and precompute's one-shot calls;
+# the OLLAMA_HOST/_MODEL duplication below is a different, unrelated
+# decision about a different module).
+from agents.capture import CaptureContext, record_call
 from data.schemas.common import FilingDigest
 
 logger = structlog.get_logger(__name__)
@@ -130,17 +137,24 @@ async def summarize_filing_section(
     session: aiohttp.ClientSession,
     section_text: str,
     section: Literal["Business", "MDA"],
+    *,
+    capture: CaptureContext | None = None,
 ) -> FilingDigest | None:
     """One filing section -> a <=250-token FilingDigest, or None on any
     failure (empty input, HTTP error, timeout, malformed response body). No
     retry, no fallback - a genuine failure surfaces as a missing digest,
-    which research_sources.py omits."""
+    which research_sources.py omits.
+
+    `capture` (86bbwachy Phase 3) is None by default, same "gated,
+    zero-effect-when-omitted" precedent as sentiment.py's _score_article --
+    see that function's own docstring."""
     if not section_text or not section_text.strip():
         return None
 
+    prompt_text = _prompt(section_text[:_MAX_INPUT_CHARS], section)
     payload = {
         "model": _MODEL,
-        "prompt": _prompt(section_text[:_MAX_INPUT_CHARS], section),
+        "prompt": prompt_text,
         "stream": False,
         "think": _THINK,
         "options": {"num_ctx": _NUM_CTX, "num_predict": _NUM_PREDICT},
@@ -155,15 +169,37 @@ async def summarize_filing_section(
         # json.JSONDecodeError is reachable, not just defensive: a 200 with a
         # truncated/malformed body makes response.json() raise it directly (a plain
         # ValueError subclass), not wrapped in aiohttp.ClientError - same reasoning
-        # as sentiment.py's _score_article.
+        # as sentiment.py's _score_article. No capture on this path, same reasoning
+        # too -- no response body exists at all to write as an artifact.
         logger.warning("filing_summary_request_failed", error=str(exc), section=section)
         return None
 
+    digest: str | None = None
+    eval_count: int | None = None
+    parse_error: str | None = None
     try:
         digest = data["response"].strip()
         eval_count = int(data["eval_count"])
     except (KeyError, TypeError, ValueError, AttributeError):
         logger.warning("filing_summary_malformed_response", section=section)
+        parse_error = "malformed response"
+        digest = None
+
+    if capture is not None:
+        record_call(
+            capture,
+            call_site=f"precompute:filing_{section.lower()}",
+            model=_MODEL,
+            options=payload["options"],
+            prompt_text=prompt_text,
+            response_body=data,
+            thinking_chars=len(data.get("thinking") or ""),
+            empty_content=not (data.get("response") or "").strip(),
+            parsed_ok=parse_error is None,
+            parse_error=parse_error,
+        )
+
+    if digest is None:
         return None
 
     if not digest:

@@ -11,6 +11,8 @@ actual llm_calls row using the paths and metadata this returns.
 """
 import json
 import os
+from collections.abc import Iterator
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -114,3 +116,95 @@ def map_finish_reason(
     if empty_content:
         return "empty_content"
     return done_reason
+
+
+@dataclass
+class CaptureContext:
+    """Bundles what a precompute LLM call site (sentiment.py's
+    _score_article, filing_summarizer.py's summarize_filing_section) needs
+    to capture itself the same way agents/base.py's BaseRunner does --
+    86bbwachy Phase 3. One object threaded down through the call chain
+    (summarize_news, build_research_sources, build_filing_digests all just
+    pass this straight through unchanged) instead of three separate
+    parameters at every level in between.
+
+    None at every real call site by default -- DataPipeline.prepare() only
+    builds one when it received a real seq_counter from the orchestrator
+    (see that module's own comments), so every existing precompute test
+    that has never heard of capture keeps working completely unchanged: no
+    new files written, no new behavior, same as agents/base.py's own
+    "gated on ticker being set" precedent.
+    """
+    run_id: Any
+    ticker: str
+    seq_counter: Iterator[int]
+    call_log: list[dict] = field(default_factory=list)
+
+
+def record_call(
+    capture: CaptureContext,
+    *,
+    call_site: str,
+    model: str,
+    options: dict,
+    prompt_text: str,
+    response_body: dict,
+    thinking_chars: int,
+    empty_content: bool,
+    parsed_ok: bool,
+    parse_error: str | None = None,
+) -> None:
+    """Writes one precompute LLM call's artifact files and appends its
+    llm_calls-shaped record to capture.call_log -- the one-shot-call
+    counterpart to agents/base.py's own inline capture block inside
+    call_model/_call_generate (86bbwachy Phase 3).
+
+    attempt is always 1: neither sentiment.py's _score_article nor
+    filing_summarizer.py's summarize_filing_section retries (the
+    2026-08-07 no-fallback-chains decision applies here too -- a genuine
+    failure is a missing value, not a retried call), so there is never a
+    second attempt to number.
+
+    No context_payload -- matches write_call_artifacts' own contract:
+    a raw precompute prompt has no structured template input to snapshot,
+    only the plain rendered string itself.
+
+    total_duration/prompt_eval_count/eval_count/done_reason are read
+    directly off response_body -- confirmed the same top-level shape on
+    both Ollama endpoints these two callers use (/api/chat for sentiment,
+    /api/generate for filing summarization), matching agents/base.py's own
+    call_model/_call_generate, which read the identical fields the same
+    way from each endpoint's own body. thinking_chars/empty_content are
+    NOT read here, since the two endpoints disagree on where "thinking"
+    and the real answer text live (message.thinking/message.content for
+    /api/chat, top-level thinking/response for /api/generate) -- the
+    caller already knows its own shape and extracts these itself.
+    """
+    seq = next(capture.seq_counter)
+    paths = write_call_artifacts(
+        run_id=capture.run_id,
+        ticker=capture.ticker,
+        seq=seq,
+        call_site=call_site,
+        attempt=1,
+        prompt_text=prompt_text,
+        context_payload=None,
+        response_body=response_body,
+    )
+    total_duration = response_body.get("total_duration")
+    capture.call_log.append({
+        "call_site": call_site,
+        "seq": seq,
+        "context_tag": "analysis",
+        "model": model,
+        "options_json": options,
+        "attempt": 1,
+        "total_duration_s": round(total_duration / 1e9, 2) if total_duration is not None else None,
+        "prompt_eval_count": response_body.get("prompt_eval_count"),
+        "eval_count": response_body.get("eval_count"),
+        "thinking_chars": thinking_chars,
+        "finish_reason": map_finish_reason(response_body.get("done_reason"), empty_content=empty_content),
+        "parsed_ok": parsed_ok,
+        "parse_error": parse_error,
+        **paths,
+    })

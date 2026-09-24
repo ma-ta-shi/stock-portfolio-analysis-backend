@@ -464,8 +464,30 @@ class AnalysisOrchestrator:
         run_id = run.run_id
         context = AnalysisContext(account_type=run.account_type, timeline=run.timeline)
 
+        # 86bbwachy Phase 2/3 capture context -- instance attributes, not
+        # threaded through every private method's own signature, since a
+        # fresh AnalysisOrchestrator() is constructed per run (confirmed:
+        # api/routes/analysis.py's _run_analysis_background does
+        # `AnalysisOrchestrator().run(run, db)`, a new instance every time),
+        # so there is no cross-run leakage risk. Created BEFORE prepare()
+        # runs, not after -- seq_counter is genuinely run-wide (spec §5.2),
+        # and Phase 3 wires it into DataPipeline.prepare() too, so
+        # precompute's own Ollama calls (sentiment scoring, filing-section
+        # summarization -- both of which happen inside prepare(), before
+        # Pass 1 ever starts) consume the lowest seq values in the SAME
+        # single sequence Pass 1/Pass 2/CIO/Shadow CIO continue afterward,
+        # not a separate 0-based numbering of their own. self._ticker is
+        # set separately below, once bundle.stock exists -- prepare() needs
+        # no ticker from here, it already resolves its own internally as
+        # one of its first steps (stock_ref.ticker), well before either of
+        # its own precompute LLM calls happen.
+        self._run_id = run_id
+        self._seq_counter = itertools.count()
+
         try:
-            bundle = await DataPipeline().prepare(run.stock_id, context, db)
+            bundle = await DataPipeline().prepare(
+                run.stock_id, context, db, run_id=run_id, seq_counter=self._seq_counter
+            )
         except Exception as exc:
             logger.error("data_pipeline_failed", run_id=str(run_id), error=str(exc))
             run.status = RunStatus.FAILED
@@ -482,23 +504,13 @@ class AnalysisOrchestrator:
         run.currency = bundle.stock.currency
         run.instrument_type = bundle.company_info.get("asset_type")
         run.market_cap_bucket = _market_cap_bucket(bundle.company_info.get("market_cap"))
+        # commits prepare()'s own added-but-not-committed precompute
+        # llm_calls rows (Phase 3's DataPipeline.prepare() only db.add()s,
+        # matching that function's pre-existing "never commits" posture --
+        # see its own docstring) in the same transaction as these tags.
         await db.commit()
 
-        # 86bbwachy Phase 2 capture context -- instance attributes, not
-        # threaded through every private method's own signature, since a
-        # fresh AnalysisOrchestrator() is constructed per run (confirmed:
-        # api/routes/analysis.py's _run_analysis_background does
-        # `AnalysisOrchestrator().run(run, db)`, a new instance every time),
-        # so there is no cross-run leakage risk. seq_counter is genuinely
-        # run-wide (spec §5.2) -- Pass 1/Pass 2's own concurrent agents all
-        # need to share the SAME counter object, which instance state gives
-        # them for free; each private method below sets these three onto
-        # every runner it constructs, right after construction, matching
-        # current_agent's own already-established "set post-init" pattern
-        # in agents/base.py.
-        self._run_id = run_id
         self._ticker = bundle.stock.ticker
-        self._seq_counter = itertools.count()
 
         try:
             pass1_outputs = await self._run_pass1(run, bundle, db)

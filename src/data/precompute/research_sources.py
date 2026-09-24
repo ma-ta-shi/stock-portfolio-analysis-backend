@@ -40,6 +40,7 @@ import aiohttp
 import structlog
 from edgar import Company
 
+from agents.capture import CaptureContext
 from data.precompute.filing_summarizer import summarize_filing_section
 from data.providers.ca_crosslisting import (
     get_crosslisted_business_overview,
@@ -92,7 +93,7 @@ _DIVIDEND_RECENT_DAYS = 365  # the "is this currently active" bar - matches
 
 
 async def build_filing_digests(
-    ticker: str, stock: StockLike | None = None
+    ticker: str, stock: StockLike | None = None, *, capture: CaptureContext | None = None
 ) -> tuple[list[FilingDigest], str | None]:
     """Business + MDA digests, plus the freshest filing_date among sections
     that actually produced a digest (not merely among sections retrieved -
@@ -121,7 +122,12 @@ async def build_filing_digests(
     (mirrors precompute/sentiment.py's session-sharing pattern). No
     persistent cache - every call re-fetches and re-summarizes; the
     (cik, accession_number, section_id) digest cache is a separate,
-    unbuilt ticket (DataBundle Assembly epic)."""
+    unbuilt ticket (DataBundle Assembly epic).
+
+    `capture` (86bbwachy Phase 3) is threaded straight through to both
+    summarize_filing_section() calls unchanged -- None by default, same
+    "gated, zero-effect-when-omitted" precedent as everywhere else this
+    ticket touches precompute."""
     if is_crosslisted(ticker):
         business_raw, mda_raw = await asyncio.gather(
             get_crosslisted_business_overview(ticker),
@@ -147,7 +153,10 @@ async def build_filing_digests(
 
     async with aiohttp.ClientSession() as session:
         digest_results = await asyncio.gather(
-            *(summarize_filing_section(session, raw["text"], section) for section, raw in sections)
+            *(
+                summarize_filing_section(session, raw["text"], section, capture=capture)
+                for section, raw in sections
+            )
         )
 
     # Pair each digest with its own source section's filing_date, then drop
@@ -852,7 +861,11 @@ def apply_dual_class_caveat(caveats: list[str], dual_class_flag: bool) -> list[s
 
 
 async def build_research_sources(
-    ticker: str, id_assigned_articles: list[dict], stock: StockLike | None = None
+    ticker: str,
+    id_assigned_articles: list[dict],
+    stock: StockLike | None = None,
+    *,
+    capture: CaptureContext | None = None,
 ) -> ResearchSourcesBundle:
     """Top-level assembly - calls every builder above plus the three from
     2a-ii and wires the result into one validator-satisfying
@@ -937,9 +950,16 @@ async def build_research_sources(
         sources them - finding #28) - build_peer_blocks already computes
         their pre-anonymization token_count via len//4, so recomputing
         post-anonymization the same way is consistent with the number
-        that was already there, not a new approximation being introduced."""
+        that was already there, not a new approximation being introduced.
+
+    `capture` (86bbwachy Phase 3) is threaded straight through to
+    build_filing_digests unchanged -- None by default, same
+    "gated, zero-effect-when-omitted" precedent as everywhere else this
+    ticket touches precompute. Nothing else this function calls makes an
+    LLM call (build_peer_blocks/build_management_signals/_fetch_company_name
+    are all provider-data-only)."""
     company_name_task = asyncio.create_task(_fetch_company_name(ticker))
-    digests_task = asyncio.create_task(build_filing_digests(ticker, stock=stock))
+    digests_task = asyncio.create_task(build_filing_digests(ticker, stock=stock, capture=capture))
 
     peer_pairs, management_signals = await asyncio.gather(
         build_peer_blocks(ticker),
