@@ -27,7 +27,9 @@ only names Recommendation/Prediction/ShadowPrediction; checkpoint scheduling
 is real, separate follow-up work, not silently absorbed here.
 """
 import asyncio
+import itertools
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -54,6 +56,7 @@ from agents.utils import (
 )
 from api.tables.agent_outputs import AgentOutput
 from api.tables.analysis_runs import AnalysisRun, RunStatus
+from api.tables.llm_calls import LLMCall
 from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
 from api.tables.shadow_predictions import ShadowPrediction
@@ -139,6 +142,43 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     }
 
 
+def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
+    """One LLMCall row per runner.call_log entry -- every attempt, not just
+    the accepted one (86bbwachy Phase 2, run-instrumentation.md §5.3, §9
+    OQ5). Does not set agent_output_id here -- _agent_output_row (the only
+    caller) backfills that directly onto the returned list's last element,
+    since AgentOutput's own PK is generated client-side (see that
+    function's own comment) and is already known by the time this runs.
+    """
+    rows = []
+    for entry in runner.call_log:
+        total_duration_s = entry.get("total_duration_s")
+        rows.append(LLMCall(
+            run_id=run_id,
+            context_tag=entry.get("context_tag", "analysis"),
+            seq=entry.get("seq"),
+            call_site=entry.get("call_site") or f"agent:{(entry.get('agent') or '').lower()}",
+            agent_pass=agent_pass,
+            attempt=entry.get("attempt", 1),
+            model=entry.get("model", MODEL),
+            options_json=entry.get("options_json") or {},
+            prompt_path=entry.get("prompt_path"),
+            context_path=entry.get("context_path"),
+            response_path=entry.get("response_path"),
+            prompt_tokens=entry.get("prompt_eval_count"),
+            completion_tokens=entry.get("eval_count"),
+            thinking_chars=entry.get("thinking_chars"),
+            latency_ms=round(total_duration_s * 1000) if total_duration_s else None,
+            finish_reason=entry.get("finish_reason"),
+            parsed_ok=entry.get("parsed_ok"),
+            parse_error=entry.get("parse_error"),
+            validator_passed=entry.get("validator_passed"),
+            validator_errors=entry.get("validator_errors"),
+            auto_trimmed=entry.get("auto_trimmed", False),
+        ))
+    return rows
+
+
 def _agent_output_row(
     run: AnalysisRun,
     agent_id: str,
@@ -146,7 +186,7 @@ def _agent_output_row(
     result: dict | None,
     errors: list[str],
     runner,
-) -> AgentOutput:
+) -> tuple[AgentOutput, list[LLMCall]]:
     """One AgentOutput row per call, written immediately after that agent
     finishes (or fails) -- not batched at the end. This is what actually
     backs per-agent containment (d): a mid-run failure still leaves behind
@@ -157,11 +197,24 @@ def _agent_output_row(
     empty -- a validation-failed-but-present agent still counts as
     "completed" (SETTLED 2026-09-02, audit E77: validation status is a
     warning, not a gate). Only a None/empty/all-None result is "failed".
+
+    Also returns this call's llm_calls rows (86bbwachy Phase 2) -- linked to
+    the AgentOutput row by generating output_id ourselves (uuid4(), the same
+    callable AgentOutput.output_id's own column default would otherwise use)
+    instead of relying on a post-insert PK. AgentOutput.output_id is a
+    client-side default (uuid4, not a DB sequence/server default), so this
+    doesn't skip anything the database would normally provide -- it just
+    lets us know the value before the row is ever added to the session,
+    avoiding the flush-then-UPDATE two-step the original plan for this
+    ticket assumed was necessary. The caller is responsible for db.add()-ing
+    both the returned AgentOutput and every row in the returned list.
     """
     completed = agent_completed(result)
     r = result or {}
     timing = runner.last_timing or {}
-    return AgentOutput(
+    output_id = uuid4()
+    agent_output = AgentOutput(
+        output_id=output_id,
         run_id=run.run_id,
         agent_name=agent_id,
         agent_pass=agent_pass,
@@ -179,6 +232,39 @@ def _agent_output_row(
         latency_ms=round(timing.get("total_duration_s", 0) * 1000) if timing.get("total_duration_s") else None,
         error_detail="; ".join(errors) if errors else None,
     )
+
+    llm_calls = _llm_call_rows(run.run_id, agent_pass, runner)
+    # The winning attempt is always call_log's last entry, regardless of
+    # which path _retry_loop returned through (validated, auto-trimmed,
+    # soft-error-accepted, or exhausted) -- confirmed by reading that
+    # function directly: `last_result`/the returned `result` are always
+    # updated from the same attempt whose call_log entry was just appended,
+    # every single time through the loop, not just on the success path.
+    # Only back-link when the agent actually completed -- a failed agent's
+    # calls all stay unlinked, which is correct: none of them produced an
+    # accepted output for AgentOutput to point back to.
+    if completed and llm_calls:
+        llm_calls[-1].agent_output_id = output_id
+
+    return agent_output, llm_calls
+
+
+def _add_agent_output_and_calls(
+    db: AsyncSession,
+    run: AnalysisRun,
+    agent_id: str,
+    agent_pass: str,
+    result: dict | None,
+    errors: list[str],
+    runner,
+) -> None:
+    """db.add()s both halves of _agent_output_row's return value -- the
+    common pattern at every one of this file's five call sites, factored
+    out once rather than repeated five times (86bbwachy Phase 2)."""
+    agent_output, llm_calls = _agent_output_row(run, agent_id, agent_pass, result, errors, runner)
+    db.add(agent_output)
+    for call in llm_calls:
+        db.add(call)
 
 
 def _validate_tax_passthroughs(
@@ -370,6 +456,22 @@ class AnalysisOrchestrator:
         run.market_cap_bucket = _market_cap_bucket(bundle.company_info.get("market_cap"))
         await db.commit()
 
+        # 86bbwachy Phase 2 capture context -- instance attributes, not
+        # threaded through every private method's own signature, since a
+        # fresh AnalysisOrchestrator() is constructed per run (confirmed:
+        # api/routes/analysis.py's _run_analysis_background does
+        # `AnalysisOrchestrator().run(run, db)`, a new instance every time),
+        # so there is no cross-run leakage risk. seq_counter is genuinely
+        # run-wide (spec §5.2) -- Pass 1/Pass 2's own concurrent agents all
+        # need to share the SAME counter object, which instance state gives
+        # them for free; each private method below sets these three onto
+        # every runner it constructs, right after construction, matching
+        # current_agent's own already-established "set post-init" pattern
+        # in agents/base.py.
+        self._run_id = run_id
+        self._ticker = bundle.stock.ticker
+        self._seq_counter = itertools.count()
+
         try:
             pass1_outputs = await self._run_pass1(run, bundle, db)
         except OllamaUnavailable:
@@ -461,6 +563,7 @@ class AnalysisOrchestrator:
         # the two. No schema migration needed -- agent_name is a plain
         # unconstrained String(30) column.
         cio_runner = CIORunner()
+        self._prime_runner(cio_runner)
         try:
             try:
                 stage_a_result, stage_a_errors = await self._run_cio_stage_a(
@@ -510,7 +613,7 @@ class AnalysisOrchestrator:
                 if isinstance(tax_summary, dict):
                     tax_summary["dividend_yield_pct"] = tax_profile.get("dividend_yield_pct")
 
-            db.add(_agent_output_row(run, "cio_stage_b", "synthesis", stage_b_result, stage_b_errors, cio_runner))
+            _add_agent_output_and_calls(db, run, "cio_stage_b", "synthesis", stage_b_result, stage_b_errors, cio_runner)
             await db.commit()
         finally:
             await _close_runner(cio_runner)
@@ -570,6 +673,19 @@ class AnalysisOrchestrator:
         run.completed_at = datetime.now(UTC)
         await db.commit()
 
+    def _prime_runner(self, runner) -> None:
+        """Stamps 86bbwachy Phase 2 capture context onto a freshly
+        constructed runner, before it makes any calls. run_id/ticker anchor
+        the artifact directory (agents/capture.py's own artifact_dir());
+        seq_counter is the single run-wide counter shared across every
+        concurrently-running agent (Pass 1's 5, Pass 2's 4, CIO, Shadow CIO)
+        -- called once per runner construction, matching current_agent's own
+        already-established "set post-init" pattern in agents/base.py.
+        """
+        runner.run_id = self._run_id
+        runner.ticker = self._ticker
+        runner.seq_counter = self._seq_counter
+
     async def _run_pass1(self, run: AnalysisRun, bundle: DataBundle, db: AsyncSession) -> dict:
         runners = {
             "RSRCH": StockResearcherRunner(),
@@ -578,6 +694,8 @@ class AnalysisOrchestrator:
             "SENT": SentimentAnalystRunner(),
             "MACRO": MacroEconomistRunner(),
         }
+        for r in runners.values():
+            self._prime_runner(r)
 
         # Do NOT let any agent's exception escape this gather -- letting one
         # propagate would orphan the other still-running agent tasks
@@ -594,7 +712,7 @@ class AnalysisOrchestrator:
         outputs: dict[str, dict | None] = {}
         ollama_unavailable: OllamaUnavailable | None = None
         for agent_id, result, errors, exc in results:
-            db.add(_agent_output_row(run, agent_id, "pass1", result, errors, runners[agent_id]))
+            _add_agent_output_and_calls(db, run, agent_id, "pass1", result, errors, runners[agent_id])
             outputs[agent_id] = result
             if isinstance(exc, OllamaUnavailable):
                 ollama_unavailable = exc
@@ -613,6 +731,8 @@ class AnalysisOrchestrator:
             "tax": TaxStrategistRunner(),
             "risk": RiskAdvisorRunner(),
         }
+        for r in runners.values():
+            self._prime_runner(r)
 
         async def _run_bull_bear_tax(agent_id: str, runner):
             agent_id, result, errors, exc = await _run_contained(
@@ -685,7 +805,7 @@ class AnalysisOrchestrator:
         outputs: dict[str, dict | None] = {}
         ollama_unavailable: OllamaUnavailable | None = None
         for agent_id, result, errors, exc in results:
-            db.add(_agent_output_row(run, agent_id, "pass2", result, errors, runners[agent_id]))
+            _add_agent_output_and_calls(db, run, agent_id, "pass2", result, errors, runners[agent_id])
             outputs[agent_id] = result
             if isinstance(exc, OllamaUnavailable):
                 ollama_unavailable = exc
@@ -705,7 +825,7 @@ class AnalysisOrchestrator:
         db: AsyncSession,
     ) -> tuple[dict, list[str]]:
         result, errors = await runner.run(bundle, compressed, pass2_outputs)
-        db.add(_agent_output_row(run, "cio_stage_a", "synthesis", result, errors, runner))
+        _add_agent_output_and_calls(db, run, "cio_stage_a", "synthesis", result, errors, runner)
         await db.commit()
         return result, errors
 
@@ -747,9 +867,10 @@ class AnalysisOrchestrator:
         # v2: no account-specific counterpart) -- only bull/bear/risk.
         shadow_pass2 = {k: pass2_outputs.get(k) for k in ("bull", "bear", "risk")}
         runner = ShadowCIORunner()
+        self._prime_runner(runner)
         result, errors = await runner.run(bundle, compressed, shadow_pass2)
         async with db.begin_nested():
-            db.add(_agent_output_row(run, "shadow_cio", "synthesis", result, errors, runner))
+            _add_agent_output_and_calls(db, run, "shadow_cio", "synthesis", result, errors, runner)
             await db.flush()
         await db.commit()
         await _close_runner(runner)

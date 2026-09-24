@@ -122,6 +122,18 @@ class _StubRunner:
         self.last_timing = {"total_duration_s": 1.0, "eval_count": 100}
         self.last_stage_a_context = [1, 2, 3] if stage_b_result is not None else None
         self.current_agent = None
+        # BaseRunner's real per-attempt call record list (86bbwachy Phase 2)
+        # -- empty by default since these tests only assert on
+        # AgentOutput/Recommendation/Prediction rows, not on llm_calls rows
+        # themselves; _llm_call_rows() iterates this directly and would
+        # AttributeError on a stub that doesn't have it at all.
+        self.call_log = []
+        # Stamped post-construction by AnalysisOrchestrator._prime_runner()
+        # in real code; defaulted here so a stub used without going through
+        # the orchestrator (none currently) still has the attributes.
+        self.run_id = None
+        self.ticker = None
+        self.seq_counter = None
         # None by default, matching BaseRunner's own pre-first-call state --
         # exercises _close_runner()'s real "session is None -> no-op"
         # branch. Tests that need to assert a session was actually closed
