@@ -39,7 +39,23 @@ def _fmt(v, suffix: str = ""):
     return "N/A" if v is None else f"{v}{suffix}"
 
 
-def build_user_message(bundle: DataBundle) -> str:
+def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
+    """Returns (rendered user message, field presence map) -- the second
+    element is 86bbwachy Phase 4's own new addition. Unlike
+    pass1_stock_researcher.py's per-block helpers, this agent's whole
+    payload is one f-string with ~30 individually-formatted metrics --
+    restructuring every one into its own RenderedField-returning helper
+    would be a much bigger, riskier change for little real benefit (most
+    of these are plain indicator/quote passthroughs, virtually always
+    present once a ticker resolves at all). Presence is computed directly
+    from the same underlying bundle values _fmt() already reads below, not
+    re-derived from the rendered text afterward -- only for the fields
+    confirmed (against technicals.py's own compute_all()) to have a real,
+    meaningful sometimes-absent case: weekly timeframe data needs >=20
+    weeks of history, sector relative strength needs a resolvable sector
+    ETF, earnings proximity needs a real calendar, support/resistance
+    needs enough price history for pivots to resolve at all.
+    """
     ctx = bundle.context
     company_info = bundle.company_info
     ti = bundle.technical_indicators
@@ -63,7 +79,7 @@ def build_user_message(bundle: DataBundle) -> str:
     if avg_dollar_vol is not None and avg_dollar_vol < 1_000_000:
         volume_flag = f"\n⚠️ THIN VOLUME: avg_dollar_volume_20=${avg_dollar_vol:,.0f} (<$1M) — soft thin-volume caveat required."
 
-    return f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
+    text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{earnings_flag}{volume_flag}
 
 EARNINGS PROXIMITY: {_fmt(earnings_days, ' days')}
@@ -107,6 +123,19 @@ PATTERN (PAT):
 MARKET REGIME:
   {_fmt(bundle.market_context.get('market_regime'))}"""
 
+    field_presence = {
+        "earnings_proximity": earnings_days is not None,
+        "weekly_timeframe": mtf.get("weekly_trend") is not None,
+        "sector_relative_strength": ts.get("rs_leadership") is not None,
+        # nearest_support/nearest_resistance always go missing together --
+        # _support_resistance() returns its whole empty dict as one unit
+        # when pivots can't resolve at all -- so checking one is a
+        # sufficient, accurate proxy for the pair, unlike Stock
+        # Researcher's dividend yield/payout ratio (genuinely independent).
+        "support_resistance": sr.get("nearest_support") is not None,
+    }
+    return text, field_presence
+
 
 class TechnicalAnalystRunner(BaseRunner):
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
@@ -117,7 +146,11 @@ class TechnicalAnalystRunner(BaseRunner):
         mtf = bundle.multi_timeframe
         ti = bundle.technical_indicators
         ep = bundle.earnings_proximity
-        user_msg = build_user_message(bundle)
+        user_msg, field_presence = build_user_message(bundle)
+        # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
+        # failed call still records whether its own input was already
+        # incomplete.
+        self.last_field_coverage = field_presence
         system_prompt = fill(
             load_template("technical_analyst"),
             {
