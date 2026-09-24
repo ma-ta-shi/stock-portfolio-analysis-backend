@@ -735,11 +735,20 @@ class BaseRunner:
                 if self.call_log:
                     self.call_log[-1]["passed"] = passed
                     self.call_log[-1]["errors"] = errors
-                    # 86bbwachy Phase 2: same values, llm_calls' own field
-                    # names -- added alongside passed/errors rather than
-                    # renaming them, since an existing test
-                    # (test_base.py:431) already asserts on "passed" by
-                    # that exact name.
+                    # 86bbwachy Phase 2: added alongside passed/errors
+                    # rather than renaming them (an existing test asserts
+                    # on "passed" by that exact name -- see
+                    # TestSoftErrorAcceptance in test_base.py). Not pure
+                    # duplication, it turns out: on the auto-trim-success
+                    # path below, `passed` is legacy behavior that's never
+                    # updated after this point and stays stale/False even
+                    # though the call really did succeed -- only
+                    # validator_passed gets corrected there. So
+                    # llm_calls.validator_passed is a strictly more
+                    # correct signal than call_log's own "passed", not an
+                    # equivalent copy under a different name. The
+                    # `passed` staleness itself predates this ticket and
+                    # is out of scope to fix here.
                     self.call_log[-1]["validator_passed"] = passed
                     self.call_log[-1]["validator_errors"] = errors
                 if passed:

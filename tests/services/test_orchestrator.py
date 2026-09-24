@@ -129,12 +129,18 @@ class _StubRunner:
         # themselves; _llm_call_rows() iterates this directly and would
         # AttributeError on a stub that doesn't have it at all.
         self.call_log = []
-        # Stamped post-construction by AnalysisOrchestrator._prime_runner()
-        # in real code; defaulted here so a stub used without going through
-        # the orchestrator (none currently) still has the attributes.
+        # run_id/ticker/seq_counter: stamped post-construction by
+        # AnalysisOrchestrator._prime_runner() in real code; defaulted here
+        # so a stub used without going through the orchestrator (none
+        # currently) still has the attributes.
         self.run_id = None
         self.ticker = None
         self.seq_counter = None
+        # _llm_calls_consumed: a real BaseRunner defaults this itself (see
+        # that class's own __init__) since it indexes call_log, which
+        # BaseRunner also owns -- _prime_runner deliberately does NOT set
+        # it. _StubRunner isn't a BaseRunner subclass, so it needs its own
+        # copy of that same default.
         self._llm_calls_consumed = 0
         # None by default, matching BaseRunner's own pre-first-call state --
         # exercises _close_runner()'s real "session is None -> no-op"

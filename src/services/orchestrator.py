@@ -159,9 +159,9 @@ def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
     inserting a real duplicate llm_calls row (confirmed live, 2026-09-24 AAPL
     run: two identical seq=15 "agent:cio_stage_a" rows, one correctly
     carrying agent_output_id from the first call, one blank from the
-    second). `_prime_runner` sets the counter to 0 once per runner
-    construction; `getattr(..., 0)` covers any runner that predates that
-    (none in production today, but keeps this function safe standalone).
+    second). `BaseRunner.__init__` defaults the counter to 0 for every real
+    runner; `getattr(..., 0)` only exists for a duck-typed test double that
+    isn't a real BaseRunner (e.g. test_orchestrator.py's own _StubRunner).
     """
     consumed = getattr(runner, "_llm_calls_consumed", 0)
     new_entries = runner.call_log[consumed:]

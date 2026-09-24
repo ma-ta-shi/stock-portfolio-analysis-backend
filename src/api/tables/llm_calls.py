@@ -25,10 +25,14 @@ class LLMCall(Base):
     # prefix. Only guaranteed unique per run, not strictly wall-clock
     # ordered under Pass 1/Pass 2's real concurrency (spec §5.2).
     seq: Mapped[Optional[int]]
-    # Stable identifier, e.g. agent:fundamental_analyst, agent:cio_stage_a,
-    # agent:cio_stage_b, agent:shadow_cio, agent:risk_stage_b,
-    # precompute:sentiment, precompute:filing_summarizer. CIO/Risk Advisor
-    # get an explicit _stage_a/_stage_b suffix -- the same ambiguity
+    # Stable identifier, derived from the runner's own current_agent (see
+    # agents/base.py's call_model/_call_generate). Confirmed live, not
+    # guessed: agent:fund, agent:tech, agent:rsrch, agent:sent, agent:macro
+    # (Pass 1's own short codes), agent:bull, agent:bear, agent:tax,
+    # agent:risk_stage_a, agent:risk_stage_b, agent:cio_stage_a,
+    # agent:cio_stage_b, agent:shadow_cio; precompute:sentiment/
+    # precompute:filing_summarizer from Phase 3. CIO/Risk Advisor get an
+    # explicit _stage_a/_stage_b suffix -- the same ambiguity
     # AgentOutput.agent_name already hit once (fixed this session by
     # renaming "cio" to cio_stage_a/cio_stage_b) is not repeated here.
     call_site: Mapped[str] = mapped_column(String(40), index=True)
