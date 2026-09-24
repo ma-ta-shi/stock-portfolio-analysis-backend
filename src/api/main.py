@@ -53,6 +53,14 @@ from api.routes import analysis, user_profile  # noqa: E402
 # moment the app actually uses these models rather than just creating their
 # tables. Importing all 7 together is what makes both create_all() AND
 # real ORM use succeed, not just the DDL step.
+#
+# The real live count is 8, not 7 -- found live while generating the
+# Alembic baseline migration (86bbwachy prerequisite): AnalysisRun.user_id
+# has a real FK to user_profiles, which this file already makes live too,
+# just via the `user_profile` route import on the line above rather than
+# through this explicit table-import block. alembic/env.py's own model
+# imports mirror this file's true effective set (8 tables), not just this
+# block's own 7 -- keep both lists in sync when either changes.
 from api.tables.stock import Stock  # noqa: E402, F401
 from api.tables.analysis_runs import AnalysisRun  # noqa: E402, F401
 from api.tables.agent_outputs import AgentOutput  # noqa: E402, F401
