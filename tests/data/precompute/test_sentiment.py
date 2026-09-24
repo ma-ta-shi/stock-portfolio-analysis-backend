@@ -1,9 +1,30 @@
 import asyncio
+import importlib
 import json
 
 import pytest
 
+import data.precompute.sentiment as sentiment_module
 from data.precompute.sentiment import _score_article, summarize_news
+
+
+def test_ollama_url_reads_ollama_host_env_var(monkeypatch):
+    """Real bug, confirmed live 2026-09-23: this module used to hardcode
+    localhost:11434 instead of reading OLLAMA_HOST like agents/base.py
+    already does -- proven live via a test pointing OLLAMA_HOST at an
+    unreachable port to simulate an Ollama outage, where this module kept
+    silently hitting the real Ollama instance underneath it. A bare
+    "the module is internally consistent with its own constant" check
+    (agents/test_base.py's own convention for this same class of
+    module-level constant) would pass trivially even against the original
+    hardcoded bug -- reload with a real env var override is what actually
+    proves the value is configurable, not just self-consistent."""
+    monkeypatch.setenv("OLLAMA_HOST", "http://example-ollama-host:9999")
+    try:
+        importlib.reload(sentiment_module)
+        assert sentiment_module._OLLAMA_URL == "http://example-ollama-host:9999/api/chat"
+    finally:
+        importlib.reload(sentiment_module)  # restore the real default for later tests
 
 
 class FakeResponse:

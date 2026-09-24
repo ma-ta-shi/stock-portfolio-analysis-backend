@@ -32,13 +32,29 @@ window-filtered slice of that single global result.
 
 import asyncio
 import json
+import os
 
 import aiohttp
 import structlog
 
 logger = structlog.get_logger(__name__)
 
-_OLLAMA_URL = "http://localhost:11434/api/chat"
+# Real bug, confirmed live 2026-09-23 (found while live-testing the
+# OllamaUnavailable abort path): this used to hardcode localhost:11434
+# instead of reading OLLAMA_HOST from the environment the way
+# agents/base.py already does. In any deployment where Ollama isn't on
+# localhost (a remote GPU box, a different port, a container), this module
+# would silently keep hitting the wrong address while the rest of the
+# pipeline correctly used the configured host -- proven live: a test
+# pointing OLLAMA_HOST at an unreachable port to simulate an Ollama outage
+# for agents/base.py's own callers left this module still hitting the
+# real, working Ollama instance underneath it, undetected. Same env var
+# name/default as agents/base.py's own OLLAMA_HOST, duplicated rather than
+# imported -- data/precompute/ has no existing dependency on agents/
+# anywhere in this codebase, and importing across that boundary just for
+# one constant would invert it for no real benefit.
+_OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+_OLLAMA_URL = f"{_OLLAMA_HOST}/api/chat"
 _MODEL = "gpt-oss:20b"  # 2026-08-26: switched from qwen3.6:35b-a3b, which doesn't fit in
 # this machine's VRAM (61%/39% GPU/CPU split per `ollama ps`, a live-measured 209s per
 # call) - see docs/decision-log.md. gpt-oss:20b runs 100% GPU, confirmed live: 5.4s total

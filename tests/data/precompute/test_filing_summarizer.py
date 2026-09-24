@@ -1,8 +1,10 @@
 import asyncio
+import importlib
 import json
 
 import pytest
 
+import data.precompute.filing_summarizer as filing_summarizer_module
 from data.precompute.filing_summarizer import (
     _MAX_INPUT_CHARS,
     _TOKEN_BUDGET,
@@ -10,6 +12,20 @@ from data.precompute.filing_summarizer import (
     summarize_filing_section,
 )
 from data.schemas.common import FilingDigest
+
+
+def test_ollama_url_reads_ollama_host_env_var(monkeypatch):
+    """Real bug, confirmed live 2026-09-23: this module used to hardcode
+    localhost:11434 instead of reading OLLAMA_HOST like agents/base.py
+    already does -- see data/precompute/sentiment.py's own equivalent test
+    for the full live-reproduction story; same fix, same module-level
+    import-time constant pattern, same test approach here."""
+    monkeypatch.setenv("OLLAMA_HOST", "http://example-ollama-host:9999")
+    try:
+        importlib.reload(filing_summarizer_module)
+        assert filing_summarizer_module._OLLAMA_URL == "http://example-ollama-host:9999/api/generate"
+    finally:
+        importlib.reload(filing_summarizer_module)  # restore the real default for later tests
 
 
 class FakeResponse:
