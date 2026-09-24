@@ -15,7 +15,7 @@ def _news_item(item_id: str, source: str) -> NewsItem:
 
 
 def _research_bundle(
-    news_items: list[NewsItem], sedar_filing_available: bool = False
+    news_items: list[NewsItem], has_filing_digest: bool = False
 ) -> ResearchSourcesBundle:
     """Minimal valid ResearchSourcesBundle - only the fields
     build_canadian_data_flags() actually reads vary by test, everything
@@ -36,7 +36,7 @@ def _research_bundle(
         ),
         dual_class_flag=False,
         cik_verified=False,
-        sedar_filing_available=sedar_filing_available,
+        has_filing_digest=has_filing_digest,
         missing_sources_list=[],
         latest_filing_age_days=None,
         latest_transcript_age_days=None,
@@ -178,14 +178,14 @@ def test_news_article_count_zero_with_no_items():
 
 def test_sedar_filing_available_passes_through_true():
     flags = build_canadian_data_flags(
-        _research_bundle([], sedar_filing_available=True), _macro_bundle(None), {}
+        _research_bundle([], has_filing_digest=True), _macro_bundle(None), {}
     )
     assert flags.sedar_filing_available is True
 
 
 def test_sedar_filing_available_passes_through_false():
     flags = build_canadian_data_flags(
-        _research_bundle([], sedar_filing_available=False), _macro_bundle(None), {}
+        _research_bundle([], has_filing_digest=False), _macro_bundle(None), {}
     )
     assert flags.sedar_filing_available is False
 
@@ -225,7 +225,7 @@ def test_full_build_matches_real_ry_to_live_verification():
     ]
     items = [_news_item(f"N{i}", src) for i, src in enumerate(sources)]
     flags = build_canadian_data_flags(
-        _research_bundle(items, sedar_filing_available=True), _macro_bundle(8), consensus
+        _research_bundle(items, has_filing_digest=True), _macro_bundle(8), consensus
     )
     assert flags.analyst_count == 15
     assert flags.news_article_count == 7

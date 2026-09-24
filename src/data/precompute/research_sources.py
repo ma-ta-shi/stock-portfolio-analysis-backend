@@ -6,7 +6,7 @@ Builds the three sourcing legs of the bundle: filing-section digests
 with precompute/sentiment.py), and peer blocks (PEER_n citations) - plus
 the derivation/compliance layer on top: management_signals (the only
 management-quality source the live prompt allows), entity anonymization,
-dual_class_flag/cik_verified, sedar_filing_available, the mechanical
+dual_class_flag/cik_verified, has_filing_digest, the mechanical
 counters, and build_research_sources(), the top-level function that
 assembles all of it into one validator-satisfying ResearchSourcesBundle.
 Every citation token the live Stock Researcher Agent Prompt.md can use has
@@ -1005,7 +1005,7 @@ async def build_research_sources(
         management_signals=management_signals,
         dual_class_flag=dual_class_flag,
         cik_verified=cik_verified,
-        sedar_filing_available=has_filing_digest,
+        has_filing_digest=has_filing_digest,
         missing_sources_list=missing_sources_list,
         latest_filing_age_days=latest_filing_age_days,
         latest_transcript_age_days=None,

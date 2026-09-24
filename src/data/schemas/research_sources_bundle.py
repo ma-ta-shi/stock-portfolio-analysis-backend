@@ -114,7 +114,20 @@ class ResearchSourcesBundle(ContractModel):
 
     dual_class_flag: bool
     cik_verified: bool
-    sedar_filing_available: bool
+
+    # Market-agnostic "did we get a real filing digest" signal (renamed from
+    # sedar_filing_available 2026-09-23 -- confirmed live via AAPL, a US
+    # ticker: this field is has_filing_digest under the hood for BOTH
+    # markets (research_sources.py's own build function sets it from that
+    # exact local var), but the old CA-specific name led
+    # pass1_stock_researcher.py to pass it unconditionally into the prompt's
+    # CANADIAN DATA rule, which hardcodes "Canadian filing depth limited..."
+    # regardless of which market actually triggered it. CanadianDataFlags
+    # has its own SEPARATE, genuinely-CA-only sedar_filing_available field
+    # (data/schemas/canadian_data_flags.py) -- that one is correctly scoped
+    # (CanadianDataFlags is None for US per DataBundle's own invariant) and
+    # is not this field; the two are related but distinct signals.
+    has_filing_digest: bool
 
     # Added 2026-08-07 (contract-vs-consumer audit): which of the
     # attempted data sources failed to resolve for this run (e.g.

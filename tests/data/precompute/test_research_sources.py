@@ -1054,7 +1054,7 @@ def _minimal_research_sources(news_items: list[NewsItem]) -> ResearchSourcesBund
         ),
         dual_class_flag=False,
         cik_verified=False,
-        sedar_filing_available=False,
+        has_filing_digest=False,
         missing_sources_list=[],
         latest_filing_age_days=None,
         latest_transcript_age_days=None,
@@ -1288,7 +1288,7 @@ async def test_build_research_sources_full_assembly(monkeypatch):
     assert bundle.peer_names == {"PEER_1": "Peer Company"}
     assert bundle.news_item_count == 1
     assert bundle.news_items[0].id == "N1"
-    assert bundle.sedar_filing_available is True
+    assert bundle.has_filing_digest is True
     assert bundle.cik_verified is True  # plain US, has_filing_digest=True
     assert bundle.dual_class_flag is False
     assert bundle.management_signals.insider_net_direction_90d == "buying"
@@ -1394,7 +1394,7 @@ async def test_build_research_sources_degrades_cleanly_with_nothing_available(mo
     assert bundle.filing_digests == []
     assert bundle.peer_blocks == []
     assert bundle.news_items == []
-    assert bundle.sedar_filing_available is False
+    assert bundle.has_filing_digest is False
     assert bundle.cik_verified is False
     assert set(bundle.missing_sources_list) == {"filing_digests", "peer_blocks", "news_items"}
     assert bundle.latest_filing_age_days is None
