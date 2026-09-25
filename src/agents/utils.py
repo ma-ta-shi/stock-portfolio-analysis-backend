@@ -117,6 +117,32 @@ CONFIDENCE_STATUS_LABELS = {
 }
 
 
+def render_data_coverage_line(field_presence: dict[str, bool], gap_sentences: dict[str, str]) -> str:
+    """Shared DATA COVERAGE line renderer (86bbummwp Tier 1a) for the four Pass 1
+    agents -- Fundamental, Technical, Sentiment, Macro Economist -- whose
+    `data_coverage_line` was previously hardcoded to the literal "standard." on
+    every single run, feeding each agent's own `analysis_confidence`
+    self-assessment a false statement about its own inputs. Stock Researcher's
+    own `_data_coverage_line()` (pass1_stock_researcher.py) is deliberately NOT
+    migrated here: its gap logic reads a `list[str]` (`missing_sources_list`), a
+    genuinely different input shape from this function's `dict[str, bool]`, not
+    just a naming difference.
+
+    Iterates `field_presence.items()`, not `gap_sentences.items()`: a key ABSENT
+    from `field_presence` (e.g. Macro Economist's `statcan` key, only ever
+    included for a Canadian stock) means "not applicable, don't mention it,"
+    while a key PRESENT but `False` means a real gap worth a sentence -- these
+    are semantically different, not two spellings of the same thing, and
+    getting this backwards would silently break every caller, not just Macro.
+    """
+    gaps = [
+        gap_sentences[field]
+        for field, present in field_presence.items()
+        if not present and field in gap_sentences
+    ]
+    return "standard." if not gaps else "; ".join(gaps) + "."
+
+
 def build_pass1_reliability_warnings(agent_confidence: dict[str, str]) -> str:
     """Format: RSRCH: high (OK) | FUND: medium (caution) | TECH: low (unreliable) | ...
     Returns empty string when all agents are 'high'.

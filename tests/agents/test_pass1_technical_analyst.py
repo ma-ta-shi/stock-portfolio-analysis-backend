@@ -3,7 +3,12 @@ equivalent -- see test_pass1_stock_researcher.py's docstring for why."""
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass1_technical_analyst import build_user_message
+from agents.pass1_technical_analyst import (
+    _data_coverage_line,
+    _data_warnings_line,
+    _validate_with_caveats,
+    build_user_message,
+)
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -156,3 +161,120 @@ def test_field_presence_support_resistance_false_when_pivots_unresolved():
     bundle = _bundle(support_resistance={})
     _, presence = build_user_message(bundle)
     assert presence["support_resistance"] is False
+
+
+# ---------- _data_coverage_line / _data_warnings_line (86bbummwp Tier 1a/1b) ----------
+
+
+def test_data_coverage_line_standard_with_full_field_presence():
+    _, presence = build_user_message(_bundle())
+    assert _data_coverage_line(presence) == "standard."
+
+
+def test_data_coverage_line_flags_multiple_real_gaps():
+    bundle = _bundle(
+        earnings_proximity={"next_earnings_date": None, "earnings_proximity_days": None},
+        support_resistance={},
+    )
+    _, presence = build_user_message(bundle)
+    line = _data_coverage_line(presence)
+    assert "no earnings calendar data available" in line
+    assert "no support/resistance levels could be resolved" in line
+    assert "weekly timeframe" not in line  # that one's still present in this fixture
+
+
+def test_data_warnings_line_empty_when_no_preflight_warnings():
+    assert _data_warnings_line([]) == ""
+
+
+def test_data_warnings_line_joins_real_anomalies():
+    warnings = ["zero-volume session on 2026-09-10", "unexplained 28% gap on 2026-09-15"]
+    assert _data_warnings_line(warnings) == (
+        "zero-volume session on 2026-09-10; unexplained 28% gap on 2026-09-15"
+    )
+
+
+# ---------- _validate_with_caveats (86bbummwp Tier 1c) ----------
+
+
+def _valid_technical_output(**overrides) -> dict:
+    base = {
+        "assessment_summary": "A solid technical setup with bullish momentum.",
+        "analysis_confidence": "high",
+        "caveats": ["Coverage limited to daily price action."],
+        "key_factors": [
+            {"factor": "Trend", "importance": "high", "sentiment": "positive", "evidence": "SMA stack bullish"},
+            {"factor": "Momentum", "importance": "medium", "sentiment": "positive", "evidence": "RSI 62"},
+        ],
+        "risks": [
+            {"risk": "Approaching resistance", "severity": "medium", "evidence": "ATR 3.0 to resistance"},
+        ],
+        "narrative": (
+            "SHOP.TO shows a clean bullish setup with price trading above all major moving "
+            "averages and a rising trend structure across both daily and weekly timeframes. "
+            "The RSI at 62 suggests room to run before overbought conditions are reached, while "
+            "the MACD line remains above its signal line following a recent bullish crossover, "
+            "confirming the underlying momentum picture. Support sits at 98.00 with four prior "
+            "touches, while resistance at 112.00 has been tested twice without a clean break to "
+            "the upside so far this quarter. Bollinger Band width suggests a normal volatility "
+            "regime rather than a compression squeeze setting up. Relative strength versus the "
+            "sector remains a modest positive tailwind for the name. Overall the weight of "
+            "evidence favors continuation of the current uptrend over the medium term horizon, "
+            "with resistance as the key level to watch for a potential stall in price action."
+        ),
+        "interpretive_fields": {
+            "primary_trend": "bullish",
+            "trend_strength": "moderate",
+            "momentum_zone": "neutral",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_with_caveats_passes_when_no_condition_and_schema_valid():
+    passed, errors = _validate_with_caveats(_valid_technical_output(), earnings_days=45, avg_dollar_vol=5_000_000)
+    assert passed, errors
+
+
+def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_caveats():
+    out = _valid_technical_output(interpretive_fields={"primary_trend": "ranging", "trend_strength": "moderate", "momentum_zone": "neutral"})
+    passed, errors = _validate_with_caveats(out, earnings_days=45, avg_dollar_vol=5_000_000)
+    assert not passed
+    assert any("primary_trend" in e for e in errors)
+
+
+def test_validate_with_caveats_flags_missing_earnings_caveat():
+    out = _valid_technical_output()  # no earnings mention
+    passed, errors = _validate_with_caveats(out, earnings_days=3, avg_dollar_vol=5_000_000)
+    assert not passed
+    assert any("earnings proximity caveat" in e for e in errors)
+
+
+def test_validate_with_caveats_flags_missing_thin_volume_caveat():
+    out = _valid_technical_output()  # no volume/liquidity mention
+    passed, errors = _validate_with_caveats(out, earnings_days=45, avg_dollar_vol=500_000)
+    assert not passed
+    assert any("thin volume" in e for e in errors)
+
+
+def test_validate_with_caveats_merges_errors_from_both_checks():
+    out = _valid_technical_output()
+    passed, errors = _validate_with_caveats(out, earnings_days=3, avg_dollar_vol=500_000)
+    assert not passed
+    assert any("earnings proximity caveat" in e for e in errors)
+    assert any("thin volume" in e for e in errors)
+
+
+def test_validate_with_caveats_earnings_none_skips_that_check():
+    """No earnings calendar data at all -- nothing to flag, not a crash."""
+    out = _valid_technical_output()
+    passed, errors = _validate_with_caveats(out, earnings_days=None, avg_dollar_vol=5_000_000)
+    assert passed, errors
+
+
+def test_validate_with_caveats_avg_dollar_vol_none_skips_that_check():
+    """No liquidity data at all -- nothing to flag, not a crash."""
+    out = _valid_technical_output()
+    passed, errors = _validate_with_caveats(out, earnings_days=45, avg_dollar_vol=None)
+    assert passed, errors

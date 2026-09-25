@@ -31,12 +31,54 @@ Field-by-field notes:
   wall of "N/A" lines for sectors with no real commodity linkage.
 - "BASE RELIABILITY SCORE" block: omitted, same D6-retirement reasoning as
   every other Pass 1 runner in this port.
+
+86bbummwp Tier 1a: `data_coverage_line` is now built from the same
+`field_presence` map `build_user_message()` already computes for
+`input_field_coverage`, via the shared `render_data_coverage_line()` helper --
+was hardcoded to "Data coverage: standard." on every run before this. The
+`statcan` key is only ever present in `field_presence` at all for a Canadian
+stock (see `build_user_message()`'s own docstring) -- the shared helper treats
+a missing key as "not applicable" and a present-but-`False` key as a real gap,
+so a US stock never gets a spurious StatCan mention.
+
+Found and fixed during this same round's own critical review, not caught by
+the first pass: `field_presence["commodities"]` is `False` unconditionally
+whenever `sector_commodity_relevant` is `False` (the schema's own validator
+enforces `sector_commodity_age_days=None` for a non-commodity sector -- see
+the field-by-field note above) -- that's the correct, intended `False` for
+`input_field_coverage`'s own purpose, but it made every non-commodity-sensitive
+stock (the large majority) get a false "no sector commodity data available"
+line, exactly the active-misinformation problem this ticket exists to remove.
+`_data_coverage_line()` now drops the `commodities` key entirely when the
+sector isn't commodity-relevant, the same "absent means not applicable"
+treatment already used for `statcan` -- confirmed live: AAPL/SHOP.TO/WELL.TO/
+RDDT/RY.TO (none commodity-sensitive) all reported this false gap before the
+fix, and reported "standard."/no commodities mention after it.
 """
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
+from agents.utils import render_data_coverage_line
 from agents.validators.pass1 import validate_macro_economist
 from data.schemas.data_bundle import DataBundle
 from data.schemas.macro_sources_bundle import MacroSourcesBundle
+
+_COVERAGE_GAP_SENTENCES = {
+    "rate": "no policy rate data available",
+    "yield_curve": "no bond yield data available",
+    "cpi": "no inflation data available",
+    "gdp": "no GDP data available",
+    "employment": "no employment data available",
+    "fx": "no FX data available",
+    "vix": "no volatility index data available",
+    "commodities": "no sector commodity data available",
+    "statcan": "no Statistics Canada demand indicator data available",
+}
+
+
+def _data_coverage_line(field_presence: dict[str, bool], sector_commodity_relevant: bool) -> str:
+    if not sector_commodity_relevant:
+        field_presence = {k: v for k, v in field_presence.items() if k != "commodities"}
+    return render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
 
 
 def _fmt(v, suffix: str = ""):
@@ -216,7 +258,9 @@ class MacroEconomistRunner(BaseRunner):
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "data_coverage_line": "Data coverage: standard.",
+                "data_coverage_line": _data_coverage_line(
+                    field_presence, bundle.macro_sources.sector_commodity_relevant
+                ),
                 "data_warnings": "",
                 "memory_brief": "",
                 "accuracy_brief": "",

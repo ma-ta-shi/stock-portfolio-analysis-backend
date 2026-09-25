@@ -42,17 +42,15 @@ NOT a clean port -- field-by-field notes, each verified against
   pass1_stock_researcher.py.
 - `missing_fields`/`currency_mismatch` (86bbwachy Phase 4): now persisted onto
   DataBundle (`data/schemas/data_bundle.py` + `data/pipeline.py`'s bundle
-  assembly) -- the module docstring note above about them being discarded is
-  now stale, kept only as history of why this was the one agent needing a
-  schema change for input_field_coverage. `_data_coverage_line()` itself is
-  UNCHANGED -- deliberately not wired to the new fields, per this ticket's own
-  scope split: that prompt line is D6's `data_coverage` concept, explicitly
-  deferred as its own unit; `missing_fields` here feeds only the new, separate
-  `input_field_coverage` signal build_user_message() returns.
+  assembly). `_data_coverage_line()` (86bbummwp Tier 1a) now reads a coarse
+  subset of the same `missing_fields`-derived presence map -- only
+  `peers_block`/`earnings_surprises`, not all 15 per-ratio keys, which stay
+  granular-only in `input_field_coverage` and would be too noisy for a single
+  prose line.
 """
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField
+from agents.utils import RenderedField, render_data_coverage_line
 from agents.validators.pass1 import validate_fundamental_analyst
 from data.schemas.data_bundle import DataBundle
 
@@ -89,11 +87,23 @@ def _fmt(v, suffix: str = "", pct: bool = False):
     return f"{v}{suffix}"
 
 
-def _data_coverage_line() -> str:
-    # D6's own data_coverage concept, deliberately deferred as a whole unit
-    # (86bbwachy Phase 4) -- stays the harness's literal default, not wired
-    # to the now-real missing_fields/currency_mismatch fields below.
-    return "standard."
+# Coarse-only subset of the full field_presence map for the DATA COVERAGE
+# line (86bbummwp Tier 1a) -- the other 15 per-ratio keys in
+# _missing_fields_presence() are real signal for input_field_coverage but
+# too granular for a single prose sentence. No pre-filtering needed here:
+# render_data_coverage_line() itself already ignores any field_presence key
+# not in gap_sentences (found during critical review -- an earlier version of
+# this function pre-filtered field_presence down to just these two keys
+# first, which was both redundant with that check and a latent KeyError risk
+# if either key were ever absent).
+_COVERAGE_GAP_SENTENCES = {
+    "peers_block": "no peer data available",
+    "earnings_surprises": "no earnings surprise history available",
+}
+
+
+def _data_coverage_line(field_presence: dict[str, bool]) -> str:
+    return render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
 
 
 def _missing_fields_presence(bundle: DataBundle) -> dict[str, bool]:
@@ -201,7 +211,7 @@ class FundamentalAnalystRunner(BaseRunner):
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "data_coverage_line": _data_coverage_line(),
+                "data_coverage_line": _data_coverage_line(field_presence),
                 "data_warnings": "",
                 "memory_brief": "",
                 "sector_specific_valuation_instruction": "",

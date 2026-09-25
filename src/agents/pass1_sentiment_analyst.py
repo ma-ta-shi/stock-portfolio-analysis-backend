@@ -47,16 +47,56 @@ NOT a clean port -- field-by-field notes, verified against
   signal.
 - "BASE RELIABILITY SCORE"/reliability cap=70 (harness fixture text): omitted,
   same D6-retirement reasoning as every other Pass 1 runner in this port.
+
+86bbummwp Tier 1a: `data_coverage_line` is now built from the same
+`field_presence` map `build_user_message()` already computes for
+`input_field_coverage`, via the shared `render_data_coverage_line()` helper --
+was hardcoded to "Data coverage: standard." on every run before this.
+`peer_sentiment` is always `False` (a permanent, currently-hardcoded gap, see
+`build_user_message()`'s own docstring) and is deliberately still included as
+a real, always-mentioned gap sentence, not excluded as a "known" absence.
+
+86bbummwp 1d: the retry loop's validator now also enforces the mandatory
+Canadian sentiment-inference caveat the user message already tells the model
+about via `{canadian_sentiment_inferred}` (rule 7) -- previously requested in
+the prompt but never mechanically checked, and previously unwired anywhere
+with a phrase ("Finnhub") that didn't match any real prompt at all.
 """
 from datetime import UTC, datetime, timedelta
+from functools import partial
 
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField
-from agents.validators.pass1 import validate_sentiment_analyst
+from agents.utils import RenderedField, render_data_coverage_line
+from agents.validators.pass1 import validate_canadian_caveat, validate_sentiment_analyst
 from data.schemas.data_bundle import DataBundle
 
 _INSIDER_WINDOW_DAYS = 90
+
+
+def _validate_with_caveats(output: dict, canadian_sentiment_inferred: bool) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp 1d) -- merges the base schema check
+    with the mandatory Canadian sentiment-inference caveat, the same
+    closure-composition pattern as pass1_technical_analyst.py's own
+    `_validate_with_caveats`. The real prompt already tells the model this
+    caveat is mandatory when the flag is true (rule 7) -- this only makes an
+    already-visible instruction mechanically enforced, not a new one."""
+    passed, errors = validate_sentiment_analyst(output)
+    ca_passed, ca_errors = validate_canadian_caveat(output, canadian_sentiment_inferred)
+    return passed and ca_passed, errors + ca_errors
+
+
+_COVERAGE_GAP_SENTENCES = {
+    "news_block": "no news articles available",
+    "analyst_activity": "no analyst upgrade/downgrade data available",
+    "analyst_consensus": "no analyst consensus data available",
+    "short_interest": "no short interest data available",
+    "peer_sentiment": "peer sentiment comparison is not yet available",
+}
+
+
+def _data_coverage_line(field_presence: dict[str, bool]) -> str:
+    return render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
 
 
 def _fmt(v):
@@ -194,7 +234,7 @@ class SentimentAnalystRunner(BaseRunner):
                 "canonical_ticker": bundle.stock.ticker,
                 "company_name": bundle.company_info.get("name"),
                 "sector": bundle.company_info.get("sector"),
-                "data_coverage_line": "Data coverage: standard.",
+                "data_coverage_line": _data_coverage_line(field_presence),
                 "data_warnings": "",
                 "memory_brief": "",
                 "accuracy_brief": "",
@@ -207,7 +247,10 @@ class SentimentAnalystRunner(BaseRunner):
         return await self.call_with_validation(
             system_prompt,
             user_msg,
-            validate_sentiment_analyst,
+            partial(
+                _validate_with_caveats,
+                canadian_sentiment_inferred=bundle.canadian_data_flags is not None,
+            ),
             max_tokens=3500,
             temperature=0.3,
         )

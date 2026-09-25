@@ -12,6 +12,7 @@ from agents.validators.pass1 import (
     validate_earnings_proximity_caveat,
     validate_thin_volume_caveat,
     validate_canadian_caveat,
+    validate_filing_depth_caveat,
 )
 
 
@@ -279,6 +280,40 @@ class TestStockResearcher:
         passed, errors = validate_stock_researcher(out)
         assert passed, errors
 
+    def test_filing_depth_caveat_required_when_digest_absent(self):
+        out = _stock_researcher_output()
+        out["caveats"] = ["Some other caveat."]
+        passed, errors = validate_filing_depth_caveat(out, has_filing_digest=False)
+        assert not passed
+        assert any("Filing depth limited" in e for e in errors)
+
+    def test_filing_depth_caveat_passes_with_real_current_phrase(self):
+        out = _stock_researcher_output()
+        out["caveats"] = [
+            "Filing depth limited: no regulatory filing text was available for this company; "
+            "analysis relies on the company profile, public news and peer comparison."
+        ]
+        passed, errors = validate_filing_depth_caveat(out, has_filing_digest=False)
+        assert passed, errors
+
+    def test_filing_depth_caveat_not_checked_when_digest_present(self):
+        out = _stock_researcher_output()
+        out["caveats"] = ["Some other caveat."]
+        passed, errors = validate_filing_depth_caveat(out, has_filing_digest=True)
+        assert passed, errors
+
+    def test_filing_depth_caveat_is_market_agnostic_not_gated_on_canadian_flag(self):
+        """This is RSRCH's real requirement -- has_filing_digest can be False
+        for a US stock too (86bbummwp 1d finding: the old sedar_filing_available
+        name was Canada-specific, has_filing_digest deliberately is not)."""
+        out = _stock_researcher_output()
+        out["caveats"] = [
+            "Filing depth limited: no regulatory filing text was available for this company; "
+            "analysis relies on the company profile, public news and peer comparison."
+        ]
+        passed, errors = validate_filing_depth_caveat(out, has_filing_digest=False)
+        assert passed, errors  # no Canadian-ness involved anywhere in this check
+
 
 # ─── Fundamental Analyst Tests ────────────────────────────────────────────────
 
@@ -428,13 +463,29 @@ class TestSentimentAnalyst:
         passed, errors = validate_sentiment_analyst(out)
         assert not passed
 
-    def test_canadian_caveat_required(self):
+    def test_canadian_caveat_required_when_inferred(self):
         out = _sentiment_analyst_output()
-        out["caveats"] = ["Some other caveat."]  # missing Finnhub caveat
-        out["reliability_score"] = 65
-        passed, errors = validate_canadian_caveat(out, "SENT")
+        out["caveats"] = ["Some other caveat."]  # missing the real required phrase
+        passed, errors = validate_canadian_caveat(out, canadian_sentiment_inferred=True)
         assert not passed
-        assert any("Finnhub" in e for e in errors)
+        assert any("scored from headlines only" in e for e in errors)
+
+    def test_canadian_caveat_passes_with_real_current_phrase(self):
+        out = _sentiment_analyst_output()
+        out["caveats"] = [
+            "Article sentiment is scored by a local LLM on both markets, not supplied by a "
+            "data provider, and is not validated against a ground-truth dataset. Canadian "
+            "articles are scored from headlines only — the Canadian news feed returns no "
+            "article body."
+        ]
+        passed, errors = validate_canadian_caveat(out, canadian_sentiment_inferred=True)
+        assert passed, errors
+
+    def test_canadian_caveat_not_checked_when_not_inferred(self):
+        out = _sentiment_analyst_output()
+        out["caveats"] = ["Some other caveat."]
+        passed, errors = validate_canadian_caveat(out, canadian_sentiment_inferred=False)
+        assert passed, errors
 
 
 # ─── Macro Economist Tests ────────────────────────────────────────────────────
