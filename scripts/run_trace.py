@@ -31,14 +31,22 @@ from uuid import UUID
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from api.database import AsyncSessionLocal  # noqa: E402
-from api.tables.agent_outputs import AgentOutput  # noqa: E402, F401 -- mapper reachability
+# Mapper-reachability imports (AgentOutput/Prediction/PredictionCheckpoint) --
+# the exact, verified relationship() graph reachable from AnalysisRun/
+# RunQualitySummary, not the full 9-table set main.py/alembic/conftest.py
+# import: AnalysisRun -> AgentOutput/Recommendation/RunQualitySummary/Stock,
+# Recommendation -> Prediction, Prediction -> PredictionCheckpoint. Confirmed
+# by grepping every relationship() in that whole chain -- ShadowPrediction is
+# never referenced by any of them (AnalysisRun has no relationship to it),
+# so it isn't needed here despite appearing in every other file's own
+# reachability block.
+from api.tables.agent_outputs import AgentOutput  # noqa: E402, F401
 from api.tables.analysis_runs import AnalysisRun  # noqa: E402
 from api.tables.llm_calls import LLMCall  # noqa: E402
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: E402, F401
 from api.tables.predictions import Prediction  # noqa: E402, F401
 from api.tables.recommendations import Recommendation  # noqa: E402, F401
 from api.tables.run_quality_summary import RunQualitySummary  # noqa: E402
-from api.tables.shadow_predictions import ShadowPrediction  # noqa: E402, F401
 from api.tables.stock import Stock  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 

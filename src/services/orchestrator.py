@@ -99,6 +99,27 @@ _RETURN_TIER_TO_RECOMMENDATION_VOCAB = {
     "strong_underperform": "minimal",
 }
 
+# 86bbwachy Phase 5 -- which of the 12 real agent_names are structurally
+# excluded from _write_run_quality_summary's degenerate-output detection.
+# Confirmed live (real MSFT run, 2026-09-24), not assumed: without these
+# exclusions, every one of the excluded agent_names showed up in the
+# corresponding list on EVERY real run regardless of actual quality,
+# drowning the real signal in structural noise. Verified directly against
+# each agent's own validator source, not guessed:
+# - key_factors: never referenced anywhere in validators/cio.py or
+#   validators/shadow_cio.py -- only the synthesis-pass agents lack it.
+# - risks: never referenced anywhere outside validators/pass1.py -- the
+#   four Pass 2 advocates and all three synthesis-pass agents structurally
+#   never produce it, confirmed by direct grep.
+# - narrative: cio_stage_a's own validator (validate_cio_stage_a) never
+#   checks synthesis_narrative (only Stage B's does), and shadow_cio's
+#   validator never checks narrative/synthesis_narrative at all -- both
+#   structural, unlike bull/bear/tax/risk_stage_a and cio_stage_b, which
+#   all have real, validated narrative fields.
+_NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio"}
+_NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b", "shadow_cio"}
+_NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
+
 
 def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     """Per-agent orchestrator-owned field slices for agents/pass2_view.py's
@@ -451,6 +472,13 @@ class AnalysisOrchestrator:
         SECONDARY write must never mask or replace whatever _run_pipeline
         itself raised or returned.
         """
+        # Initialized HERE, not inside _run_pipeline -- this method is the
+        # one that guarantees _write_run_quality_summary runs, so it must
+        # also guarantee these exist regardless of how early _run_pipeline
+        # itself fails (even before its own first line, in principle).
+        # _write_run_quality_summary reads these unconditionally.
+        self._gate1_passed = self._gate1_reason = None
+        self._gate2_passed = self._gate2_reason = None
         try:
             await self._run_pipeline(run, db)
         finally:
@@ -494,15 +522,9 @@ class AnalysisOrchestrator:
         # its own precompute LLM calls happen.
         self._run_id = run_id
         self._seq_counter = itertools.count()
-        # 86bbwachy Phase 5 -- initialized here, before DataPipeline.prepare()
-        # is even attempted, not at the gate1_check()/gate2_check() call
-        # sites below. _write_run_quality_summary() (called from run()'s own
-        # finally, after this method returns or raises) reads these
-        # unconditionally; without this early init, a run that fails inside
-        # prepare() -- before either gate check ever runs -- would
-        # AttributeError instead of just leaving them None.
-        self._gate1_passed = self._gate1_reason = None
-        self._gate2_passed = self._gate2_reason = None
+        # self._gate1_passed/_gate1_reason/_gate2_passed/_gate2_reason
+        # (86bbwachy Phase 5) are initialized in run(), not here -- see that
+        # method's own comment on why it owns this instead of _run_pipeline.
 
         try:
             bundle = await DataPipeline().prepare(
@@ -768,24 +790,8 @@ class AnalysisOrchestrator:
         agent_outputs = (
             await db.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))
         ).scalars().all()
-        # Confirmed live (real MSFT run, 2026-09-24), not assumed: without
-        # these exclusions, every one of the excluded agent_names showed up
-        # in the corresponding list on EVERY real run regardless of actual
-        # quality, drowning the real signal in structural noise. Verified
-        # directly against each agent's own validator source, not guessed:
-        # - key_factors: never referenced anywhere in validators/cio.py or
-        #   validators/shadow_cio.py -- only the synthesis-pass agents lack it.
-        # - risks: never referenced anywhere outside validators/pass1.py --
-        #   the four Pass 2 advocates and all three synthesis-pass agents
-        #   structurally never produce it, confirmed by direct grep.
-        # - narrative: cio_stage_a's own validator (validate_cio_stage_a)
-        #   never checks synthesis_narrative (only Stage B's does), and
-        #   shadow_cio's validator never checks narrative/synthesis_narrative
-        #   at all -- both structural, unlike bull/bear/tax/risk_stage_a and
-        #   cio_stage_b, which all have real, validated narrative fields.
-        _NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio"}
-        _NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b", "shadow_cio"}
-        _NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
+        # See the module-level _NO_*_EXPECTED sets' own comment for why
+        # these exclusions exist and how each was confirmed.
         agents_with_empty_key_factors = [
             a.agent_name for a in agent_outputs
             if a.agent_name not in _NO_KEY_FACTORS_EXPECTED and not a.key_factors

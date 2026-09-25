@@ -7,9 +7,10 @@ from typing import Optional
 
 class RunQualitySummary(Base):
     """1:1 with `analysis_runs` (86bbwachy Phase 5) -- one row per orchestrator run() invocation,
-    written by AnalysisOrchestrator._write_run_quality_summary() in a try/finally wrapper around
-    the pipeline's own run() body, so it fires on every one of that method's exit paths (success
-    or any of its several failure returns/raises), not just the happy path.
+    written by AnalysisOrchestrator._write_run_quality_summary(), called from run()'s own
+    try/finally wrapper around the real pipeline body (_run_pipeline()), so it fires on every one
+    of that body's several exit paths (success or any of its failure returns/raises), not just the
+    happy path.
 
     Deliberately does NOT duplicate exchange/currency/instrument_type/market_cap_bucket/
     disagreement_score/disagreement_class -- all already live directly on `analysis_runs`, which
