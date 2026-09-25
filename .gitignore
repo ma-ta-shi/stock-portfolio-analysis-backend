@@ -8,8 +8,24 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+
+# Real user/analysis data lives in the local app.db and, from 86bbwachy
+# onward, in per-run artifact files (raw prompts/responses/context) under
+# runs_dir (default var/runs/, see docs/technical/run-instrumentation.md
+# §5.2). *.db/*.sqlite catches the former; var/ catches the latter, added
+# proactively here BEFORE that directory exists, not after something first
+# lands in it. Neither is a secret in the API-key sense, but both are this
+# project's own real data and stay local-only, same posture as _audit/ below.
+# `.gitignore` only stops NEW files from being tracked -- confirmed live
+# 2026-09-24 that this doesn't retroactively apply to something already
+# committed: src/app.db (a stale, harmless FastAPI-tutorial-scaffold test DB
+# from project init, checked directly -- no real data) had been tracked since
+# 2026-04-06 despite *.db being long in place. Untracked and deleted; if a
+# new .db/var/ path ever needs tracking for a legitimate reason, that's a
+# deliberate `git add -f`, not an accident.
 *.db
 *.sqlite
+var/
 
 # 2026-09 prompt audit rigs, caches and logs. Reference material, never shipped.
 # See _audit/README.md. Kept out of git deliberately: throwaway measurement

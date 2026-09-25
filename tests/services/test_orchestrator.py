@@ -25,7 +25,7 @@ from api.tables.recommendations import Recommendation
 from api.tables.shadow_predictions import ShadowPrediction
 from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile  # noqa: F401 -- AnalysisRun.user_id FK needs this reachable
-from services.orchestrator import AnalysisOrchestrator
+from services.orchestrator import AnalysisOrchestrator, _market_cap_bucket
 from sqlalchemy import select
 
 
@@ -63,7 +63,8 @@ async def _make_run(session, **overrides) -> AnalysisRun:
 def _fake_bundle(**overrides) -> SimpleNamespace:
     defaults = dict(
         stock=SimpleNamespace(ticker="AAPL", currency="USD", exchange="NASDAQ", stock_id=uuid4()),
-        company_info={"name": "Apple Inc.", "sector": "Technology", "country": "US"},
+        company_info={"name": "Apple Inc.", "sector": "Technology", "country": "US",
+                      "asset_type": "equity", "market_cap": 3_000_000_000_000},
         context=SimpleNamespace(account_type="trading", timeline="medium_term"),
         data_vintage=datetime(2026, 9, 23, tzinfo=UTC),
         benchmark_ticker="^GSPC",
@@ -141,6 +142,26 @@ class _StubRunner:
         return self._stage_b_result, self._stage_b_errors
 
 
+@pytest.mark.parametrize(
+    "market_cap, expected",
+    [
+        (None, None),
+        (3_000_000_000_000, "large"),
+        (10_000_000_000, "large"),  # exact boundary -- large is inclusive
+        (9_999_999_999, "mid"),
+        (2_000_000_000, "mid"),  # exact boundary -- mid is inclusive
+        (1_999_999_999, "small"),
+        (300_000_000, "small"),  # exact boundary -- small is inclusive
+        (299_999_999, "micro"),
+        (1, "micro"),
+        (0, None),  # non-positive is bad data, not a real "micro" classification
+        (-100, None),
+    ],
+)
+def test_market_cap_bucket(market_cap, expected):
+    assert _market_cap_bucket(market_cap) == expected
+
+
 @pytest.mark.asyncio
 async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
     session = await _make_session()
@@ -188,6 +209,14 @@ async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
     assert run.status == RunStatus.COMPLETED
     assert run.completed_at is not None
     assert run.disagreement_score is not None
+
+    # Context tags (86bbwachy Phase 1) -- populated from the bundle, not left
+    # null on a real, otherwise-successful run.
+    assert run.exchange == "NASDAQ"
+    assert run.currency == "USD"
+    assert run.instrument_type == "equity"
+    assert run.market_cap_bucket == "large"  # $3T AAPL fixture
+    assert run.market_regime is None  # nothing computes this yet -- see analysis_runs.py
 
     rec = (await session.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))).scalar_one()
     assert rec.stock_outlook_direction == "somewhat_bullish"

@@ -281,6 +281,38 @@ async def _run_contained(
         return agent_id, None, [str(exc)], exc
 
 
+def _market_cap_bucket(market_cap: float | None) -> str | None:
+    """large/mid/small/micro from a raw market cap number (86bbwachy Phase
+    1) -- new logic this ticket owns, not a read of an existing field.
+    company_info["market_cap"] exists as a raw number (data_bundle.py's own
+    docstring) but nothing else in this codebase buckets it.
+
+    Deliberately NOT currency-normalized: market_cap is in the stock's own
+    listing currency (CAD for a TSX name, USD for NASDAQ/NYSE), and a real
+    fix would mean converting through bundle.macro_sources' own FX rate.
+    Not done here -- this is a rough context tag for later analysis
+    grouping, not a precise metric anything else depends on, and the
+    ~30% CAD/USD swing rarely crosses one of these wide bucket boundaries.
+    Thresholds are the commonly-used US convention (large >= $10B, mid
+    $2B-$10B, small $300M-$2B, micro < $300M); revisit if CA-specific
+    buckets ever turn out to matter more than this.
+    """
+    # Found on review: a non-positive market cap (bad data, never a real
+    # value) used to fall through every >= check and land on "micro" --
+    # silently mislabeling corrupt data as a real, small classification
+    # instead of surfacing it as missing. "Missing over wrong" applies here
+    # the same as everywhere else in this codebase.
+    if market_cap is None or market_cap <= 0:
+        return None
+    if market_cap >= 10_000_000_000:
+        return "large"
+    if market_cap >= 2_000_000_000:
+        return "mid"
+    if market_cap >= 300_000_000:
+        return "small"
+    return "micro"
+
+
 def _divergence_magnitude(distance: int) -> str:
     """none|minor|moderate|major from compute_outlook_distance()'s 0-4
     integer distance -- matches its own >2 high_divergence threshold: 3-4
@@ -326,6 +358,17 @@ class AnalysisOrchestrator:
             run.error_log = [{"stage": "data_pipeline", "error": str(exc)}]
             await db.commit()
             raise
+
+        # Run context tags (86bbwachy Phase 1) -- set here, once, right after
+        # a real bundle exists, not at AnalysisRun creation time (see
+        # analysis_runs.py's own column comments for why instrument_type/
+        # market_cap_bucket have no reliable source that early).
+        # market_regime is deliberately left unset -- nothing computes it yet.
+        run.exchange = bundle.stock.exchange
+        run.currency = bundle.stock.currency
+        run.instrument_type = bundle.company_info.get("asset_type")
+        run.market_cap_bucket = _market_cap_bucket(bundle.company_info.get("market_cap"))
+        await db.commit()
 
         try:
             pass1_outputs = await self._run_pass1(run, bundle, db)
