@@ -1,3 +1,4 @@
+import itertools
 from datetime import datetime
 from types import SimpleNamespace
 from uuid import uuid4
@@ -6,7 +7,12 @@ import pandas as pd
 import pytest
 
 import data.pipeline as pipeline_module
-from data.pipeline import DataPipeline, StockNotFoundError, resolve_sector_etf
+from agents.capture import CaptureContext
+# Mapper-reachability for constructing a real LLMCall() (this file's own
+# Phase 3 tests) is handled once, globally, by tests/conftest.py -- see
+# its own comment for why.
+from api.tables.llm_calls import LLMCall
+from data.pipeline import DataPipeline, StockNotFoundError, _precompute_llm_call_rows, resolve_sector_etf
 from data.schemas.canadian_data_flags import CanadianDataFlags
 from data.schemas.context import AnalysisContext
 from data.schemas.macro_sources_bundle import MacroSourcesBundle
@@ -171,6 +177,8 @@ def _fake_fundamentals_compute_all(**kwargs):
         "balance_sheet_metrics": {"health_rating": "healthy"},
         "dividend_info": {"dividend_yield": None},
         "peer_metrics": {},
+        "missing_fields": [],
+        "currency_mismatch": None,
     }
 
 
@@ -195,11 +203,11 @@ def _fake_risk_metrics_compute_all(**kwargs):
     return {"beta": 1.1, "sharpe_ratio": 0.8}
 
 
-async def _fake_summarize_news(articles):
+async def _fake_summarize_news(articles, **kwargs):
     return {"articles": [], "sentiment_source": None}
 
 
-async def _fake_build_research_sources(ticker, id_assigned_articles, stock=None):
+async def _fake_build_research_sources(ticker, id_assigned_articles, stock=None, **kwargs):
     return ResearchSourcesBundle(
         filing_digests=[],
         transcript_excerpts=[],
@@ -383,9 +391,13 @@ class _FakeResult:
 class _FakeDB:
     def __init__(self, stock):
         self._stock = stock
+        self.added: list = []  # 86bbwachy Phase 3 -- prepare()'s own db.add() calls land here
 
     async def execute(self, query):
         return _FakeResult(self._stock)
+
+    def add(self, obj) -> None:
+        self.added.append(obj)
 
 
 async def test_prepare_us_stock_populates_every_field(patched_precompute):
@@ -524,3 +536,158 @@ async def test_prepare_propagates_a_real_preflight_warning(patched_precompute, m
     bundle = await DataPipeline().prepare(stock.stock_id, context, db)
 
     assert any("zero-volume" in w for w in bundle.preflight_warnings)
+
+
+# ---------- capture / llm_calls (86bbwachy Phase 3) ----------
+
+
+def test_precompute_llm_call_rows_maps_capture_entries_to_llm_call_rows():
+    """Direct unit test of the field mapping, independent of prepare()'s
+    own wiring -- mirrors services/orchestrator.py's own _llm_call_rows,
+    not shared with it (see this function's own docstring for why), so it
+    gets its own equivalent coverage here."""
+    capture = CaptureContext(
+        run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", ticker="AAPL", seq_counter=itertools.count()
+    )
+    capture.call_log = [
+        {
+            "call_site": "precompute:sentiment",
+            "seq": 0,
+            "context_tag": "analysis",
+            "model": "gpt-oss:20b",
+            "options_json": {"num_ctx": 8192},
+            "attempt": 1,
+            "total_duration_s": 5.0,
+            "prompt_eval_count": 40,
+            "eval_count": 8,
+            "thinking_chars": 0,
+            "finish_reason": "stop",
+            "parsed_ok": True,
+            "parse_error": None,
+            "prompt_path": "2026-09-24/AAPL_aaaaaaaa/0_precompute-sentiment.1.prompt.txt",
+            "context_path": None,
+            "response_path": "2026-09-24/AAPL_aaaaaaaa/0_precompute-sentiment.1.response.json",
+        }
+    ]
+
+    rows = _precompute_llm_call_rows(capture)
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert isinstance(row, LLMCall)
+    assert row.run_id == capture.run_id
+    assert row.call_site == "precompute:sentiment"
+    assert row.agent_pass == "precompute"
+    assert row.seq == 0
+    assert row.model == "gpt-oss:20b"
+    assert row.latency_ms == 5000
+    assert row.prompt_tokens == 40
+    assert row.completion_tokens == 8
+    assert row.parsed_ok is True
+    assert row.agent_output_id is None  # non-agent call -- no AgentOutput row to link to
+    assert row.auto_trimmed is False
+
+
+async def test_prepare_without_run_id_adds_no_llm_call_rows(patched_precompute):
+    """Default behavior, no run_id/seq_counter passed -- matches every
+    other test in this file exactly, confirming the new Phase 3 wiring
+    doesn't change prepare()'s pre-existing default posture."""
+    stock = _make_stock(is_ca=False)
+    _FakeRouter.is_ca = False
+    _FakeRouter.fin = SimpleNamespace(currency="USD", quarters=[])
+    _FakeRouter.quote = {
+        "current_price": 150.0, "market_cap": 1e12, "currency": "USD",
+        "high_52w": 160.0, "low_52w": 100.0,
+    }
+    _FakeRouter.dividend_history = []
+    _FakeRouter.peers = []
+    _FakeRouter.price_history = _price_df()
+
+    db = _FakeDB(stock)
+    context = AnalysisContext(account_type="trading", timeline="medium_term")
+    await DataPipeline().prepare(stock.stock_id, context, db)
+
+    assert db.added == []
+
+
+async def test_prepare_with_run_id_adds_llm_call_rows_from_both_precompute_sources(
+    patched_precompute, monkeypatch
+):
+    """Real end-to-end wiring check: fakes that actually populate
+    capture.call_log (unlike patched_precompute's own default fakes, which
+    accept and ignore capture) stand in for sentiment.summarize_news and
+    build_research_sources, confirming prepare() reads capture.call_log
+    back and db.add()s a real LLMCall row per entry from BOTH sources --
+    not just one, and not silently dropped."""
+
+    async def _fake_summarize_news_with_capture(articles, *, capture=None):
+        if capture is not None:
+            capture.call_log.append(
+                {"call_site": "precompute:sentiment", "seq": next(capture.seq_counter), "model": "gpt-oss:20b"}
+            )
+        # sentiment_source must be None when news_with_sentiment is empty
+        # (DataBundle's own cross-field validator) -- matches the
+        # already-established _fake_summarize_news's own return shape.
+        return {"articles": [], "sentiment_source": None}
+
+    async def _fake_build_research_sources_with_capture(
+        ticker, id_assigned_articles, stock=None, *, capture=None
+    ):
+        if capture is not None:
+            capture.call_log.append(
+                {"call_site": "precompute:filing_mda", "seq": next(capture.seq_counter), "model": "gpt-oss:20b"}
+            )
+        return ResearchSourcesBundle(
+            filing_digests=[],
+            transcript_excerpts=[],
+            news_items=[],
+            peer_blocks=[],
+            management_signals=ManagementSignals(
+                c_suite_changes_12mo=None,
+                changes_detail="",
+                insider_net_direction_90d=None,
+                buyback_activity="",
+                dividend_activity="",
+            ),
+            peer_names={},
+            dual_class_flag=False,
+            cik_verified=False,
+            has_filing_digest=False,
+            missing_sources_list=[],
+            latest_filing_age_days=None,
+            latest_transcript_age_days=None,
+            latest_news_age_days=None,
+            transcript_count=0,
+            news_item_count=0,
+        )
+
+    monkeypatch.setattr(pipeline_module.sentiment, "summarize_news", _fake_summarize_news_with_capture)
+    monkeypatch.setattr(pipeline_module, "build_research_sources", _fake_build_research_sources_with_capture)
+
+    stock = _make_stock(is_ca=False)
+    _FakeRouter.is_ca = False
+    _FakeRouter.fin = SimpleNamespace(currency="USD", quarters=[])
+    _FakeRouter.quote = {
+        "current_price": 150.0, "market_cap": 1e12, "currency": "USD",
+        "high_52w": 160.0, "low_52w": 100.0,
+    }
+    _FakeRouter.dividend_history = []
+    _FakeRouter.peers = []
+    _FakeRouter.price_history = _price_df()
+
+    db = _FakeDB(stock)
+    context = AnalysisContext(account_type="trading", timeline="medium_term")
+    run_id = uuid4()
+    await DataPipeline().prepare(
+        stock.stock_id, context, db, run_id=run_id, seq_counter=itertools.count()
+    )
+
+    assert len(db.added) == 2
+    assert all(isinstance(row, LLMCall) for row in db.added)
+    assert {row.call_site for row in db.added} == {"precompute:sentiment", "precompute:filing_mda"}
+    assert all(row.run_id == run_id for row in db.added)
+    assert all(row.agent_pass == "precompute" for row in db.added)
+    # Both sources shared the SAME seq counter, not two independently
+    # 0-based ones -- confirms the run-wide sequencing this ticket's own
+    # design requires (see AnalysisOrchestrator.run()'s own comment on why).
+    assert {row.seq for row in db.added} == {0, 1}

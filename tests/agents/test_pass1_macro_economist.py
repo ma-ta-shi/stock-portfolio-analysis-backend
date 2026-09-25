@@ -9,24 +9,26 @@ from agents.pass1_macro_economist import build_user_message
 def _macro(**overrides) -> SimpleNamespace:
     defaults = dict(
         fed_funds_rate=5.25, rate_trend="pausing", policy_rate_90d_delta_bp=0.0,
+        policy_rate_age_days=1,  # 86bbwachy Phase 4 -- real fetch age, drives field_presence["rate"]
         boc_rate=5.0, boc_rate_trend="pausing", boc_rate_90d_delta_bp=0.0,
         cb_stance_note=None,
         treasury_2y=4.8, treasury_5y=4.5, treasury_10y=4.3, us_curve_shape="inverted",
         canada_bond_2y=4.1, canada_bond_5y=3.9, canada_bond_10y=3.7, ca_curve_shape="inverted",
         bond_yields_available=True,
         us_cpi_yoy=3.1, us_core_cpi_yoy=2.9, cpi_trend="falling", cpi_3m_delta_pp=-0.2,
+        cpi_age_days=5,
         ca_cpi_yoy=2.8, ca_cpi_trend="stable", ca_cpi_3m_delta=0.0,
-        us_gdp_qoq=2.1, us_gdp_4q_trend="rising",
+        us_gdp_qoq=2.1, us_gdp_4q_trend="rising", gdp_age_days=30,
         ca_gdp_qoq=1.4, ca_gdp_4q_trend="stable",
-        unemployment=4.1, unemployment_6m_delta=0.2,
+        unemployment=4.1, unemployment_6m_delta=0.2, unemployment_age_days=7,
         statcan_unemployment_ca=6.5, ca_unemployment_6m_delta=0.1,
-        cad_usd=0.73, cad_trend="stable", cad_usd_90d_change_pct=1.2,
-        vix=15.2, vix_regime="low", vix_30d_avg=16.0,
+        cad_usd=0.73, cad_trend="stable", cad_usd_90d_change_pct=1.2, cad_usd_age_days=0,
+        vix=15.2, vix_regime="low", vix_30d_avg=16.0, vix_age_days=0,
         sector_commodity_relevant=False, sector_commodity_name=None,
         sector_commodity_level=None, sector_commodity_direction=None,
         sector_commodity_age_days=None, commodity_90d_change_pct=None,
         wti_crude=78.5,
-        statcan_housing_starts=245000.0, statcan_retail_sales_yoy=2.1,
+        statcan_housing_starts=245000.0, statcan_retail_sales_yoy=2.1, statcan_age_days=15,
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -46,7 +48,7 @@ def _bundle(is_ca=True, **macro_overrides) -> SimpleNamespace:
 
 
 def test_renders_real_header_fields():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "RY.TO (Royal Bank of Canada) | Financials | TSX | CAD" in msg
 
 
@@ -54,13 +56,13 @@ def test_renders_pre_computed_trend_fields_not_raw_only():
     """The real prompt's own text says trends arrive pre-computed ('Direction
     is already computed (cite RATE)') -- must render the real trend
     classification, not just raw numbers."""
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "Trend: pausing" in msg
     assert "Trend: falling" in msg  # cpi_trend
 
 
 def test_ca_specific_fields_render_for_ca_stock():
-    msg = build_user_message(_bundle(is_ca=True))
+    msg, _ = build_user_message(_bundle(is_ca=True))
     assert "BoC Rate: 5.0%" in msg
     assert "Canada Bond 2y/5y/10y" in msg
     assert "Canada CPI YoY: 2.8%" in msg
@@ -71,7 +73,7 @@ def test_ca_specific_fields_render_for_ca_stock():
 
 
 def test_ca_specific_fields_absent_for_us_stock():
-    msg = build_user_message(_bundle(is_ca=False))
+    msg, _ = build_user_message(_bundle(is_ca=False))
     assert "BoC Rate" not in msg
     assert "Canada Bond" not in msg
     assert "Canada CPI" not in msg
@@ -79,14 +81,14 @@ def test_ca_specific_fields_absent_for_us_stock():
 
 
 def test_us_fields_always_render():
-    msg = build_user_message(_bundle(is_ca=False))
+    msg, _ = build_user_message(_bundle(is_ca=False))
     assert "AAPL (Apple Inc.) | Technology | NASDAQ | USD" in msg
     assert "US CPI YoY: 3.1%" in msg
     assert "US GDP QoQ" in msg
 
 
 def test_commodity_block_gated_on_sector_commodity_relevant():
-    msg = build_user_message(_bundle(sector_commodity_relevant=False))
+    msg, _ = build_user_message(_bundle(sector_commodity_relevant=False))
     assert "Not commodity-sensitive for this sector." in msg
     assert "WTI Crude" not in msg  # only rendered inside the relevant branch
 
@@ -97,19 +99,19 @@ def test_commodity_block_renders_when_relevant():
         sector_commodity_level=78.5, sector_commodity_direction="rising",
         sector_commodity_age_days=1, commodity_90d_change_pct=5.2,
     )
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "WTI Crude: 78.5" in msg
     assert "rising" in msg
 
 
 def test_cb_stance_note_renders_when_present():
     bundle = _bundle(cb_stance_note="Fed signaled a pause through year-end.")
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "Central bank stance: Fed signaled a pause through year-end." in msg
 
 
 def test_cb_stance_note_absent_when_none():
-    msg = build_user_message(_bundle())  # default None
+    msg, _ = build_user_message(_bundle())  # default None
     assert "Central bank stance:" not in msg
 
 
@@ -117,12 +119,59 @@ def test_no_sector_tailwinds_headwinds_fabricated_as_input():
     """sector_tailwinds/sector_headwinds are Macro's own OUTPUT fields, not
     input data -- confirmed via agents/pass2_view.py's MACRO branch, which
     reads them from structured_data, not bundle input."""
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "sector_tailwinds" not in msg
     assert "sector_headwinds" not in msg
 
 
 def test_missing_bond_yields_flagged():
     bundle = _bundle(bond_yields_available=False)
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "(bond yield data unavailable this run)" in msg
+
+
+# ---------- field_presence (86bbwachy Phase 4) ----------
+
+
+def test_field_presence_all_true_when_default_bundle_is_fully_populated_ca():
+    _, presence = build_user_message(_bundle(is_ca=True))
+    assert presence == {
+        "rate": True, "yield_curve": True, "cpi": True, "gdp": True,
+        "employment": True, "fx": True, "vix": True, "commodities": False,
+        "statcan": True,
+    }
+
+
+def test_field_presence_no_statcan_key_for_us_stock():
+    """statcan simply isn't in the map for a US stock -- that block never
+    renders at all, so "attempted and absent" would misrepresent it."""
+    _, presence = build_user_message(_bundle(is_ca=False))
+    assert "statcan" not in presence
+
+
+def test_field_presence_rate_false_on_fetch_failure():
+    bundle = _bundle(policy_rate_age_days=None)
+    _, presence = build_user_message(bundle)
+    assert presence["rate"] is False
+
+
+def test_field_presence_yield_curve_tracks_bond_yields_available():
+    bundle = _bundle(bond_yields_available=False)
+    _, presence = build_user_message(bundle)
+    assert presence["yield_curve"] is False
+
+
+def test_field_presence_commodities_true_when_sector_relevant_and_resolved():
+    bundle = _bundle(
+        sector_commodity_relevant=True, sector_commodity_name="WTI Crude",
+        sector_commodity_level=78.5, sector_commodity_direction="rising",
+        sector_commodity_age_days=2, commodity_90d_change_pct=3.1,
+    )
+    _, presence = build_user_message(bundle)
+    assert presence["commodities"] is True
+
+
+def test_field_presence_statcan_false_on_fetch_failure():
+    bundle = _bundle(is_ca=True, statcan_age_days=None)
+    _, presence = build_user_message(bundle)
+    assert presence["statcan"] is False

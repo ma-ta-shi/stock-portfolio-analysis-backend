@@ -55,6 +55,8 @@ from api.tables.predictions import Prediction  # noqa: E402, F401
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: E402, F401
 from api.tables.shadow_predictions import ShadowPrediction  # noqa: E402, F401
 from api.tables.user_profile import UserProfile  # noqa: E402, F401
+from api.tables.llm_calls import LLMCall  # noqa: E402, F401
+from api.tables.run_quality_summary import RunQualitySummary  # noqa: E402, F401
 
 target_metadata = Base.metadata
 

@@ -128,7 +128,19 @@ def _statcan_block(m: MacroSourcesBundle) -> str:
     )
 
 
-def build_user_message(bundle: DataBundle) -> str:
+def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
+    """Returns (rendered user message, field presence map) -- the second
+    element is 86bbwachy Phase 4's own new addition. Computed directly from
+    MacroSourcesBundle's own per-series `*_age_days`/`bond_yields_available`
+    fields (confirmed real, already-exposed signals -- compute_macro_sources()
+    sets a series' own age field to None on a fetch failure, e.g.
+    _fetch_statcan_fields()'s own try/except), not by wrapping each block
+    helper in a RenderedField: these functions build a MULTI-LINE block from
+    several related series at once (US + CA figures together), and every
+    series within one block fails together (one API call, one age field) --
+    tracking at the block level is both accurate and matches the prompt's
+    own section headers (RATE/YIELD/CPI/...).
+    """
     ctx = bundle.context
     company_info = bundle.company_info
     m = bundle.macro_sources
@@ -136,7 +148,7 @@ def build_user_message(bundle: DataBundle) -> str:
 
     statcan_section = f"\n\nSTATISTICS CANADA (CA demand indicators):\n{_statcan_block(m)}" if is_ca else ""
 
-    return f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
+    text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}
 
 INTEREST RATES (RATE):
@@ -168,12 +180,34 @@ SECTOR CONTEXT:
 
 REMINDER: Your narrative must be 80-120 words (480-720 chars). This is strictly enforced."""
 
+    field_presence = {
+        "rate": m.policy_rate_age_days is not None,
+        "yield_curve": m.bond_yields_available,
+        "cpi": m.cpi_age_days is not None,
+        "gdp": m.gdp_age_days is not None,
+        "employment": m.unemployment_age_days is not None,
+        "fx": m.cad_usd_age_days is not None,
+        "vix": m.vix_age_days is not None,
+        "commodities": m.sector_commodity_age_days is not None,
+    }
+    # Only present in the map at all for a CA stock -- the whole block
+    # itself only renders then (statcan_section, above); a US stock never
+    # had this data attempted, not "attempted and absent."
+    if is_ca:
+        field_presence["statcan"] = m.statcan_age_days is not None
+
+    return text, field_presence
+
 
 class MacroEconomistRunner(BaseRunner):
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "MACRO"
         ctx = bundle.context
-        user_msg = build_user_message(bundle)
+        user_msg, field_presence = build_user_message(bundle)
+        # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
+        # failed call still records whether its own input was already
+        # incomplete.
+        self.last_field_coverage = field_presence
         system_prompt = fill(
             load_template("macro_economist"),
             {

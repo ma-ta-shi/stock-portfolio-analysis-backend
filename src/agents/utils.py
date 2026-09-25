@@ -18,8 +18,31 @@ fixed in both places in the same pass so this doesn't resurface a second time.
 """
 import json
 import re
+from dataclasses import dataclass
 
 import numpy as np
+
+
+@dataclass
+class RenderedField:
+    """One agent payload field's rendered text plus its own presence flag,
+    computed together in the same helper call (86bbwachy Phase 4) -- not two
+    separately-maintained functions (one building the string, one re-deriving
+    "is this N/A" a second time) that could silently drift apart. Used by
+    each in-scope agent's own field-rendering helpers (e.g.
+    pass1_stock_researcher.py's `_dividend_context`/`_business_description`);
+    `build_user_message()` collects the `.present` flags into the
+    `{field_name: bool}` map persisted as `agent_outputs.input_field_coverage`.
+
+    `text` is what actually goes into the prompt (including the "N/A ..."
+    wording when absent) -- `present` is the machine-readable fact a human
+    would otherwise have to re-derive by grepping the rendered prompt for the
+    word "N/A", which isn't reliable (see run-instrumentation planning: this
+    is the whole reason a separate signal is worth building).
+    """
+    text: str
+    present: bool
+
 
 DIRECTION_MAP = {
     "bullish": 2,

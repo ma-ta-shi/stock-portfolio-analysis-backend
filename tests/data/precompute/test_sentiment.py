@@ -1,10 +1,13 @@
 import asyncio
 import importlib
+import itertools
 import json
 
 import pytest
 
+import agents.capture as capture_module
 import data.precompute.sentiment as sentiment_module
+from agents.capture import CaptureContext
 from data.precompute.sentiment import _score_article, summarize_news
 
 
@@ -175,6 +178,156 @@ async def test_score_article_none_on_missing_message_shape():
     assert result is None
 
 
+@pytest.mark.asyncio
+async def test_score_article_none_on_top_level_json_null_body():
+    """Regression: a 200 status whose body is the bare JSON value `null`
+    (not `{}`) is still valid JSON -- response.json() succeeds and returns
+    Python None. A rewrite done for capture's sake (86bbwachy Phase 3)
+    moved message/content extraction outside the try/except that used to
+    catch the TypeError None["message"] raises, which would have let this
+    crash the whole summarize_news() batch instead of degrading to a
+    single None score. Caught on review, not by this test failing first --
+    written after the fix to lock in the real failure mode found."""
+    session = FakeSession(FakeResponse(200, None))
+    result = await _score_article(session, "headline", "text")
+    assert result is None
+
+
+# ---------- capture (86bbwachy Phase 3) ----------
+
+
+def _capture(**overrides) -> CaptureContext:
+    defaults = dict(
+        run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", ticker="AAPL", seq_counter=itertools.count()
+    )
+    return CaptureContext(**{**defaults, **overrides})
+
+
+@pytest.mark.asyncio
+async def test_score_article_capture_none_by_default_writes_nothing(tmp_path, monkeypatch):
+    """No capture kwarg at all -- every existing caller/test above this
+    point in the file keeps working exactly as before, no new files."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, _ollama_response("positive")))
+    result = await _score_article(session, "headline", "text")
+    assert result == "positive"
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_score_article_captures_a_real_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, _ollama_response("positive")))
+    capture = _capture()
+
+    result = await _score_article(session, "headline", "text", capture=capture)
+
+    assert result == "positive"
+    assert len(capture.call_log) == 1
+    entry = capture.call_log[0]
+    assert entry["call_site"] == "precompute:sentiment"
+    assert entry["parsed_ok"] is True
+    assert entry["parse_error"] is None
+    assert ":" not in entry["prompt_path"]
+    assert (tmp_path / entry["prompt_path"]).exists()
+    assert (tmp_path / entry["response_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_score_article_captures_a_malformed_response_as_parsed_ok_false(tmp_path, monkeypatch):
+    """A capture row still gets written for a failure that got past the
+    HTTP layer -- the same "one row per round trip, success or failure"
+    contract agents/base.py's own capture already follows."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, {"message": {"content": "not valid json"}}))
+    capture = _capture()
+
+    result = await _score_article(session, "headline", "text", capture=capture)
+
+    assert result is None
+    assert len(capture.call_log) == 1
+    entry = capture.call_log[0]
+    assert entry["parsed_ok"] is False
+    assert entry["parse_error"] is not None
+
+
+@pytest.mark.asyncio
+async def test_score_article_captures_no_http_response_at_all(tmp_path, monkeypatch):
+    """A pure connection-level failure (timeout, no response body ever
+    received) must NOT produce a capture row -- there is nothing real to
+    write as a response artifact, same boundary agents/base.py's own
+    call_model draws (it never reaches its own capture point either when
+    raise_for_status() raises before a body exists)."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, None, raise_timeout=True))
+    capture = _capture()
+
+    result = await _score_article(session, "headline", "text", capture=capture)
+
+    assert result is None
+    assert capture.call_log == []
+
+
+@pytest.mark.asyncio
+async def test_score_article_captures_a_top_level_json_null_body_without_raising(tmp_path, monkeypatch):
+    """Same real regression as test_score_article_none_on_top_level_json_null_body
+    above, but through the capture path specifically -- record_call's own
+    response_body.get(...) calls needed the identical isinstance guard,
+    one layer deeper (agents/capture.py's own fix)."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, None))
+    capture = _capture()
+
+    result = await _score_article(session, "headline", "text", capture=capture)
+
+    assert result is None
+    assert len(capture.call_log) == 1
+    entry = capture.call_log[0]
+    assert entry["parsed_ok"] is False
+    assert entry["total_duration_s"] is None
+    assert entry["prompt_eval_count"] is None
+
+
+class _FakeClientSessionCM:
+    """summarize_news's own `async with aiohttp.ClientSession() as session:`
+    needs something that supports the async-context-manager protocol --
+    FakeSession itself deliberately doesn't (every other test in this file
+    swaps out _score_article entirely, so the real aiohttp.ClientSession()
+    is constructed for real and never actually used). This wraps a
+    FakeSession so this one integration test can fake the whole chain."""
+
+    def __init__(self, session: "FakeSession") -> None:
+        self._session = session
+
+    async def __aenter__(self) -> "FakeSession":
+        return self._session
+
+    async def __aexit__(self, *exc) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_summarize_news_threads_capture_through_to_every_article(tmp_path, monkeypatch):
+    """Integration-ish: exercises the real _score_article (not a
+    monkeypatched fake, unlike this file's other summarize_news tests) so
+    the actual threading from summarize_news -> _score_bounded ->
+    _score_article is what's under test, not just each layer in
+    isolation."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    fake_session = FakeSession(FakeResponse(200, _ollama_response("neutral")))
+    monkeypatch.setattr(
+        sentiment_module.aiohttp, "ClientSession", lambda: _FakeClientSessionCM(fake_session)
+    )
+    capture = _capture()
+    articles = [_article(id_="N1"), _article(id_="N2")]
+
+    result = await summarize_news(articles, capture=capture)
+
+    assert [a["sentiment"] for a in result["articles"]] == ["neutral", "neutral"]
+    assert len(capture.call_log) == 2
+    assert {entry["seq"] for entry in capture.call_log} == {0, 1}
+
+
 # ---------- summarize_news ----------
 
 
@@ -188,7 +341,7 @@ async def test_summarize_news_empty_input_returns_none_source():
 async def test_summarize_news_scores_each_article(monkeypatch):
     responses = iter(["positive", "negative"])
 
-    async def fake_score(session, headline, text):
+    async def fake_score(session, headline, text, **kwargs):
         return next(responses)
 
     monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
@@ -202,7 +355,7 @@ async def test_summarize_news_scores_each_article(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summarize_news_preserves_order(monkeypatch):
-    async def fake_score(session, headline, text):
+    async def fake_score(session, headline, text, **kwargs):
         return "neutral"
 
     monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
@@ -215,7 +368,7 @@ async def test_summarize_news_preserves_order(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summarize_news_final_shape_drops_text_and_url(monkeypatch):
-    async def fake_score(session, headline, text):
+    async def fake_score(session, headline, text, **kwargs):
         return "positive"
 
     monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
@@ -231,7 +384,7 @@ async def test_summarize_news_source_is_local_llm_even_if_every_score_fails(monk
     success rate - it's set whenever there were articles to score, even
     if every individual call failed."""
 
-    async def fake_score(session, headline, text):
+    async def fake_score(session, headline, text, **kwargs):
         return None
 
     monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
@@ -253,7 +406,7 @@ async def test_summarize_news_does_not_call_assign_news_ids(monkeypatch):
         lambda articles: called.append(articles) or articles,
     )
 
-    async def fake_score(session, headline, text):
+    async def fake_score(session, headline, text, **kwargs):
         return "neutral"
 
     monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)

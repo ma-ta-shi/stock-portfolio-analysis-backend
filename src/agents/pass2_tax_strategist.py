@@ -57,6 +57,37 @@ def _tax_metrics_block(bundle: DataBundle, account_type: str) -> str:
     return build_tax_metrics_field(bundle.stock.ticker, account_type, bundle)
 
 
+def _tax_metrics_field_presence(tax_metrics_text: str) -> dict[str, bool]:
+    """Reads presence directly off the already-rendered tax_metrics block
+    (see build_precomputed_tax_metrics in data/precompute/tax_metrics.py)
+    -- unlike every other in-scope agent, there is no structured/dict form
+    of this data available at the agent layer, only the text
+    DataPipeline.prepare() hands it, so presence is read off known marker
+    substrings rather than raw field values (86bbwachy Phase 4's own plan
+    documents this as this agent's distinct shape, not an oversight).
+
+    WHT: collapses "not modelled for this classification/account" (a
+    WHT_GRID miss) and "no data" into one False -- input_field_coverage
+    only needs "was this call's WHT line a real, usable rate," not why it
+    wasn't.
+
+    DIVID: documented limitation, not fixed here -- compute_trailing_dividend()
+    returns (None, 0) for BOTH "genuinely no dividend history" and "history
+    exists but nothing fell in the trailing 365-day window" (e.g. a stock
+    that suspended its dividend last year) -- both render as the same
+    "DIVID: no dividend history" line and both read False here, the same
+    conflation this plan's own table documents, not new.
+
+    The ETF early-return path (build_precomputed_tax_metrics's own
+    structure=="etf" branch) renders neither a DIVID nor a WHT line at all
+    -- both correctly read False there too."""
+    return {
+        "divid": "DIVID:" in tax_metrics_text and "DIVID: no dividend history" not in tax_metrics_text,
+        "wht": "WHT (this account," in tax_metrics_text
+        and "NOT MODELLED per REF withholding grid" not in tax_metrics_text,
+    }
+
+
 def get_system_prompt(bundle: DataBundle, compressed_pass1: dict, account_type: str) -> str:
     # fill(), not .format() -- the real prompt's Output Schema block embeds
     # literal JSON, which .format() reads as placeholders and raises KeyError.
@@ -91,21 +122,22 @@ def build_user_message(
     bundle: DataBundle,
     compressed_pass1: dict,
     account_type: str,
-) -> str:
+) -> tuple[str, dict[str, bool]]:
     base = build_pass2_user_message(bundle, compressed_pass1, account_type)
     confidence_levels = extract_confidence_levels(compressed_pass1)
     warnings = build_pass1_reliability_warnings(confidence_levels)
     if warnings:
         base += f"\n\nRELIABILITY WARNINGS: {warnings}"
 
+    tax_metrics_text = _tax_metrics_block(bundle, account_type)
     base += f"""
 
 TAX-RELEVANT DATA (PRE-COMPUTED BY ORCHESTRATOR):
-{_tax_metrics_block(bundle, account_type)}
+{tax_metrics_text}
 
 ANALYSIS TARGET ACCOUNT: {account_type.upper()}"""
 
-    return base
+    return base, _tax_metrics_field_presence(tax_metrics_text)
 
 
 class TaxStrategistRunner(BaseRunner):
@@ -118,7 +150,11 @@ class TaxStrategistRunner(BaseRunner):
         self.current_agent = "tax"
         acct = account_type or bundle.context.account_type
         system_prompt = get_system_prompt(bundle, compressed_pass1, acct)
-        user_msg = build_user_message(bundle, compressed_pass1, acct)
+        user_msg, field_presence = build_user_message(bundle, compressed_pass1, acct)
+        # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
+        # failed call still records whether its own input was already
+        # incomplete.
+        self.last_field_coverage = field_presence
         result, errors = await self.call_with_validation(
             system_prompt,
             user_msg,

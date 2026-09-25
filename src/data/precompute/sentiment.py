@@ -37,6 +37,15 @@ import os
 import aiohttp
 import structlog
 
+# agents/capture.py, not agents/base.py -- the OLLAMA_HOST/_MODEL constants
+# just below are still deliberately duplicated rather than imported (see
+# their own comment). capture.py is different: 86bbwachy's own plan always
+# scoped it as the one shared, DB-agnostic primitive both agents/base.py's
+# retry-wrapped calls AND precompute's one-shot calls (this module,
+# filing_summarizer.py) route through -- a real, intended dependency, not
+# an accidental crossing of the boundary the comment below is about.
+from agents.capture import CaptureContext, record_call
+
 logger = structlog.get_logger(__name__)
 
 # Real bug, confirmed live 2026-09-23 (found while live-testing the
@@ -50,7 +59,7 @@ logger = structlog.get_logger(__name__)
 # for agents/base.py's own callers left this module still hitting the
 # real, working Ollama instance underneath it, undetected. Same env var
 # name/default as agents/base.py's own OLLAMA_HOST, duplicated rather than
-# imported -- data/precompute/ has no existing dependency on agents/
+# imported -- data/precompute/ has no existing dependency on agents/base.py
 # anywhere in this codebase, and importing across that boundary just for
 # one constant would invert it for no real benefit.
 _OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
@@ -94,13 +103,26 @@ def _prompt(headline: str, text: str) -> str:
     )
 
 
-async def _score_article(session: aiohttp.ClientSession, headline: str, text: str) -> str | None:
+async def _score_article(
+    session: aiohttp.ClientSession,
+    headline: str,
+    text: str,
+    *,
+    capture: CaptureContext | None = None,
+) -> str | None:
     """Returns "positive"|"negative"|"neutral", or None on any failure - no
     fallback (2026-08-07 no-fallback-chains decision): a genuine scoring
-    failure surfaces as missing data, not a silent retry on another model."""
+    failure surfaces as missing data, not a silent retry on another model.
+
+    `capture` (86bbwachy Phase 3) is None by default -- every existing
+    caller/test keeps writing zero artifact files, same as
+    agents/base.py's own "gated on ticker being set" precedent. Only
+    summarize_news's own real caller (DataPipeline.prepare(), when it has
+    a real run_id from the orchestrator) passes one."""
+    prompt_text = _prompt(headline, text)
     payload = {
         "model": _MODEL,
-        "messages": [{"role": "user", "content": _prompt(headline, text)}],
+        "messages": [{"role": "user", "content": prompt_text}],
         "stream": False,
         "think": _THINK,
         "format": _FORMAT_SCHEMA,
@@ -117,32 +139,83 @@ async def _score_article(session: aiohttp.ClientSession, headline: str, text: st
         # status with a genuinely truncated/malformed body (partial write, mid-response
         # crash) makes response.json() raise json.JSONDecodeError directly - it's a
         # plain ValueError subclass, not wrapped in aiohttp.ClientError, so it doesn't
-        # get caught without being listed explicitly.
+        # get caught without being listed explicitly. No capture on this path -- there
+        # is no response body at all to write as an artifact (matches agents/base.py's
+        # own call_model, which never reaches its capture point on this class of
+        # failure either).
         logger.warning("sentiment_score_request_failed", error=str(exc))
         return None
 
+    # message/content pulled out here, before the parse try/except, so both
+    # the capture call below and the parse logic can use them regardless of
+    # which one fails -- restructured from the original flat try/except
+    # (which extracted `content` inside the try) for that reason, not a
+    # behavior change: a missing "message"/"content" key still ends up as
+    # the same sentiment_score_malformed_response warning via json.loads("")
+    # raising JSONDecodeError (a ValueError subclass), still caught below.
+    #
+    # isinstance guards, not bare .get() -- real regression caught on
+    # review: response.json() succeeding only means `data` is valid JSON,
+    # not that it's a dict (a top-level JSON null/string/list/number is
+    # just as valid). The ORIGINAL code's data["message"]["content"] was
+    # inside a try/except that already caught the TypeError a None/non-dict
+    # `data` raises; moving this out for capture's sake would have lost
+    # that protection and let one weird Ollama response crash the entire
+    # summarize_news() batch instead of degrading to a single None score.
+    safe_data = data if isinstance(data, dict) else {}
+    message = safe_data.get("message")
+    message = message if isinstance(message, dict) else {}
+    content = message.get("content", "")
+    content = content if isinstance(content, str) else ""
+    thinking = message.get("thinking")
+    thinking = thinking if isinstance(thinking, str) else ""
+
+    sentiment: str | None = None
+    parse_error: str | None = None
     try:
-        content = data["message"]["content"]
         parsed = json.loads(content)
         sentiment = parsed["sentiment"]
     except (KeyError, TypeError, ValueError):
         logger.warning("sentiment_score_malformed_response")
-        return None
+        parse_error = "malformed response"
+    else:
+        # Belt-and-suspenders: Ollama's `format` param is genuinely schema-constrained
+        # (verified live), not just a prompt hint - but still validate rather than
+        # trust it blindly, matching the "missing over wrong" posture used throughout.
+        if sentiment not in _VALID_LABELS:
+            logger.warning("sentiment_score_unexpected_label", label=sentiment)
+            parse_error = f"unexpected label: {sentiment}"
+            sentiment = None
 
-    # Belt-and-suspenders: Ollama's `format` param is genuinely schema-constrained
-    # (verified live), not just a prompt hint - but still validate rather than
-    # trust it blindly, matching the "missing over wrong" posture used throughout.
-    if sentiment not in _VALID_LABELS:
-        logger.warning("sentiment_score_unexpected_label", label=sentiment)
-        return None
+    if capture is not None:
+        record_call(
+            capture,
+            call_site="precompute:sentiment",
+            model=_MODEL,
+            options=payload["options"],
+            prompt_text=prompt_text,
+            response_body=data,
+            thinking_chars=len(thinking),
+            empty_content=not content.strip(),
+            parsed_ok=sentiment is not None,
+            parse_error=parse_error,
+        )
+
     return sentiment
 
 
-async def summarize_news(id_assigned_articles: list[dict]) -> dict:
+async def summarize_news(
+    id_assigned_articles: list[dict], *, capture: CaptureContext | None = None
+) -> dict:
     """Scores each already-ID-assigned article's sentiment via a local LLM
     call. Returns {"articles": [...], "sentiment_source": ...} - the
     caller distributes these two keys across DataBundle.news_with_sentiment
-    and DataBundle.sentiment_source respectively."""
+    and DataBundle.sentiment_source respectively.
+
+    `capture`, when given, is threaded straight through to every
+    _score_article call unchanged (86bbwachy Phase 3) -- one shared
+    CaptureContext, not a new one per article, since seq/call_log need to
+    be shared across every article this run scores."""
     if not id_assigned_articles:
         return {"articles": [], "sentiment_source": None}
 
@@ -150,7 +223,9 @@ async def summarize_news(id_assigned_articles: list[dict]) -> dict:
 
     async def _score_bounded(session: aiohttp.ClientSession, article: dict) -> str | None:
         async with semaphore:
-            return await _score_article(session, article["headline"], article["text"])
+            return await _score_article(
+                session, article["headline"], article["text"], capture=capture
+            )
 
     async with aiohttp.ClientSession() as session:
         sentiments = await asyncio.gather(

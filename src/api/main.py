@@ -54,13 +54,14 @@ from api.routes import analysis, user_profile  # noqa: E402
 # tables. Importing all 7 together is what makes both create_all() AND
 # real ORM use succeed, not just the DDL step.
 #
-# The real live count is 8, not 7 -- found live while generating the
+# The real live count is 9, not 7 -- found live while generating the
 # Alembic baseline migration (86bbwachy prerequisite): AnalysisRun.user_id
 # has a real FK to user_profiles, which this file already makes live too,
 # just via the `user_profile` route import on the line above rather than
-# through this explicit table-import block. alembic/env.py's own model
-# imports mirror this file's true effective set (8 tables), not just this
-# block's own 7 -- keep both lists in sync when either changes.
+# through this explicit table-import block (8 tables). LLMCall (86bbwachy
+# Phase 2) is the 9th, added below. alembic/env.py's own model imports
+# mirror this file's true effective set -- keep both lists in sync when
+# either changes.
 from api.tables.stock import Stock  # noqa: E402, F401
 from api.tables.analysis_runs import AnalysisRun  # noqa: E402, F401
 from api.tables.agent_outputs import AgentOutput  # noqa: E402, F401
@@ -68,6 +69,8 @@ from api.tables.recommendations import Recommendation  # noqa: E402, F401
 from api.tables.predictions import Prediction  # noqa: E402, F401
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: E402, F401
 from api.tables.shadow_predictions import ShadowPrediction  # noqa: E402, F401
+from api.tables.llm_calls import LLMCall  # noqa: E402, F401
+from api.tables.run_quality_summary import RunQualitySummary  # noqa: E402, F401
 
 Base.metadata.create_all(bind=engine)
 

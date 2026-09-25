@@ -14,6 +14,7 @@ import pytest
 from agents.utils import (
     CONFIDENCE_STATUS_LABELS,
     PASS1_AGENT_IDS,
+    RenderedField,
     agent_completed,
     build_pass1_reliability_warnings,
     char_count,
@@ -27,6 +28,24 @@ from agents.utils import (
     truncate_to_tokens,
     word_count,
 )
+
+
+class TestRenderedField:
+    """86bbwachy Phase 4 -- the shared text+presence bundle every in-scope
+    agent's own field-rendering helpers return."""
+
+    def test_bundles_text_and_present_together(self):
+        field = RenderedField(text="Yield: 5.23%", present=True)
+        assert field.text == "Yield: 5.23%"
+        assert field.present is True
+
+    def test_absent_field_still_carries_its_rendered_na_text(self):
+        """present=False doesn't mean text is empty -- the "N/A ..." wording
+        still needs to reach the prompt; present is the separate,
+        machine-readable fact alongside it."""
+        field = RenderedField(text="N/A", present=False)
+        assert field.text == "N/A"
+        assert field.present is False
 
 
 def _completed():

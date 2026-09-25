@@ -1,10 +1,13 @@
 import asyncio
 import importlib
+import itertools
 import json
 
 import pytest
 
+import agents.capture as capture_module
 import data.precompute.filing_summarizer as filing_summarizer_module
+from agents.capture import CaptureContext
 from data.precompute.filing_summarizer import (
     _MAX_INPUT_CHARS,
     _TOKEN_BUDGET,
@@ -200,6 +203,22 @@ async def test_malformed_outer_body_returns_none():
 
 
 @pytest.mark.asyncio
+async def test_none_on_top_level_json_null_body():
+    """Regression: a 200 status whose body is the bare JSON value `null`
+    (not `{}`) is still valid JSON -- response.json() succeeds and returns
+    Python None, distinct from test_malformed_outer_body_returns_none's
+    genuine decode failure above. Caught on review of a rewrite done for
+    capture's sake (86bbwachy Phase 3): the malformed-response try/except
+    already tolerated this (None["response"] raises TypeError, already
+    caught), but the capture block built alongside it called data.get(...)
+    directly with no such guard -- would have crashed the whole
+    build_filing_digests() call on this input instead of degrading to a
+    missing digest."""
+    session = FakeSession(FakeResponse(200, None))
+    assert await summarize_filing_section(session, "text", "MDA") is None
+
+
+@pytest.mark.asyncio
 async def test_missing_response_key_returns_none():
     session = FakeSession(FakeResponse(200, {"eval_count": 40, "done_reason": "stop"}))
     assert await summarize_filing_section(session, "text", "MDA") is None
@@ -266,3 +285,127 @@ async def test_grounded_digest_with_real_figures_is_kept():
     result = await summarize_filing_section(session, "some filing text", "MDA")
     assert result is not None
     assert result.content == good
+
+
+# ---------- capture (86bbwachy Phase 3) ----------
+
+
+def _capture(**overrides) -> CaptureContext:
+    defaults = dict(
+        run_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", ticker="RY.TO", seq_counter=itertools.count()
+    )
+    return CaptureContext(**{**defaults, **overrides})
+
+
+@pytest.mark.asyncio
+async def test_capture_none_by_default_writes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, _generate_response("A digest.", 40)))
+    result = await summarize_filing_section(session, "some filing text", "MDA")
+    assert result is not None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_captures_a_real_success_with_section_specific_call_site(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, _generate_response("A digest.", 40)))
+    capture = _capture()
+
+    result = await summarize_filing_section(session, "some filing text", "MDA", capture=capture)
+
+    assert result is not None
+    assert len(capture.call_log) == 1
+    entry = capture.call_log[0]
+    assert entry["call_site"] == "precompute:filing_mda"
+    assert entry["parsed_ok"] is True
+    assert (tmp_path / entry["prompt_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_business_section_gets_its_own_call_site(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, _generate_response("A digest.", 40)))
+    capture = _capture()
+
+    await summarize_filing_section(session, "some filing text", "Business", capture=capture)
+
+    assert capture.call_log[0]["call_site"] == "precompute:filing_business"
+
+
+@pytest.mark.asyncio
+async def test_captures_malformed_response_as_parsed_ok_false(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, {"eval_count": 40, "done_reason": "stop"}))
+    capture = _capture()
+
+    result = await summarize_filing_section(session, "text", "MDA", capture=capture)
+
+    assert result is None
+    assert len(capture.call_log) == 1
+    assert capture.call_log[0]["parsed_ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_captures_a_refusal_as_parsed_ok_true(tmp_path, monkeypatch):
+    """A refusal/non-answer digest still parses fine as JSON structure --
+    it's a CONTENT-quality rejection (this module's own _NON_ANSWER_RE),
+    not a parse failure. parsed_ok tracks "did we get usable response
+    structure back", the same thing agents/base.py's own parsed_ok tracks
+    -- not "did a validator accept the content" (precompute has no
+    validator concept at all; that's what validator_passed staying null
+    for every precompute row already says)."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    refusal = "I'm sorry, but the excerpt you provided doesn't contain the substantive sections."
+    session = FakeSession(FakeResponse(200, _generate_response(refusal, 60)))
+    capture = _capture()
+
+    result = await summarize_filing_section(session, "some filing text", "Business", capture=capture)
+
+    assert result is None
+    assert capture.call_log[0]["parsed_ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_captures_no_http_response_at_all(tmp_path, monkeypatch):
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, None, raise_timeout=True))
+    capture = _capture()
+
+    result = await summarize_filing_section(session, "text", "MDA", capture=capture)
+
+    assert result is None
+    assert capture.call_log == []
+
+
+@pytest.mark.asyncio
+async def test_captures_a_top_level_json_null_body_without_raising(tmp_path, monkeypatch):
+    """Same real regression as test_none_on_top_level_json_null_body above,
+    but through the capture path specifically -- record_call's own
+    response_body.get(...) calls needed the identical isinstance guard,
+    one layer deeper (agents/capture.py's own fix)."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, None))
+    capture = _capture()
+
+    result = await summarize_filing_section(session, "text", "MDA", capture=capture)
+
+    assert result is None
+    assert len(capture.call_log) == 1
+    entry = capture.call_log[0]
+    assert entry["parsed_ok"] is False
+    assert entry["total_duration_s"] is None
+
+
+@pytest.mark.asyncio
+async def test_empty_section_text_never_reaches_capture(tmp_path, monkeypatch):
+    """The empty-input early return happens before any HTTP call, let
+    alone a response to capture."""
+    monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
+    session = FakeSession(FakeResponse(200, _generate_response("A digest.", 40)))
+    capture = _capture()
+
+    result = await summarize_filing_section(session, "   ", "MDA", capture=capture)
+
+    assert result is None
+    assert capture.call_log == []

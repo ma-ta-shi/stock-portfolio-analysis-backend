@@ -26,12 +26,13 @@ def _bundle(**overrides) -> SimpleNamespace:
         analyst_consensus={"consensus_rating": "buy", "num_analysts": 32, "target_mean": 118.5,
                             "buy_count": 22, "hold_count": 8, "sell_count": 2},
         peer_metrics={"sector_medians": {"sector_median_pe": 20.1}, "peer_records": []},
+        missing_fields=[],
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
 
 def test_renders_real_header_fields():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "SHOP.TO (Shopify Inc) | Technology | TSX | CAD" in msg
     assert "Timeline: medium_term | Account: tfsa" in msg
 
@@ -39,24 +40,24 @@ def test_renders_real_header_fields():
 def test_renders_percentage_fields_as_percent_not_raw_fraction():
     """DataBundle fields are raw fractions (0.142), not the harness's
     already-scaled _pct values (14.2) -- must be *100'd on render."""
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "14.20%" in msg  # revenue_growth_yoy
     assert "0.142" not in msg
 
 
 def test_renders_sector_median_from_peer_metrics_not_a_stale_key_name():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "vs Sector median: 20.1" in msg
 
 
 def test_missing_sector_median_renders_honestly():
     bundle = _bundle(peer_metrics={"sector_medians": {}, "peer_records": []})
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "vs Sector median: N/A" in msg
 
 
 def test_renders_analyst_consensus_from_real_field_names():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "Coverage: 32 analysts" in msg
     assert "Buy: 22" in msg
     assert "Hold: 8" in msg
@@ -76,25 +77,25 @@ def test_earnings_surprises_rendered_as_raw_data_not_a_verdict():
              "eps_surprise_pct": 9.09, "revenue_actual": None, "revenue_estimated": None},
         ],
     })
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "2026-06-30: EPS actual 1.2 vs estimate 1.1 (9.09% surprise)" in msg
     assert "guidance_vs_consensus" not in msg
 
 
 def test_no_earnings_surprises_renders_honestly():
-    msg = build_user_message(_bundle())  # defaults: empty list
+    msg, _ = build_user_message(_bundle())  # defaults: empty list
     assert "N/A — no earnings surprise history available." in msg
 
 
 def test_no_dividend_data_renders_honestly():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "Yield: N/A | Payout: N/A" in msg
 
 
 def test_dividend_data_renders_as_percentage():
     bundle = _bundle(dividend_info={"dividend_yield": 0.032, "payout_ratio": 0.45,
                                      "dividend_growth_5yr": 0.05, "dividend_regularity": "regular"})
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "Yield: 3.20% | Payout: 45.00%" in msg
     assert "Regularity: regular" in msg
 
@@ -104,12 +105,73 @@ def test_peer_data_block_renders_when_present():
         "sector_medians": {"sector_median_pe": 20.1},
         "peer_records": [{"ticker": "ETSY", "pe_ratio": 18.2, "roe": 0.22}],
     })
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "PEER_1 (ETSY):" in msg
     assert "pe_ratio=18.2" in msg
 
 
 def test_no_peer_data_omits_peer_block_not_fabricated():
-    msg = build_user_message(_bundle())  # defaults: peer_records=[]
+    msg, _ = build_user_message(_bundle())  # defaults: peer_records=[]
     assert "PEER_1" not in msg
     assert "PEER DATA" not in msg
+
+
+# ---------- field_presence (86bbwachy Phase 4) ----------
+
+
+def test_field_presence_all_true_with_default_bundle_except_no_earnings_or_peers():
+    """Default fixture has every VAL/GROWTH/PROF/BAL field populated and an
+    empty missing_fields list -- only earnings_surprises/peers_block (both
+    genuinely empty in the default fixture) should read False."""
+    _, presence = build_user_message(_bundle())
+    assert presence == {
+        "pe_ratio": True, "forward_pe": True, "peg_ratio": True,
+        "revenue_growth_yoy": True, "revenue_growth_3yr_cagr": True, "eps_growth_yoy": True,
+        "gross_margin": True, "operating_margin": True, "net_margin": True,
+        "roe": True, "fcf_to_net_income": True,
+        "debt_to_equity": True, "current_ratio": True,
+        "interest_coverage": True, "cash_position": True,
+        "earnings_surprises": False, "peers_block": False,
+    }
+
+
+def test_field_presence_reads_missing_fields_list_not_the_raw_dict():
+    """A field can still be a real key in valuation_metrics (e.g. present
+    but None) -- presence must come from bundle.missing_fields, the same
+    signal compute_all() itself already flags it with, not a second,
+    independently-maintained None-check against the raw dict."""
+    bundle = _bundle(missing_fields=["valuation_metrics.peg_ratio", "balance_sheet_metrics.current_ratio"])
+    _, presence = build_user_message(bundle)
+    assert presence["peg_ratio"] is False
+    assert presence["current_ratio"] is False
+    assert presence["pe_ratio"] is True  # untouched entries stay real
+
+
+def test_field_presence_earnings_surprises_true_with_real_history():
+    bundle = _bundle(growth_metrics={
+        "revenue_growth_yoy": 0.1, "revenue_growth_3yr_cagr": 0.1, "eps_growth_yoy": 0.1,
+        "earnings_surprises": [
+            {"period_end": "2026-06-30", "eps_actual": 1.2, "eps_estimated": 1.1,
+             "eps_surprise_pct": 9.09, "revenue_actual": None, "revenue_estimated": None},
+        ],
+    })
+    _, presence = build_user_message(bundle)
+    assert presence["earnings_surprises"] is True
+
+
+def test_field_presence_peers_block_true_when_records_present():
+    bundle = _bundle(peer_metrics={
+        "sector_medians": {"sector_median_pe": 20.1},
+        "peer_records": [{"ticker": "ETSY", "pe_ratio": 18.2, "roe": 0.22}],
+    })
+    _, presence = build_user_message(bundle)
+    assert presence["peers_block"] is True
+
+
+def test_field_presence_has_no_entry_for_dividend_or_analyst_consensus():
+    """dividend_regularity='none' is itself the honest signal for "no
+    dividend" (not an N/A gap), and analyst_consensus is already tracked by
+    Sentiment Analyst -- neither is duplicated here."""
+    _, presence = build_user_message(_bundle())
+    assert "dividend_yield" not in presence
+    assert "analyst_consensus" not in presence

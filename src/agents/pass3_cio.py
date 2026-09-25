@@ -365,7 +365,12 @@ class CIORunner(BaseRunner):
         compressed_pass1: dict,
         pass2_outputs: dict,
     ) -> tuple[dict, list[str]]:
-        self.current_agent = "cio"
+        # Stage-specific, not just "cio" -- matches the same fix orchestrator.py's
+        # AgentOutput rows already got this session (agent_name "cio" for both
+        # stages meant nothing told them apart). call_site (86bbwachy Phase 2)
+        # is derived from current_agent, so this is the one place that needs to
+        # know which stage it is, not every call site downstream.
+        self.current_agent = "cio_stage_a"
         bull_conf = pass2_outputs.get("bull", {}).get("confidence", 0) if pass2_outputs.get("bull") else 0
         bear_conf = pass2_outputs.get("bear", {}).get("confidence", 0) if pass2_outputs.get("bear") else 0
         disagreement_score, disagreement_category = compute_disagreement_score(bull_conf, bear_conf)
@@ -449,6 +454,7 @@ class CIORunner(BaseRunner):
         Stage A result that failed validation could be missing fields
         entirely.
         """
+        self.current_agent = "cio_stage_b"  # see run()'s own comment on why
         ctx = bundle.context
         acct = account_type or ctx.account_type
         system_prompt = fill(

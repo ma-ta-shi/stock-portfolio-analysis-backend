@@ -46,7 +46,7 @@ def _bundle(**overrides) -> SimpleNamespace:
 
 
 def test_renders_real_header_fields():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "SHOP.TO (Shopify Inc) | Technology | TSX | CAD" in msg
     assert "Timeline: medium_term | Account: tfsa" in msg
 
@@ -55,14 +55,14 @@ def test_renders_previously_stale_fields_that_harness_hardcoded_to_na():
     """rs_leadership/rsi_zone_adjusted/weekly_rsi_zone are real fields today
     -- the harness's own runner marked these 'not present in this fixture's
     schema' and hardcoded them to 'N/A'; this port must use the real value."""
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "Leadership: leading" in msg
     assert "RSI zone (adjusted): neutral" in msg
     assert "Weekly RSI zone: neutral" in msg
 
 
 def test_renders_beta_from_risk_metrics():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "Beta: 1.8" in msg
 
 
@@ -70,49 +70,89 @@ def test_earnings_proximity_days_from_earnings_proximity_field():
     """Real field lives on bundle.earnings_proximity, not fundamental_data
     (where the harness fixture put it) -- cross-agent field-location
     difference, not a data gap."""
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "EARNINGS PROXIMITY: 30 days" in msg
 
 
 def test_earnings_flag_fires_within_5_days():
     bundle = _bundle(earnings_proximity={"next_earnings_date": "2026-09-26", "earnings_proximity_days": 3})
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "⚠️ EARNINGS IN 3 DAY(S)" in msg
 
 
 def test_earnings_flag_absent_when_no_upcoming_earnings_known():
     bundle = _bundle(earnings_proximity={"next_earnings_date": None, "earnings_proximity_days": None})
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "⚠️ EARNINGS IN" not in msg
     assert "EARNINGS PROXIMITY: N/A" in msg
 
 
 def test_thin_volume_flag_fires_below_1m():
     bundle = _bundle(liquidity_flags={"avg_dollar_volume_20": 450_000})
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "⚠️ THIN VOLUME: avg_dollar_volume_20=$450,000" in msg
 
 
 def test_thin_volume_flag_absent_above_1m():
-    msg = build_user_message(_bundle())  # default 5,000,000
+    msg, _ = build_user_message(_bundle())  # default 5,000,000
     assert "⚠️ THIN VOLUME" not in msg
 
 
 def test_missing_avg_dollar_volume_renders_honestly_not_as_zero():
     bundle = _bundle(liquidity_flags={"avg_dollar_volume_20": None})
-    msg = build_user_message(bundle)
+    msg, _ = build_user_message(bundle)
     assert "⚠️ THIN VOLUME" not in msg
     assert "Avg dollar volume (20d): N/A" in msg
 
 
 def test_renders_52w_position_fields():
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "52w High: 120.0 | 52w Low: 60.0" in msg
     assert "% from 52w high: -12.5%" in msg
 
 
 def test_no_confluence_score_or_pattern_confirmed_fabricated():
     """Neither field has a real precompute source -- must never appear."""
-    msg = build_user_message(_bundle())
+    msg, _ = build_user_message(_bundle())
     assert "confluence_score" not in msg
     assert "pattern_confirmed" not in msg
+
+
+# ---------- field_presence (86bbwachy Phase 4) ----------
+
+
+def test_field_presence_all_true_when_default_bundle_is_fully_populated():
+    _, presence = build_user_message(_bundle())
+    assert presence == {
+        "earnings_proximity": True,
+        "weekly_timeframe": True,
+        "sector_relative_strength": True,
+        "support_resistance": True,
+    }
+
+
+def test_field_presence_earnings_proximity_false_without_a_calendar():
+    bundle = _bundle(earnings_proximity={"next_earnings_date": None, "earnings_proximity_days": None})
+    _, presence = build_user_message(bundle)
+    assert presence["earnings_proximity"] is False
+
+
+def test_field_presence_weekly_timeframe_false_with_insufficient_weekly_history():
+    bundle = _bundle(multi_timeframe={"weekly_trend": None, "weekly_rsi_zone": None})
+    _, presence = build_user_message(bundle)
+    assert presence["weekly_timeframe"] is False
+
+
+def test_field_presence_sector_relative_strength_false_without_sector_etf():
+    bundle = _bundle(trend_structure={
+        "swing_structure_20d": "HH", "trend_structure_weekly": "HH",
+        "rs_vs_sector_3mo": None, "rs_leadership": None,
+    })
+    _, presence = build_user_message(bundle)
+    assert presence["sector_relative_strength"] is False
+
+
+def test_field_presence_support_resistance_false_when_pivots_unresolved():
+    bundle = _bundle(support_resistance={})
+    _, presence = build_user_message(bundle)
+    assert presence["support_resistance"] is False

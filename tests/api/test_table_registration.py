@@ -23,13 +23,23 @@ from sqlalchemy.orm import configure_mappers
 from api.database import Base
 from api.tables.analysis_runs import AnalysisRun, RunStatus  # noqa: F401
 from api.tables.agent_outputs import AgentOutput  # noqa: F401
+from api.tables.llm_calls import LLMCall  # noqa: F401
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: F401
 from api.tables.predictions import Prediction  # noqa: F401
 from api.tables.recommendations import Recommendation  # noqa: F401
+from api.tables.run_quality_summary import RunQualitySummary  # noqa: F401
 from api.tables.shadow_predictions import ShadowPrediction  # noqa: F401
 from api.tables.stock import Stock  # noqa: F401
 from api.tables.user_profile import UserProfile  # noqa: F401
 
+# The original 8 from the 86bbuhjup finding this file's own docstring
+# describes, plus llm_calls (86bbwachy Phase 2) and run_quality_summary
+# (86bbwachy Phase 5) -- both landed after this file was written and neither
+# was added here at the time, a real, pre-existing gap this review caught
+# and closed rather than left to grow further. The `<=` check below meant
+# neither omission ever failed a test -- this set was never a completeness
+# guarantee, just a floor -- but a table-registration test whose own set
+# quietly stops tracking real tables is worth keeping current regardless.
 _EXPECTED_TABLES = {
     "user_profiles",
     "stocks",
@@ -39,10 +49,12 @@ _EXPECTED_TABLES = {
     "predictions",
     "prediction_checkpoints",
     "shadow_predictions",
+    "llm_calls",
+    "run_quality_summary",
 }
 
 
-def test_all_seven_orchestrator_tables_plus_user_profiles_are_registered():
+def test_all_ten_real_tables_are_registered():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     tables = set(inspect(engine).get_table_names())

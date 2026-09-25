@@ -27,9 +27,12 @@ only names Recommendation/Prediction/ShadowPrediction; checkpoint scheduling
 is real, separate follow-up work, not silently absorbed here.
 """
 import asyncio
+import itertools
 from datetime import UTC, datetime
+from uuid import uuid4
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.base import MODEL, OllamaUnavailable
@@ -54,8 +57,10 @@ from agents.utils import (
 )
 from api.tables.agent_outputs import AgentOutput
 from api.tables.analysis_runs import AnalysisRun, RunStatus
+from api.tables.llm_calls import LLMCall
 from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
+from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
 from data.pipeline import DataPipeline
 from data.precompute.tax_metrics import (
@@ -93,6 +98,27 @@ _RETURN_TIER_TO_RECOMMENDATION_VOCAB = {
     "underperform": "minimal",
     "strong_underperform": "minimal",
 }
+
+# 86bbwachy Phase 5 -- which of the 12 real agent_names are structurally
+# excluded from _write_run_quality_summary's degenerate-output detection.
+# Confirmed live (real MSFT run, 2026-09-24), not assumed: without these
+# exclusions, every one of the excluded agent_names showed up in the
+# corresponding list on EVERY real run regardless of actual quality,
+# drowning the real signal in structural noise. Verified directly against
+# each agent's own validator source, not guessed:
+# - key_factors: never referenced anywhere in validators/cio.py or
+#   validators/shadow_cio.py -- only the synthesis-pass agents lack it.
+# - risks: never referenced anywhere outside validators/pass1.py -- the
+#   four Pass 2 advocates and all three synthesis-pass agents structurally
+#   never produce it, confirmed by direct grep.
+# - narrative: cio_stage_a's own validator (validate_cio_stage_a) never
+#   checks synthesis_narrative (only Stage B's does), and shadow_cio's
+#   validator never checks narrative/synthesis_narrative at all -- both
+#   structural, unlike bull/bear/tax/risk_stage_a and cio_stage_b, which
+#   all have real, validated narrative fields.
+_NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio"}
+_NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b", "shadow_cio"}
+_NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
 
 
 def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
@@ -139,6 +165,46 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     }
 
 
+def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
+    """One LLMCall row per NEW runner.call_log entry since this runner was
+    last processed -- every attempt, not just the accepted one (86bbwachy
+    Phase 2, run-instrumentation.md §5.3, §9 OQ5). Does not set
+    agent_output_id here -- _agent_output_row (the only caller) backfills
+    that directly onto the returned list's last element, since AgentOutput's
+    own PK is generated client-side (see that function's own comment) and
+    is already known by the time this runs.
+
+    Sliced from `runner._llm_calls_consumed` onward, not the whole log --
+    CIORunner and RiskAdvisorRunner are each a SINGLE shared instance across
+    two stages, and call_log accumulates across both (nothing ever clears
+    it). CIO calls this once after Stage A and again after Stage B; without
+    the slice, the second call reprocesses Stage A's own entries too,
+    inserting a real duplicate llm_calls row (confirmed live, 2026-09-24 AAPL
+    run: two identical seq=15 "agent:cio_stage_a" rows, one correctly
+    carrying agent_output_id from the first call, one blank from the
+    second). `BaseRunner.__init__` defaults the counter to 0 for every real
+    runner; `getattr(..., 0)` only exists for a duck-typed test double that
+    isn't a real BaseRunner (e.g. test_orchestrator.py's own _StubRunner).
+
+    The actual entry->LLMCall field mapping lives on LLMCall.from_call_log_entry
+    itself (86bbwachy Phase 3 consolidation, api/tables/llm_calls.py) --
+    this function's own job is the slicing/consumed-index bookkeeping above,
+    which has no precompute equivalent (data/pipeline.py's own
+    _precompute_llm_call_rows shares the same classmethod but not this).
+    """
+    consumed = getattr(runner, "_llm_calls_consumed", 0)
+    new_entries = runner.call_log[consumed:]
+    rows = [LLMCall.from_call_log_entry(entry, run_id=run_id, agent_pass=agent_pass) for entry in new_entries]
+    # Only advance the consumed marker once every row above was built
+    # successfully -- doing this before the loop would permanently drop
+    # entries from ever becoming a row if construction raised partway
+    # through (unlikely given every field read above is a defaulted
+    # .get(), but free to get right and a real footgun for whatever field
+    # gets added here next).
+    runner._llm_calls_consumed = len(runner.call_log)
+    return rows
+
+
 def _agent_output_row(
     run: AnalysisRun,
     agent_id: str,
@@ -146,7 +212,7 @@ def _agent_output_row(
     result: dict | None,
     errors: list[str],
     runner,
-) -> AgentOutput:
+) -> tuple[AgentOutput, list[LLMCall]]:
     """One AgentOutput row per call, written immediately after that agent
     finishes (or fails) -- not batched at the end. This is what actually
     backs per-agent containment (d): a mid-run failure still leaves behind
@@ -157,11 +223,24 @@ def _agent_output_row(
     empty -- a validation-failed-but-present agent still counts as
     "completed" (SETTLED 2026-09-02, audit E77: validation status is a
     warning, not a gate). Only a None/empty/all-None result is "failed".
+
+    Also returns this call's llm_calls rows (86bbwachy Phase 2) -- linked to
+    the AgentOutput row by generating output_id ourselves (uuid4(), the same
+    callable AgentOutput.output_id's own column default would otherwise use)
+    instead of relying on a post-insert PK. AgentOutput.output_id is a
+    client-side default (uuid4, not a DB sequence/server default), so this
+    doesn't skip anything the database would normally provide -- it just
+    lets us know the value before the row is ever added to the session,
+    avoiding the flush-then-UPDATE two-step the original plan for this
+    ticket assumed was necessary. The caller is responsible for db.add()-ing
+    both the returned AgentOutput and every row in the returned list.
     """
     completed = agent_completed(result)
     r = result or {}
     timing = runner.last_timing or {}
-    return AgentOutput(
+    output_id = uuid4()
+    agent_output = AgentOutput(
+        output_id=output_id,
         run_id=run.run_id,
         agent_name=agent_id,
         agent_pass=agent_pass,
@@ -178,7 +257,47 @@ def _agent_output_row(
         tokens_used=timing.get("eval_count"),
         latency_ms=round(timing.get("total_duration_s", 0) * 1000) if timing.get("total_duration_s") else None,
         error_detail="; ".join(errors) if errors else None,
+        # 86bbwachy Phase 4 -- set by the 7 in-scope runners' own run()
+        # right after build_user_message() returns (before the LLM call is
+        # even attempted), None for every other agent. Deliberately read
+        # here regardless of `completed` -- a failed call still had a real
+        # (possibly incomplete) input, and knowing that is exactly the
+        # point (see this field's own column comment).
+        input_field_coverage=getattr(runner, "last_field_coverage", None),
     )
+
+    llm_calls = _llm_call_rows(run.run_id, agent_pass, runner)
+    # The winning attempt is always call_log's last entry, regardless of
+    # which path _retry_loop returned through (validated, auto-trimmed,
+    # soft-error-accepted, or exhausted) -- confirmed by reading that
+    # function directly: `last_result`/the returned `result` are always
+    # updated from the same attempt whose call_log entry was just appended,
+    # every single time through the loop, not just on the success path.
+    # Only back-link when the agent actually completed -- a failed agent's
+    # calls all stay unlinked, which is correct: none of them produced an
+    # accepted output for AgentOutput to point back to.
+    if completed and llm_calls:
+        llm_calls[-1].agent_output_id = output_id
+
+    return agent_output, llm_calls
+
+
+def _add_agent_output_and_calls(
+    db: AsyncSession,
+    run: AnalysisRun,
+    agent_id: str,
+    agent_pass: str,
+    result: dict | None,
+    errors: list[str],
+    runner,
+) -> None:
+    """db.add()s both halves of _agent_output_row's return value -- the
+    common pattern at every one of this file's five call sites, factored
+    out once rather than repeated five times (86bbwachy Phase 2)."""
+    agent_output, llm_calls = _agent_output_row(run, agent_id, agent_pass, result, errors, runner)
+    db.add(agent_output)
+    for call in llm_calls:
+        db.add(call)
 
 
 def _validate_tax_passthroughs(
@@ -338,6 +457,40 @@ class AnalysisOrchestrator:
     """
 
     async def run(self, run: AnalysisRun, db: AsyncSession) -> None:
+        """Public entry point -- a thin wrapper around _run_pipeline() so a
+        run_quality_summary row (86bbwachy Phase 5) gets written exactly
+        once regardless of which of _run_pipeline's own several
+        return/raise exits actually fires. `finally` runs on every one of
+        them (success, a `return`, or a propagating `raise`) without
+        touching _run_pipeline's own internals at all -- this method's own
+        signature is unchanged from before this phase, so every existing
+        caller (api/routes/analysis.py's _run_analysis_background) needs no
+        changes.
+
+        The inner try/except around the summary write is the same
+        defensive posture already used below for Shadow CIO: a bug in this
+        SECONDARY write must never mask or replace whatever _run_pipeline
+        itself raised or returned.
+        """
+        # Initialized HERE, not inside _run_pipeline -- this method is the
+        # one that guarantees _write_run_quality_summary runs, so it must
+        # also guarantee these exist regardless of how early _run_pipeline
+        # itself fails (even before its own first line, in principle).
+        # _write_run_quality_summary reads these unconditionally.
+        self._gate1_passed = self._gate1_reason = None
+        self._gate2_passed = self._gate2_reason = None
+        try:
+            await self._run_pipeline(run, db)
+        finally:
+            try:
+                await self._write_run_quality_summary(run, db)
+            except Exception as exc:
+                await db.rollback()
+                logger.warning(
+                    "run_quality_summary_write_failed", run_id=str(run.run_id), error=str(exc)
+                )
+
+    async def _run_pipeline(self, run: AnalysisRun, db: AsyncSession) -> None:
         # Captured once, as a plain UUID, and used in every log call below
         # instead of re-reading run.run_id each time -- a primary key that
         # will never actually change, but SQLAlchemy expires ALL of an
@@ -350,8 +503,33 @@ class AnalysisOrchestrator:
         run_id = run.run_id
         context = AnalysisContext(account_type=run.account_type, timeline=run.timeline)
 
+        # 86bbwachy Phase 2/3 capture context -- instance attributes, not
+        # threaded through every private method's own signature, since a
+        # fresh AnalysisOrchestrator() is constructed per run (confirmed:
+        # api/routes/analysis.py's _run_analysis_background does
+        # `AnalysisOrchestrator().run(run, db)`, a new instance every time),
+        # so there is no cross-run leakage risk. Created BEFORE prepare()
+        # runs, not after -- seq_counter is genuinely run-wide (spec §5.2),
+        # and Phase 3 wires it into DataPipeline.prepare() too, so
+        # precompute's own Ollama calls (sentiment scoring, filing-section
+        # summarization -- both of which happen inside prepare(), before
+        # Pass 1 ever starts) consume the lowest seq values in the SAME
+        # single sequence Pass 1/Pass 2/CIO/Shadow CIO continue afterward,
+        # not a separate 0-based numbering of their own. self._ticker is
+        # set separately below, once bundle.stock exists -- prepare() needs
+        # no ticker from here, it already resolves its own internally as
+        # one of its first steps (stock_ref.ticker), well before either of
+        # its own precompute LLM calls happen.
+        self._run_id = run_id
+        self._seq_counter = itertools.count()
+        # self._gate1_passed/_gate1_reason/_gate2_passed/_gate2_reason
+        # (86bbwachy Phase 5) are initialized in run(), not here -- see that
+        # method's own comment on why it owns this instead of _run_pipeline.
+
         try:
-            bundle = await DataPipeline().prepare(run.stock_id, context, db)
+            bundle = await DataPipeline().prepare(
+                run.stock_id, context, db, run_id=run_id, seq_counter=self._seq_counter
+            )
         except Exception as exc:
             logger.error("data_pipeline_failed", run_id=str(run_id), error=str(exc))
             run.status = RunStatus.FAILED
@@ -368,7 +546,13 @@ class AnalysisOrchestrator:
         run.currency = bundle.stock.currency
         run.instrument_type = bundle.company_info.get("asset_type")
         run.market_cap_bucket = _market_cap_bucket(bundle.company_info.get("market_cap"))
+        # commits prepare()'s own added-but-not-committed precompute
+        # llm_calls rows (Phase 3's DataPipeline.prepare() only db.add()s,
+        # matching that function's pre-existing "never commits" posture --
+        # see its own docstring) in the same transaction as these tags.
         await db.commit()
+
+        self._ticker = bundle.stock.ticker
 
         try:
             pass1_outputs = await self._run_pass1(run, bundle, db)
@@ -389,6 +573,7 @@ class AnalysisOrchestrator:
         await db.commit()
 
         gate1_passed, gate1_reason = gate1_check(pass1_outputs)
+        self._gate1_passed, self._gate1_reason = gate1_passed, gate1_reason
         if not gate1_passed:
             logger.warning("gate1_failed", run_id=str(run_id), reason=gate1_reason)
             run.status = RunStatus.FAILED
@@ -414,6 +599,7 @@ class AnalysisOrchestrator:
         await db.commit()
 
         gate2_passed, gate2_reason = gate2_check(pass2_outputs)
+        self._gate2_passed, self._gate2_reason = gate2_passed, gate2_reason
         if not gate2_passed:
             logger.warning("gate2_failed", run_id=str(run_id), reason=gate2_reason)
             run.status = RunStatus.FAILED
@@ -461,6 +647,7 @@ class AnalysisOrchestrator:
         # the two. No schema migration needed -- agent_name is a plain
         # unconstrained String(30) column.
         cio_runner = CIORunner()
+        self._prime_runner(cio_runner)
         try:
             try:
                 stage_a_result, stage_a_errors = await self._run_cio_stage_a(
@@ -510,7 +697,7 @@ class AnalysisOrchestrator:
                 if isinstance(tax_summary, dict):
                     tax_summary["dividend_yield_pct"] = tax_profile.get("dividend_yield_pct")
 
-            db.add(_agent_output_row(run, "cio_stage_b", "synthesis", stage_b_result, stage_b_errors, cio_runner))
+            _add_agent_output_and_calls(db, run, "cio_stage_b", "synthesis", stage_b_result, stage_b_errors, cio_runner)
             await db.commit()
         finally:
             await _close_runner(cio_runner)
@@ -570,6 +757,118 @@ class AnalysisOrchestrator:
         run.completed_at = datetime.now(UTC)
         await db.commit()
 
+    async def _write_run_quality_summary(self, run: AnalysisRun, db: AsyncSession) -> None:
+        """86bbwachy Phase 5 -- called from run()'s own finally block, so
+        this fires exactly once per real run() invocation regardless of
+        which of _run_pipeline's several return/raise exits actually fired.
+
+        Everything here is either a fresh query against already-committed
+        rows (every write earlier in _run_pipeline is immediately followed
+        by its own db.commit(), so nothing here can be stale) or an
+        instance attribute with nowhere else to live (self._gate1_passed
+        etc.) -- _run_pipeline's own local scope (pass1_outputs,
+        stage_a_result, ...) is long gone by the time this runs. Must
+        db.add()+commit() its own row -- nothing upstream does that for it.
+        A failure here is caught by run()'s own wrapper, not this method's
+        job to guard against.
+        """
+        llm_calls = (
+            await db.execute(select(LLMCall).where(LLMCall.run_id == run.run_id))
+        ).scalars().all()
+        total_calls = len(llm_calls)
+        retry_calls = sum(1 for c in llm_calls if c.attempt > 1)
+        total_llm_ms = sum(c.latency_ms or 0 for c in llm_calls)
+        call_latencies = [c.latency_ms for c in llm_calls if c.latency_ms is not None]
+        slowest_call_ms = max(call_latencies) if call_latencies else None
+        total_prompt_tokens = sum(c.prompt_tokens or 0 for c in llm_calls)
+        total_completion_tokens = sum(c.completion_tokens or 0 for c in llm_calls)
+        total_thinking_chars = sum(c.thinking_chars or 0 for c in llm_calls)
+        truncated_calls = sum(1 for c in llm_calls if c.finish_reason == "length")
+        empty_content_calls = sum(1 for c in llm_calls if c.finish_reason == "empty_content")
+        validator_failures = sum(1 for c in llm_calls if c.validator_passed is False)
+
+        agent_outputs = (
+            await db.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))
+        ).scalars().all()
+        # See the module-level _NO_*_EXPECTED sets' own comment for why
+        # these exclusions exist and how each was confirmed.
+        agents_with_empty_key_factors = [
+            a.agent_name for a in agent_outputs
+            if a.agent_name not in _NO_KEY_FACTORS_EXPECTED and not a.key_factors
+        ]
+        agents_with_empty_risks = [
+            a.agent_name for a in agent_outputs
+            if a.agent_name not in _NO_RISKS_EXPECTED and not a.risks
+        ]
+        agents_with_empty_narrative = [
+            a.agent_name for a in agent_outputs
+            if a.agent_name not in _NO_NARRATIVE_EXPECTED and not a.narrative
+        ]
+
+        recommendation = (
+            await db.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))
+        ).scalar_one_or_none()
+
+        # run.triggered_at is a NAIVE datetime -- confirmed live: it's
+        # populated via the column's own `default=func.now()` (a DB-side
+        # CURRENT_TIMESTAMP under SQLite), which round-trips with no tzinfo
+        # attached, unlike completed_at/pass1_completed_at/pass2_completed_at
+        # (always set in Python via datetime.now(UTC)). Every timestamp in
+        # this app is UTC in practice; attach it explicitly rather than let
+        # a naive-minus-aware TypeError crash this method the first time it
+        # runs against a real row.
+        triggered_at = run.triggered_at
+        if triggered_at.tzinfo is None:
+            triggered_at = triggered_at.replace(tzinfo=UTC)
+        wall_clock_ms = round((datetime.now(UTC) - triggered_at).total_seconds() * 1000)
+
+        summary = RunQualitySummary(
+            run_id=run.run_id,
+            wall_clock_ms=wall_clock_ms,
+            total_llm_ms=total_llm_ms,
+            slowest_call_ms=slowest_call_ms,
+            total_calls=total_calls,
+            retry_calls=retry_calls,
+            total_prompt_tokens=total_prompt_tokens,
+            total_completion_tokens=total_completion_tokens,
+            total_thinking_chars=total_thinking_chars,
+            truncated_calls=truncated_calls,
+            empty_content_calls=empty_content_calls,
+            validator_failures=validator_failures,
+            gate1_passed=self._gate1_passed,
+            gate1_reason=self._gate1_reason,
+            gate2_passed=self._gate2_passed,
+            gate2_reason=self._gate2_reason,
+            stock_outlook=recommendation.stock_outlook_direction if recommendation else None,
+            overall_confidence=recommendation.overall_confidence if recommendation else None,
+            agents_with_empty_key_factors=agents_with_empty_key_factors or None,
+            agents_with_empty_risks=agents_with_empty_risks or None,
+            agents_with_empty_narrative=agents_with_empty_narrative or None,
+        )
+        db.add(summary)
+        await db.commit()
+
+    def _prime_runner(self, runner) -> None:
+        """Stamps 86bbwachy Phase 2 capture context onto a freshly
+        constructed runner, before it makes any calls. run_id/ticker anchor
+        the artifact directory (agents/capture.py's own artifact_dir());
+        seq_counter is the single run-wide counter shared across every
+        concurrently-running agent (Pass 1's 5, Pass 2's 4, CIO, Shadow CIO)
+        -- called once per runner construction, matching current_agent's own
+        already-established "set post-init" pattern in agents/base.py.
+        """
+        runner.run_id = self._run_id
+        runner.ticker = self._ticker
+        runner.seq_counter = self._seq_counter
+        # _llm_calls_consumed is NOT set here -- BaseRunner.__init__ already
+        # defaults it to 0 (see that class's own comment on why it lives
+        # there, next to call_log). Re-zeroing it here would be harmless for
+        # every real runner (this always runs right after construction,
+        # before any call), but would be actively wrong for a duck-typed
+        # test double that pre-seeds call_log/_llm_calls_consumed before
+        # calling this -- none do today, but there's no reason to couple
+        # this method to owning that field when BaseRunner already does.
+
     async def _run_pass1(self, run: AnalysisRun, bundle: DataBundle, db: AsyncSession) -> dict:
         runners = {
             "RSRCH": StockResearcherRunner(),
@@ -578,6 +877,8 @@ class AnalysisOrchestrator:
             "SENT": SentimentAnalystRunner(),
             "MACRO": MacroEconomistRunner(),
         }
+        for r in runners.values():
+            self._prime_runner(r)
 
         # Do NOT let any agent's exception escape this gather -- letting one
         # propagate would orphan the other still-running agent tasks
@@ -594,7 +895,7 @@ class AnalysisOrchestrator:
         outputs: dict[str, dict | None] = {}
         ollama_unavailable: OllamaUnavailable | None = None
         for agent_id, result, errors, exc in results:
-            db.add(_agent_output_row(run, agent_id, "pass1", result, errors, runners[agent_id]))
+            _add_agent_output_and_calls(db, run, agent_id, "pass1", result, errors, runners[agent_id])
             outputs[agent_id] = result
             if isinstance(exc, OllamaUnavailable):
                 ollama_unavailable = exc
@@ -613,6 +914,8 @@ class AnalysisOrchestrator:
             "tax": TaxStrategistRunner(),
             "risk": RiskAdvisorRunner(),
         }
+        for r in runners.values():
+            self._prime_runner(r)
 
         async def _run_bull_bear_tax(agent_id: str, runner):
             agent_id, result, errors, exc = await _run_contained(
@@ -685,7 +988,7 @@ class AnalysisOrchestrator:
         outputs: dict[str, dict | None] = {}
         ollama_unavailable: OllamaUnavailable | None = None
         for agent_id, result, errors, exc in results:
-            db.add(_agent_output_row(run, agent_id, "pass2", result, errors, runners[agent_id]))
+            _add_agent_output_and_calls(db, run, agent_id, "pass2", result, errors, runners[agent_id])
             outputs[agent_id] = result
             if isinstance(exc, OllamaUnavailable):
                 ollama_unavailable = exc
@@ -705,7 +1008,7 @@ class AnalysisOrchestrator:
         db: AsyncSession,
     ) -> tuple[dict, list[str]]:
         result, errors = await runner.run(bundle, compressed, pass2_outputs)
-        db.add(_agent_output_row(run, "cio_stage_a", "synthesis", result, errors, runner))
+        _add_agent_output_and_calls(db, run, "cio_stage_a", "synthesis", result, errors, runner)
         await db.commit()
         return result, errors
 
@@ -747,9 +1050,10 @@ class AnalysisOrchestrator:
         # v2: no account-specific counterpart) -- only bull/bear/risk.
         shadow_pass2 = {k: pass2_outputs.get(k) for k in ("bull", "bear", "risk")}
         runner = ShadowCIORunner()
+        self._prime_runner(runner)
         result, errors = await runner.run(bundle, compressed, shadow_pass2)
         async with db.begin_nested():
-            db.add(_agent_output_row(run, "shadow_cio", "synthesis", result, errors, runner))
+            _add_agent_output_and_calls(db, run, "shadow_cio", "synthesis", result, errors, runner)
             await db.flush()
         await db.commit()
         await _close_runner(runner)

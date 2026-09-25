@@ -52,6 +52,7 @@ from datetime import UTC, datetime, timedelta
 
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
+from agents.utils import RenderedField
 from agents.validators.pass1 import validate_sentiment_analyst
 from data.schemas.data_bundle import DataBundle
 
@@ -76,23 +77,29 @@ def _insider_counts(bundle: DataBundle) -> tuple[int, int]:
     return buys, sells
 
 
-def _news_block(bundle: DataBundle) -> str:
+def _news_block(bundle: DataBundle) -> RenderedField:
     articles = bundle.news_with_sentiment or []
     if not articles:
-        return "  (no news articles available)"
+        return RenderedField(text="  (no news articles available)", present=False)
     lines = []
     for a in articles:
         lines.append(
             f"  {a['id']}: {a['headline']} ({a['source']}, {a['quality_tier']}, "
             f"sentiment={a.get('sentiment') or 'unscored'})"
         )
-    return "\n".join(lines)
+    return RenderedField(text="\n".join(lines), present=True)
 
 
-def _analyst_activity_block(bundle: DataBundle) -> str:
+def _analyst_activity_block(bundle: DataBundle) -> RenderedField:
+    # Permanently None for CA tickers (Finnhub is US-only, confirmed via
+    # data/providers/finnhub.py -- see module docstring), not a per-run
+    # fetch failure for those; genuinely absent for a US ticker only when
+    # the fetch itself returned nothing.
     trends = bundle.analyst_recommendation_trends
     if not trends:
-        return "  N/A — not available for Canadian stocks, or no data returned."
+        return RenderedField(
+            text="  N/A — not available for Canadian stocks, or no data returned.", present=False
+        )
     lines = []
     for row in trends[:2]:  # most recent 2 periods
         lines.append(
@@ -100,22 +107,33 @@ def _analyst_activity_block(bundle: DataBundle) -> str:
             f"buy={_fmt(row.get('buy'))} hold={_fmt(row.get('hold'))} "
             f"sell={_fmt(row.get('sell'))} strong_sell={_fmt(row.get('strong_sell'))}"
         )
-    return "\n".join(lines)
+    return RenderedField(text="\n".join(lines), present=True)
 
 
-def _short_interest_block(bundle: DataBundle) -> str:
+def _short_interest_block(bundle: DataBundle) -> RenderedField:
     si = bundle.short_interest
     if not si:
-        return "  N/A — no short interest data available."
-    return (
+        return RenderedField(text="  N/A — no short interest data available.", present=False)
+    text = (
         f"  Short interest % of float: {_fmt(si.get('short_interest_pct'))}\n"
         f"  Days to cover: {_fmt(si.get('days_to_cover'))}\n"
         f"  Shares short: {_fmt(si.get('shares_short'))} "
         f"(30d prior: {_fmt(si.get('shares_short_prior_month'))})"
     )
+    return RenderedField(text=text, present=True)
 
 
-def build_user_message(bundle: DataBundle) -> str:
+def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
+    """Returns (rendered user message, field presence map) -- the second
+    element is 86bbwachy Phase 4's own new addition. insider_activity
+    (buys_90d/sells_90d) has no entry: both are real counts, always
+    renderable as a number (0 is a legitimate real answer, not "N/A" --
+    there's no genuine absent case the way there is for the other
+    blocks). peer_sentiment always reports present=False -- a permanent,
+    currently-hardcoded gap (data/pipeline.py's own DataBundle assembly,
+    see module docstring), not a per-run signal, same D3-style permanent
+    gap as Stock Researcher's transcript_excerpts.
+    """
     ctx = bundle.context
     company_info = bundle.company_info
     flags = bundle.canadian_data_flags
@@ -125,17 +143,21 @@ def build_user_message(bundle: DataBundle) -> str:
         canadian_flag = "\nCANADIAN DATA LIMITED: true — Finnhub analyst upgrade/downgrade data unavailable, article sentiment scored from headlines only."
 
     buys_90d, sells_90d = _insider_counts(bundle)
+    news = _news_block(bundle)
+    analyst_activity = _analyst_activity_block(bundle)
+    short_interest = _short_interest_block(bundle)
+    consensus_rating = bundle.analyst_consensus.get("consensus_rating")
 
-    return f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
+    text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{canadian_flag}
 social_sentiment: unknown (always — orchestrator-set, do not override)
 
 NEWS SENTIMENT (NEWS):
-{_news_block(bundle)}
+{news.text}
 
 ANALYST ACTIVITY (ANALYST):
-{_analyst_activity_block(bundle)}
-  Consensus: {_fmt(bundle.analyst_consensus.get('consensus_rating'))} | Avg target: {_fmt(bundle.analyst_consensus.get('target_mean'))} {bundle.stock.currency}
+{analyst_activity.text}
+  Consensus: {_fmt(consensus_rating)} | Avg target: {_fmt(bundle.analyst_consensus.get('target_mean'))} {bundle.stock.currency}
   Analyst count: {_fmt(bundle.analyst_consensus.get('num_analysts'))}
 
 INSIDER ACTIVITY (INSIDER / SIGNALS):
@@ -143,16 +165,29 @@ INSIDER ACTIVITY (INSIDER / SIGNALS):
   Insider sells (90d): {sells_90d}
 
 SHORT INTEREST (SHORT):
-{_short_interest_block(bundle)}
+{short_interest.text}
 
 PEER SENTIMENT:
   N/A — not currently available (peer sentiment comparison is not yet built into the data pipeline)."""
+
+    field_presence = {
+        "news_block": news.present,
+        "analyst_activity": analyst_activity.present,
+        "analyst_consensus": consensus_rating is not None,
+        "short_interest": short_interest.present,
+        "peer_sentiment": False,
+    }
+    return text, field_presence
 
 
 class SentimentAnalystRunner(BaseRunner):
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "SENT"
-        user_msg = build_user_message(bundle)
+        user_msg, field_presence = build_user_message(bundle)
+        # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
+        # failed call still records whether its own input was already
+        # incomplete.
+        self.last_field_coverage = field_presence
         system_prompt = fill(
             load_template("sentiment_analyst"),
             {

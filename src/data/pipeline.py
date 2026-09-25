@@ -8,6 +8,7 @@ covers what a reader of the code itself needs.
 """
 
 import asyncio
+from collections.abc import Iterator
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -16,6 +17,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from agents.capture import CaptureContext
+from api.tables.llm_calls import LLMCall
 from api.tables.stock import Stock
 from data.precompute import fundamentals, risk_metrics, sentiment, technicals
 from data.precompute.canadian_data_flags import build_canadian_data_flags
@@ -82,10 +85,59 @@ class StockNotFoundError(Exception):
     pass
 
 
+def _precompute_llm_call_rows(capture: CaptureContext) -> list[LLMCall]:
+    """Converts one run's worth of precompute capture records into
+    llm_calls rows (86bbwachy Phase 3) -- the precompute counterpart to
+    services/orchestrator.py's own _llm_call_rows, not sharing that
+    function's own consumed-index slicing: that exists specifically for a
+    runner object reused across two stages (CIO, Risk Advisor), which has
+    no precompute equivalent -- capture.call_log here is built once, by
+    one prepare() call, and read exactly once, right here. Both functions
+    do share the actual field mapping, via LLMCall.from_call_log_entry
+    (86bbwachy Phase 3 consolidation, api/tables/llm_calls.py) -- the two
+    were near-identical duplicates of each other before that. agent_output_id
+    stays None for every row this returns -- these are, by definition,
+    "non-agent calls" (llm_calls.py's own column comment), so there is no
+    AgentOutput row for any of them to ever link to.
+    """
+    return [
+        LLMCall.from_call_log_entry(entry, run_id=capture.run_id, agent_pass="precompute")
+        for entry in capture.call_log
+    ]
+
+
 class DataPipeline:
     async def prepare(
-        self, stock_id: UUID, context: AnalysisContext, db: AsyncSession
+        self,
+        stock_id: UUID,
+        context: AnalysisContext,
+        db: AsyncSession,
+        *,
+        run_id: UUID | None = None,
+        seq_counter: Iterator[int] | None = None,
     ) -> DataBundle:
+        """run_id/seq_counter (86bbwachy Phase 3) are None by default --
+        every existing caller/test keeps calling prepare() exactly as
+        before, with precompute's own Ollama calls (sentiment scoring,
+        filing-section summarization) capturing nothing. The real caller
+        (AnalysisOrchestrator.run()) passes both, using the SAME seq
+        counter it later hands to every Pass 1/Pass 2/CIO/Shadow CIO
+        runner -- precompute happens first, chronologically, so its calls
+        correctly consume the lowest seq values in that one run-wide
+        sequence, not a separate 0-based numbering of their own. Building
+        a fresh CaptureContext here rather than accepting one directly
+        keeps this function's own signature in the same "primitive
+        values in, not orchestrator-shaped objects" style as its
+        existing stock_id/context/db parameters. `ticker` (below) isn't a
+        parameter here because prepare() already resolves it as one of
+        its own first steps -- no need for the caller to resolve it
+        twice. Like AnalysisOrchestrator.run()'s own docstring says about
+        `run`: a caller that passes run_id is responsible for eventually
+        committing `db` itself (the added LLMCall rows are add()ed here,
+        not committed -- matching this function's own pre-existing
+        "never commits" posture, confirmed by grepping this whole file
+        for db. before this ticket touched it).
+        """
         stock = (
             await db.execute(select(Stock).where(Stock.stock_id == stock_id))
         ).scalar_one_or_none()
@@ -95,6 +147,11 @@ class DataPipeline:
         stock_ref = StockRef.from_stock(stock)
         ticker = stock_ref.ticker
         benchmark_ticker = get_benchmark(stock_ref)
+        capture = (
+            CaptureContext(run_id=run_id, ticker=ticker, seq_counter=seq_counter)
+            if seq_counter is not None
+            else None
+        )
         # Captured once, up front, and reused everywhere "now" is needed
         # below (dividend window, technicals' as_of, macro's as_of,
         # data_freshness/data_vintage) - date.today() would read the local
@@ -274,12 +331,21 @@ class DataPipeline:
             # Ollama call before Pass 1 begins (also 32768) -- no third
             # reload transitioning into Pass 1.
             sentiment_result, insider_transactions = await asyncio.gather(
-                sentiment.summarize_news(id_assigned_articles),
+                sentiment.summarize_news(id_assigned_articles, capture=capture),
                 router.get_insider_trading(ticker),
             )
             research_sources_bundle = await build_research_sources(
-                ticker, id_assigned_articles, stock
+                ticker, id_assigned_articles, stock, capture=capture
             )
+
+            # 86bbwachy Phase 3: capture.call_log is fully populated now --
+            # both sentiment (above) and research_sources's own filing-digest
+            # calls have completed, and nothing later in this function makes
+            # another Ollama call. db.add() only, no commit -- see prepare()'s
+            # own docstring on why.
+            if capture is not None:
+                for row in _precompute_llm_call_rows(capture):
+                    db.add(row)
 
             fred = FredMacroDataProvider()
             stats_canada_cm = StatsCanadaProvider() if is_ca else nullcontext(None)
@@ -352,6 +418,8 @@ class DataPipeline:
                 dividend_history=dividend_history,
                 peer_metrics=fundamentals_result["peer_metrics"],
                 price_info=price_info,
+                missing_fields=fundamentals_result["missing_fields"],
+                currency_mismatch=fundamentals_result["currency_mismatch"],
                 technical_indicators=technicals_result["technical_indicators"],
                 support_resistance=technicals_result["support_resistance"],
                 trend_structure=technicals_result["trend_structure"],
