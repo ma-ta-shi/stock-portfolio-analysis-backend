@@ -24,6 +24,7 @@ from agents.utils import (
     gate1_check,
     gate2_check,
     parse_json_response,
+    render_data_coverage_line,
     researcher_thesis_archetype,
     truncate_to_tokens,
     word_count,
@@ -194,6 +195,55 @@ class TestReliabilityWarnings:
 
     def test_status_labels_cover_all_confidence_levels(self):
         assert set(CONFIDENCE_STATUS_LABELS) == {"high", "medium", "low", "insufficient"}
+
+
+class TestRenderDataCoverageLine:
+    """86bbummwp Tier 1a -- shared DATA COVERAGE line renderer for Fundamental,
+    Technical, Sentiment, and Macro Economist (Stock Researcher keeps its own
+    list-based implementation, not migrated here -- different input shape)."""
+
+    GAP_SENTENCES = {
+        "news_block": "no news articles available",
+        "short_interest": "no short interest data available",
+    }
+
+    def test_all_present_returns_standard(self):
+        result = render_data_coverage_line(
+            {"news_block": True, "short_interest": True}, self.GAP_SENTENCES
+        )
+        assert result == "standard."
+
+    def test_one_gap_renders_its_sentence(self):
+        result = render_data_coverage_line(
+            {"news_block": False, "short_interest": True}, self.GAP_SENTENCES
+        )
+        assert result == "no news articles available."
+
+    def test_multiple_gaps_joined_with_semicolons(self):
+        result = render_data_coverage_line(
+            {"news_block": False, "short_interest": False}, self.GAP_SENTENCES
+        )
+        assert result == "no news articles available; no short interest data available."
+
+    def test_key_absent_from_field_presence_is_not_applicable_not_a_gap(self):
+        """The Macro Economist nuance: a key genuinely absent from
+        field_presence (e.g. `statcan` for a US stock) means "not
+        applicable," never a mentioned gap -- distinct from present-but-False."""
+        result = render_data_coverage_line({"news_block": True}, self.GAP_SENTENCES)
+        assert result == "standard."
+
+    def test_key_present_but_false_is_a_real_gap_even_if_others_are_absent(self):
+        result = render_data_coverage_line({"short_interest": False}, self.GAP_SENTENCES)
+        assert result == "no short interest data available."
+
+    def test_field_presence_key_with_no_matching_gap_sentence_is_ignored(self):
+        """A field_presence entry not in gap_sentences at all (e.g. a caller
+        passing extra keys never meant for this line) is silently skipped,
+        not a KeyError."""
+        result = render_data_coverage_line(
+            {"news_block": True, "some_other_field": False}, self.GAP_SENTENCES
+        )
+        assert result == "standard."
 
 
 class TestResearcherThesisArchetype:

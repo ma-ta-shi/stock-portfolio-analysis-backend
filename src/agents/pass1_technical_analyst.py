@@ -28,15 +28,94 @@ NOT a clean port -- field-by-field notes, verified against
   interpretive judgment synthesizing TREND/MOMO/VOL/SR/PAT, the same
   "give raw data, let the LLM interpret" pattern as Fundamental's
   guidance_vs_consensus -- omitted from input, not fabricated.
+
+86bbummwp Tier 1 additions:
+- `data_coverage_line`: now built from the same `field_presence` map
+  `build_user_message()` already computes for `input_field_coverage`, via the
+  shared `render_data_coverage_line()` helper -- was hardcoded to
+  "Data coverage: standard." on every run before this.
+- `data_warnings`: now wired to `bundle.preflight_warnings` (real, computed by
+  `precompute/technicals.py`'s own anomaly detector -- zero-volume sessions,
+  negative/zero prices, unexplained >25% gaps -- and previously discarded
+  after being persisted onto DataBundle for no live reader).
+- The retry loop's validator now also enforces the earnings-proximity and
+  thin-volume caveats the user message already tells the model are
+  mandatory/required (see `earnings_flag`/`volume_flag` below) -- previously
+  requested in the prompt but never mechanically checked.
 """
+from functools import partial
+
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.validators.pass1 import validate_technical_analyst
+from agents.utils import render_data_coverage_line
+from agents.validators.pass1 import (
+    validate_earnings_proximity_caveat,
+    validate_technical_analyst,
+    validate_thin_volume_caveat,
+)
 from data.schemas.data_bundle import DataBundle
+
+# Only 4 fields, all worth a coverage-line mention directly -- unlike
+# Fundamental Analyst's 15-key missing_fields map, no coarse/granular split
+# needed here.
+_COVERAGE_GAP_SENTENCES = {
+    "earnings_proximity": "no earnings calendar data available",
+    "weekly_timeframe": "no weekly timeframe data available (insufficient price history)",
+    "sector_relative_strength": "no sector relative strength data available",
+    "support_resistance": "no support/resistance levels could be resolved",
+}
+
+
+def _data_coverage_line(field_presence: dict[str, bool]) -> str:
+    return render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
+
+
+def _data_warnings_line(preflight_warnings: list[str]) -> str:
+    """86bbummwp Tier 1b -- wires the real, already-computed anomaly detector
+    (`precompute/technicals.py`'s own `_preflight_warnings()`: zero-volume
+    sessions, negative/zero prices, unexplained >25% gaps) into the
+    `data_warnings` prompt placeholder, previously hardcoded to `""` and
+    silently discarding this signal on every run. `preflight_warnings` is
+    never `None` (DataBundle declares it `list[str]`, not `list[str] | None`),
+    so `"; ".join([])` already returns `""` on its own -- no `or ""` fallback
+    needed."""
+    return "; ".join(preflight_warnings)
 
 
 def _fmt(v, suffix: str = ""):
     return "N/A" if v is None else f"{v}{suffix}"
+
+
+def _validate_with_caveats(
+    output: dict, earnings_days: int | None, avg_dollar_vol: float | None
+) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp Tier 1c) -- merges the base schema
+    check with the two mandatory-caveat checks `call_with_validation()`
+    (agents/base.py) has no way to receive extra context for on its own: its
+    `validator` callable takes exactly one positional arg (`result`), so
+    `earnings_days`/`avg_dollar_vol` are closed over here via `partial()`
+    instead. Both checks already reflect a requirement the real prompt
+    already tells the model about (`earnings_flag`/`volume_flag` in
+    build_user_message() above) -- this only makes an already-visible
+    instruction mechanically enforced, not a new one.
+
+    `earnings_days`/`avg_dollar_vol` can be `None` when the underlying data
+    itself is absent (no earnings calendar entry, no liquidity data) -- both
+    caveat checks require a real number to compare against a threshold, so
+    `None` skips that specific check the same way "value present but above
+    threshold" does (there's no proximity/thin-volume condition to flag when
+    the fact needed to evaluate it isn't known either).
+    """
+    passed, errors = validate_technical_analyst(output)
+    if earnings_days is not None:
+        ep_passed, ep_errors = validate_earnings_proximity_caveat(output, earnings_days)
+        passed = passed and ep_passed
+        errors = errors + ep_errors
+    if avg_dollar_vol is not None:
+        vol_passed, vol_errors = validate_thin_volume_caveat(output, avg_dollar_vol)
+        passed = passed and vol_passed
+        errors = errors + vol_errors
+    return passed, errors
 
 
 def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
@@ -146,6 +225,9 @@ class TechnicalAnalystRunner(BaseRunner):
         mtf = bundle.multi_timeframe
         ti = bundle.technical_indicators
         ep = bundle.earnings_proximity
+        liq = bundle.liquidity_flags
+        earnings_days = ep.get("earnings_proximity_days")
+        avg_dollar_vol = liq.get("avg_dollar_volume_20")
         user_msg, field_presence = build_user_message(bundle)
         # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
         # failed call still records whether its own input was already
@@ -159,8 +241,8 @@ class TechnicalAnalystRunner(BaseRunner):
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "data_coverage_line": "Data coverage: standard.",
-                "data_warnings": "",
+                "data_coverage_line": _data_coverage_line(field_presence),
+                "data_warnings": _data_warnings_line(bundle.preflight_warnings),
                 "memory_brief": "",
                 "earnings_proximity_days": str(ep.get("earnings_proximity_days", "N/A")),
                 "nearest_support": str(sr.get("nearest_support", "N/A")),
@@ -175,7 +257,7 @@ class TechnicalAnalystRunner(BaseRunner):
         return await self.call_with_validation(
             system_prompt,
             user_msg,
-            validate_technical_analyst,
+            partial(_validate_with_caveats, earnings_days=earnings_days, avg_dollar_vol=avg_dollar_vol),
             max_tokens=3500,
             temperature=0.3,
         )

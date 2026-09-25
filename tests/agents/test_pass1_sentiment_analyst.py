@@ -3,7 +3,7 @@ equivalent -- see test_pass1_stock_researcher.py's docstring for why."""
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from agents.pass1_sentiment_analyst import build_user_message
+from agents.pass1_sentiment_analyst import _data_coverage_line, _validate_with_caveats, build_user_message
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -187,3 +187,109 @@ def test_field_presence_has_no_entry_for_insider_activity():
     answer, not N/A) -- no meaningful presence/absence to report."""
     _, presence = build_user_message(_bundle())
     assert "insider_activity" not in presence
+
+
+# ---------- _data_coverage_line (86bbummwp Tier 1a) ----------
+
+
+def test_data_coverage_line_flags_default_fixtures_real_gaps():
+    """Default fixture has no analyst_activity (CA/no-data default) and the
+    permanent peer_sentiment gap -- both must be mentioned, not a bare
+    'standard.'"""
+    _, presence = build_user_message(_bundle())
+    line = _data_coverage_line(presence)
+    assert "no analyst upgrade/downgrade data available" in line
+    assert "peer sentiment comparison is not yet available" in line
+    assert "no news articles available" not in line  # default fixture has real news
+
+
+def test_data_coverage_line_never_standard_due_to_permanent_peer_sentiment_gap():
+    """peer_sentiment is a permanent gap, so this line is never a bare
+    'standard.' for any real run -- confirmed even with every other field
+    present."""
+    bundle = _bundle(analyst_recommendation_trends=[
+        {"period": "2026-09-01", "strong_buy": 10, "buy": 15, "hold": 5, "sell": 1, "strong_sell": 0},
+    ])
+    _, presence = build_user_message(bundle)
+    line = _data_coverage_line(presence)
+    assert "no analyst upgrade/downgrade data available" not in line
+    assert "peer sentiment comparison is not yet available" in line
+
+
+# ---------- _validate_with_caveats (86bbummwp 1d) ----------
+
+
+def _valid_sentiment_analyst_output(**overrides) -> dict:
+    base = {
+        "assessment_summary": "Positive news flow with modest insider buying and stable analyst coverage.",
+        "analysis_confidence": "high",
+        "caveats": ["Coverage limited to public news and disclosed insider filings."],
+        "key_factors": [
+            {"factor": "Positive news flow", "importance": "high", "sentiment": "positive", "evidence": "N1: product launch"},
+        ],
+        "risks": [],
+        "narrative": (
+            "News flow for COMPANY_X has been broadly positive over the review window, anchored by "
+            "a well-received product launch (N1) and steady analyst coverage. Insider activity shows "
+            "modest net buying, a mildly constructive signal given the absence of any offsetting "
+            "negative catalysts during the same period. Short interest remains stable relative to "
+            "the prior month, showing no meaningful build in bearish positioning among short sellers. "
+            "Analyst consensus remains a buy rating with a steady average price target, and no "
+            "recent upgrades or downgrades have been recorded that would suggest a shift in the "
+            "professional community's view of the name. Overall sentiment skews cautiously positive, "
+            "with no material contrarian signals currently evident in the available data, though "
+            "continued monitoring of the news cycle over the coming weeks is still warranted."
+        ),
+        "structured_data": {
+            "news_sentiment": {"overall": "positive", "dominant_themes": ["product launch"], "sentiment_trend": "stable"},
+            "analyst_sentiment": {"consensus_direction": "bullish", "recent_changes": "no changes", "avg_price_target": 20.0},
+            "insider_activity_interpretation": "Modest net insider buying, a mildly positive signal.",
+            "short_interest_interpretation": {"trend": "stable", "interpretation": "normal"},
+            "social_sentiment": "unknown",
+            "narrative_momentum": "stable",
+            "positioning_assessment": "neutral",
+            "analyst_consensus": "buy",
+            "peer_sentiment_comparison": "Not currently available.",
+        },
+        "contrarian_signals": [],
+        "pass2_view": {},
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_with_caveats_passes_when_not_inferred_and_schema_valid():
+    passed, errors = _validate_with_caveats(_valid_sentiment_analyst_output(), canadian_sentiment_inferred=False)
+    assert passed, errors
+
+
+def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_inference():
+    out = _valid_sentiment_analyst_output(structured_data={
+        **_valid_sentiment_analyst_output()["structured_data"], "social_sentiment": "bearish",
+    })
+    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=False)
+    assert not passed
+    assert any("social_sentiment" in e for e in errors)
+
+
+def test_validate_with_caveats_flags_missing_canadian_caveat():
+    out = _valid_sentiment_analyst_output()  # no Canadian inference mention
+    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=True)
+    assert not passed
+    assert any("scored from headlines only" in e for e in errors)
+
+
+def test_validate_with_caveats_passes_with_real_current_phrase_when_inferred():
+    out = _valid_sentiment_analyst_output(caveats=[
+        "Article sentiment is scored by a local LLM on both markets, not supplied by a data "
+        "provider, and is not validated against a ground-truth dataset. Canadian articles are "
+        "scored from headlines only — the Canadian news feed returns no article body."
+    ])
+    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=True)
+    assert passed, errors
+
+
+def test_validate_with_caveats_not_checked_when_not_inferred():
+    out = _valid_sentiment_analyst_output()  # no Canadian inference mention, but not inferred
+    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=False)
+    assert passed, errors

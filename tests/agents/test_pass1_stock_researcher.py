@@ -11,7 +11,7 @@ value).
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass1_stock_researcher import build_user_message
+from agents.pass1_stock_researcher import _validate_with_caveats, build_user_message
 
 
 def _news_item(id_="N1", headline="Company announces new product", tier="primary"):
@@ -257,3 +257,84 @@ def test_field_presence_has_no_entry_for_management_signals_or_whole_price_conte
     _, presence = build_user_message(_bundle())
     assert "management_signals" not in presence
     assert "price_context" not in presence
+
+
+# ---------- _validate_with_caveats (86bbummwp 1d) ----------
+
+
+def _valid_stock_researcher_output(**overrides) -> dict:
+    base = {
+        "assessment_summary": "A solid mid-cap healthcare technology company with recurring revenue.",
+        "analysis_confidence": "high",
+        "caveats": ["Coverage limited to public filings and news."],
+        "key_factors": [
+            {"factor": "Recurring revenue", "importance": "high", "sentiment": "positive",
+             "evidence": "FILING:MD&A: subscription revenue mix"},
+            {"factor": "Roll-up integration risk", "importance": "medium", "sentiment": "negative",
+             "evidence": "N1: recent acquisition closed"},
+        ],
+        "risks": [
+            {"risk": "Integration execution risk", "severity": "medium", "evidence": "N1: recent acquisition closed"},
+        ],
+        "narrative": (
+            "COMPANY_X demonstrates a durable recurring-revenue base built on subscription and "
+            "platform fees across its clinical network (FILING:MD&A). Recent developments show "
+            "continued roll-up acquisition activity, adding scale but introducing integration "
+            "execution risk that management will need to manage carefully over the next several "
+            "quarters (N1). Competitive position is average relative to national peers, with "
+            "revenue roughly comparable to PEER_1 but trailing on operating margin, reflecting the "
+            "ongoing cost of integrating acquired clinics onto a single platform. Management is "
+            "assessed as competent based on a consistent acquisition and integration track record "
+            "to date. Overall the thesis rests on continued execution of the roll-up strategy "
+            "translating into durable, growing subscription-like revenue over the medium term "
+            "horizon, with integration risk as the primary item to watch going forward."
+        ),
+        "structured_data": {
+            "thesis_archetype": "quality_compounder",
+            "competitive_position": "average",
+            "moat_assessment": {"overall_moat_durability": "moderate", "moat_trend": "stable", "moats": []},
+            "management_assessment": "competent",
+            "growth_drivers": ["Roll-up acquisitions (N1)"],
+            "competitive_threats": ["Larger national competitors (PEER_1)"],
+            "recent_developments": ["Acquisition closed (N1)"],
+            "peer_comparison_summary": "Comparable scale to PEER_1 on revenue, trailing on margin.",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_with_caveats_passes_when_digest_present_and_schema_valid():
+    passed, errors = _validate_with_caveats(_valid_stock_researcher_output(), has_filing_digest=True)
+    assert passed, errors
+
+
+def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_digest():
+    out = _valid_stock_researcher_output(structured_data={
+        **_valid_stock_researcher_output()["structured_data"], "thesis_archetype": "not_a_real_archetype",
+    })
+    passed, errors = _validate_with_caveats(out, has_filing_digest=True)
+    assert not passed
+    assert any("thesis_archetype" in e for e in errors)
+
+
+def test_validate_with_caveats_flags_missing_filing_depth_caveat():
+    out = _valid_stock_researcher_output()  # no filing-depth mention
+    passed, errors = _validate_with_caveats(out, has_filing_digest=False)
+    assert not passed
+    assert any("Filing depth limited" in e for e in errors)
+
+
+def test_validate_with_caveats_passes_with_real_current_phrase_when_digest_absent():
+    out = _valid_stock_researcher_output(caveats=[
+        "Filing depth limited: no regulatory filing text was available for this company; "
+        "analysis relies on the company profile, public news and peer comparison."
+    ])
+    passed, errors = _validate_with_caveats(out, has_filing_digest=False)
+    assert passed, errors
+
+
+def test_validate_with_caveats_not_checked_when_digest_present():
+    out = _valid_stock_researcher_output()  # no filing-depth mention, but digest is present
+    passed, errors = _validate_with_caveats(out, has_filing_digest=True)
+    assert passed, errors

@@ -3,7 +3,7 @@ equivalent -- see test_pass1_stock_researcher.py's docstring for why."""
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass1_macro_economist import build_user_message
+from agents.pass1_macro_economist import _data_coverage_line, build_user_message
 
 
 def _macro(**overrides) -> SimpleNamespace:
@@ -175,3 +175,68 @@ def test_field_presence_statcan_false_on_fetch_failure():
     bundle = _bundle(is_ca=True, statcan_age_days=None)
     _, presence = build_user_message(bundle)
     assert presence["statcan"] is False
+
+
+# ---------- _data_coverage_line (86bbummwp Tier 1a) ----------
+
+
+def test_data_coverage_line_standard_for_default_non_commodity_sector():
+    """Default fixture is not sector-commodity-relevant -- that's a real,
+    intended N/A (the schema's own validator enforces
+    sector_commodity_age_days=None for a non-commodity sector), NOT a data
+    gap. Found during critical review: field_presence["commodities"] is
+    unconditionally False whenever sector_commodity_relevant is False, which
+    would otherwise make every non-commodity-sensitive stock (the large
+    majority) report a false "no sector commodity data available" gap --
+    live-verified against 5 real tickers, none commodity-sensitive, all
+    showing this false positive before the fix."""
+    _, presence = build_user_message(_bundle(is_ca=True))
+    line = _data_coverage_line(presence, sector_commodity_relevant=False)
+    assert line == "standard."
+
+
+def test_data_coverage_line_standard_when_commodity_relevant_and_resolved():
+    bundle = _bundle(
+        is_ca=True, sector_commodity_relevant=True, sector_commodity_name="WTI Crude",
+        sector_commodity_level=78.5, sector_commodity_direction="rising",
+        sector_commodity_age_days=2, commodity_90d_change_pct=3.1,
+    )
+    _, presence = build_user_message(bundle)
+    assert _data_coverage_line(presence, sector_commodity_relevant=True) == "standard."
+
+
+def test_data_coverage_line_flags_real_commodity_fetch_failure_when_relevant():
+    """Distinct from "not relevant": a sector that IS commodity-sensitive but
+    whose fetch genuinely failed (age_days is None) is a real gap, still
+    correctly flagged."""
+    bundle = _bundle(
+        is_ca=True, sector_commodity_relevant=True, sector_commodity_name="WTI Crude",
+        sector_commodity_age_days=None,
+    )
+    _, presence = build_user_message(bundle)
+    line = _data_coverage_line(presence, sector_commodity_relevant=True)
+    assert "no sector commodity data available" in line
+
+
+def test_data_coverage_line_us_stock_never_mentions_statcan():
+    """statcan is absent from field_presence entirely for a US stock -- must
+    be treated as not applicable, never rendered as a gap."""
+    bundle = _bundle(is_ca=False)
+    _, presence = build_user_message(bundle)
+    line = _data_coverage_line(presence, sector_commodity_relevant=False)
+    assert "Statistics Canada" not in line
+
+
+def test_data_coverage_line_flags_real_statcan_fetch_failure_for_ca_stock():
+    bundle = _bundle(is_ca=True, statcan_age_days=None)
+    _, presence = build_user_message(bundle)
+    line = _data_coverage_line(presence, sector_commodity_relevant=False)
+    assert "no Statistics Canada demand indicator data available" in line
+
+
+def test_data_coverage_line_flags_multiple_real_fetch_failures():
+    bundle = _bundle(is_ca=True, policy_rate_age_days=None, cpi_age_days=None)
+    _, presence = build_user_message(bundle)
+    line = _data_coverage_line(presence, sector_commodity_relevant=False)
+    assert "no policy rate data available" in line
+    assert "no inflation data available" in line

@@ -3,7 +3,7 @@ equivalent -- see test_pass1_stock_researcher.py's docstring for why."""
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass1_fundamental_analyst import build_user_message
+from agents.pass1_fundamental_analyst import _data_coverage_line, build_user_message
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -175,3 +175,38 @@ def test_field_presence_has_no_entry_for_dividend_or_analyst_consensus():
     _, presence = build_user_message(_bundle())
     assert "dividend_yield" not in presence
     assert "analyst_consensus" not in presence
+
+
+# ---------- _data_coverage_line (86bbummwp Tier 1a) ----------
+
+
+def test_data_coverage_line_standard_when_peers_and_earnings_surprises_present():
+    _, presence = build_user_message(_bundle(peer_metrics={
+        "sector_medians": {"sector_median_pe": 20.1},
+        "peer_records": [{"ticker": "ETSY", "pe_ratio": 18.2}],
+    }, growth_metrics={
+        "revenue_growth_yoy": 0.1, "revenue_growth_3yr_cagr": 0.1, "eps_growth_yoy": 0.1,
+        "earnings_surprises": [{"period_end": "2026-06-30", "eps_actual": 1.2,
+                                 "eps_estimated": 1.1, "eps_surprise_pct": 9.09}],
+    }))
+    assert _data_coverage_line(presence) == "standard."
+
+
+def test_data_coverage_line_flags_missing_peers_and_earnings_surprises():
+    """Default fixture has neither -- the coarse coverage line mentions both,
+    unlike the 15 per-ratio keys in the same field_presence dict, which stay
+    granular-only in input_field_coverage."""
+    _, presence = build_user_message(_bundle())
+    line = _data_coverage_line(presence)
+    assert "no peer data available" in line
+    assert "no earnings surprise history available" in line
+
+
+def test_data_coverage_line_ignores_the_15_per_ratio_keys():
+    """A missing per-ratio field (e.g. peg_ratio) must NOT surface in this
+    prose line -- too granular, stays in input_field_coverage only."""
+    bundle = _bundle(missing_fields=["valuation_metrics.peg_ratio"])
+    _, presence = build_user_message(bundle)
+    line = _data_coverage_line(presence)
+    assert "peg_ratio" not in line
+    assert "no peer data available" in line  # still real (default fixture has none)

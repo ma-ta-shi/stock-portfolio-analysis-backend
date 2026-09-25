@@ -51,12 +51,36 @@ against `data/schemas/research_sources_bundle.py` and
 - `eligible_canadian_dividend`: no discrete field anywhere -- Canadian
   dividend-eligibility is baked into `tax_metrics`'s own rendered string
   (Tax Strategist's field), not exposed separately. Omitted, not fabricated.
+
+86bbummwp 1d: the retry loop's validator now also enforces the mandatory
+filing-depth caveat the user message already tells the model about via
+`{has_filing_digest}` (rule 5) -- previously requested in the prompt but
+never mechanically checked. This is a market-agnostic requirement, not a
+Canadian one, despite living in `agents/validators/pass1.py` next to
+`validate_canadian_caveat` -- see that function's own docstring for why RSRCH
+was split out of it entirely rather than folded in under a renamed flag.
 """
+from functools import partial
+
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import RenderedField
-from agents.validators.pass1 import validate_stock_researcher
+from agents.validators.pass1 import validate_filing_depth_caveat, validate_stock_researcher
 from data.schemas.data_bundle import DataBundle
+
+
+def _validate_with_caveats(output: dict, has_filing_digest: bool) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp 1d) -- merges the base schema check
+    with the mandatory filing-depth caveat, the same closure-composition
+    pattern as pass1_technical_analyst.py's own `_validate_with_caveats`
+    (`call_with_validation()`'s validator callable takes exactly one
+    positional arg, so `has_filing_digest` is closed over via `partial()`
+    at the call site instead). The real prompt already tells the model this
+    caveat is mandatory when the flag is false (rule 5) -- this only makes
+    an already-visible instruction mechanically enforced, not a new one."""
+    passed, errors = validate_stock_researcher(output)
+    fd_passed, fd_errors = validate_filing_depth_caveat(output, has_filing_digest)
+    return passed and fd_passed, errors + fd_errors
 
 
 def _data_coverage_line(bundle: DataBundle) -> str:
@@ -287,7 +311,7 @@ class StockResearcherRunner(BaseRunner):
         return await self.call_with_validation(
             system_prompt,
             user_msg,
-            validate_stock_researcher,
+            partial(_validate_with_caveats, has_filing_digest=bundle.research_sources.has_filing_digest),
             max_tokens=4000,
             temperature=0.3,
         )

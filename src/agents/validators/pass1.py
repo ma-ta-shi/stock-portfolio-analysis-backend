@@ -532,35 +532,70 @@ def validate_thin_volume_caveat(output: dict, avg_dollar_volume: float) -> tuple
     return len(errors) == 0, errors
 
 
-def validate_canadian_caveat(output: dict, agent_id: str) -> tuple[bool, list[str]]:
-    """Check that RSRCH and SENT include the mandatory Canadian data limited caveat.
+def validate_canadian_caveat(output: dict, canadian_sentiment_inferred: bool) -> tuple[bool, list[str]]:
+    """Check that Sentiment Analyst includes the mandatory Canadian
+    sentiment-inference caveat when `canadian_sentiment_inferred` is true
+    (86bbummwp 1d). Self-gates on the flag and hardcodes its own `SENT:`
+    prefix, the same pattern as `validate_earnings_proximity_caveat`/
+    `validate_thin_volume_caveat` above -- no `agent_id` parameter, since (see
+    below) this is single-agent now, and the caller doesn't need to only
+    invoke it conditionally.
 
-    The reliability_score<=70 cap this used to also enforce is gone (86bbummwp / D6: the
-    field is never LLM-produced anymore, so the old `output.get("reliability_score", 101)`
-    would now ALWAYS see the 101 default and ALWAYS fail -- going from an intermittent bug to
-    a permanent one if left in place).
+    RSRCH is DELIBERATELY NOT a consumer of this function anymore, despite
+    the name -- found while finally wiring this in (2026-09-25): the
+    "Canadian caveat" framing used to apply to both RSRCH and SENT, but
+    RSRCH's real requirement is keyed on `{has_filing_digest}`
+    (`prompts/stock_researcher` rule 5), which its own prompt text documents
+    as market-agnostic ("this flag is false only when filing text is
+    genuinely absent, for either market — it is not Canada-specific") --
+    renamed from the Canada-specific `sedar_filing_available` on 2026-09-23,
+    after a live AAPL run leaked the old wording into a US stock's real
+    output. Gating RSRCH on the Canadian flag would check the wrong
+    condition, not just a stale phrase -- see `validate_filing_depth_caveat()`
+    below for RSRCH's real, separate requirement.
 
-    KNOWN, UNFIXED, SEPARATE DEFECT (not D6, found and live-verified during 86bbummwp
-    planning): the "Finnhub" phrase below is stale relative to the current real prompts. Ran
-    Stock Researcher and Sentiment Analyst live against a canadian_data_limited=true fixture --
-    real output caveats match their own prompts' actual declared phrases exactly
-    (`{has_filing_digest}`'s "Filing depth limited: ..." for RSRCH -- renamed from
-    `{sedar_filing_available}` 2026-09-23, see research_sources_bundle.py, after a live AAPL
-    run showed the old wording's "Canadian filing depth limited" phrase leaking into a US
-    stock's real output --
-    `{canadian_sentiment_inferred}`'s "Article sentiment is scored by a local LLM..." for
-    SENT), and neither mentions Finnhub at all. This function will keep failing in a real
-    sweep after this fix -- correctly, just for a different reason than the cap did. Recommend
-    a fast-follow ticket to rewrite this check against the two real, agent-specific triggers;
-    out of scope here (caveat-wording drift, not a D6 field removal)."""
+    The required phrase itself was also stale before this fix: the previous
+    "Finnhub" text predated the same 2026-09-23 rewording and matched neither
+    agent's real prompt at all, so wiring this in unchanged would have
+    permanently failed every real Canadian-flagged Sentiment run. Now matches
+    `prompts/sentiment_analyst` v1.2 rule 7. The reliability_score<=70 cap
+    this function used to also enforce is gone (86bbummwp / D6: never
+    LLM-produced anymore).
+    """
+    if not canadian_sentiment_inferred:
+        return True, []
     errors: list[str] = []
-    REQUIRED_PHRASE = "Finnhub"
+    REQUIRED_PHRASE = "scored from headlines only"
     caveats = output.get("caveats", [])
     combined = " ".join(str(c) for c in caveats)
 
     if REQUIRED_PHRASE.lower() not in combined.lower():
         errors.append(
-            f"{agent_id}: canadian_data_limited=true but mandatory Finnhub caveat phrase not found in caveats"
+            "SENT: canadian_sentiment_inferred=true but mandatory "
+            "'scored from headlines only' caveat phrase not found in caveats"
+        )
+
+    return len(errors) == 0, errors
+
+
+def validate_filing_depth_caveat(output: dict, has_filing_digest: bool) -> tuple[bool, list[str]]:
+    """Check that Stock Researcher includes the mandatory filing-depth caveat
+    when `has_filing_digest` is false (86bbummwp 1d). Market-agnostic by
+    design, NOT gated on any Canadian flag -- see `validate_canadian_caveat()`
+    above for why RSRCH was split out of that function entirely rather than
+    folded into it under a renamed condition.
+    """
+    if has_filing_digest:
+        return True, []
+    errors: list[str] = []
+    REQUIRED_PHRASE = "Filing depth limited"
+    caveats = output.get("caveats", [])
+    combined = " ".join(str(c) for c in caveats)
+
+    if REQUIRED_PHRASE.lower() not in combined.lower():
+        errors.append(
+            "RSRCH: has_filing_digest=false but mandatory 'Filing depth "
+            "limited' caveat phrase not found in caveats"
         )
 
     return len(errors) == 0, errors
