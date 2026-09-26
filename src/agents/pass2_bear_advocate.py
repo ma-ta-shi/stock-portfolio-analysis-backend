@@ -11,7 +11,7 @@ thesis_archetype vocabulary: same 5 values as Bull.
 At confidence <35: high-bar bear framing + numeric token in evidence required.
 """
 from agents.base import BaseRunner
-from agents.compression import build_pass2_user_message, extract_confidence_levels
+from agents.compression import build_pass2_user_message, extract_confidence_levels, extract_data_quality_levels
 from agents.prompts import fill, load_template
 from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.pass2 import validate_bear_advocate
@@ -25,7 +25,8 @@ def build_user_message(
 ) -> str:
     base = build_pass2_user_message(bundle, compressed_pass1, account_type)
     confidence_levels = extract_confidence_levels(compressed_pass1)
-    warnings = build_pass1_reliability_warnings(confidence_levels)
+    quality_levels = extract_data_quality_levels(compressed_pass1)
+    warnings = build_pass1_reliability_warnings(confidence_levels, agent_quality=quality_levels)
     if warnings:
         base += f"\n\nRELIABILITY WARNINGS: {warnings}"
     ctx = bundle.context
@@ -44,6 +45,9 @@ class BearAdvocateRunner(BaseRunner):
         ctx = bundle.context
         user_msg = build_user_message(bundle, compressed_pass1, account_type)
         confidence_levels = extract_confidence_levels(compressed_pass1)
+        # 86bbummwp Tier 3 -- see pass2_bull_advocate.py's own comment on this
+        # same addition for why both signals are shown, never collapsed.
+        quality_levels = extract_data_quality_levels(compressed_pass1)
         real_researcher_archetype = researcher_thesis_archetype(compressed_pass1)
         system_prompt = fill(
             load_template("bear_advocate"),
@@ -55,7 +59,9 @@ class BearAdvocateRunner(BaseRunner):
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
                 "memory_brief": "",
                 "calibration_brief": "",
-                "pass1_reliability_warnings": build_pass1_reliability_warnings(confidence_levels) or "(none)",
+                "pass1_reliability_warnings": build_pass1_reliability_warnings(
+                    confidence_levels, agent_quality=quality_levels
+                ) or "(none)",
                 "researcher_thesis_archetype": real_researcher_archetype,
             },
         )

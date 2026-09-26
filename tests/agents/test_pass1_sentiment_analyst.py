@@ -327,6 +327,22 @@ def test_validate_with_caveats_passes_high_confidence_with_anomaly_when_caveat_p
     assert passed, errors
 
 
+def test_validate_with_caveats_peer_sentiment_alone_never_trips_the_rule():
+    """Regression test (86bbummwp Tier 3): peer_sentiment is permanently
+    absent (hardcoded empty in data/pipeline.py's DataBundle assembly, never
+    a real per-run signal) -- confirmed live that the follow-on's own
+    validator wiring passed material_absent unfiltered here, so this real
+    output would have failed validation on every single high-confidence run
+    solely because of a permanent gap that isn't this run's fault. The real
+    run() call site now excludes it the same way RSRCH excludes
+    transcript_excerpts and Tax Strategist excludes wht -- this proves the
+    rule itself would pass cleanly once that exclusion is applied, matching
+    the equivalent regression tests already written for RSRCH/TAX."""
+    out = _valid_sentiment_analyst_output(caveats=[])
+    passed, errors = _validate(out, canadian_sentiment_inferred=False, material_absent=[])
+    assert passed, errors
+
+
 # ---------- _stale_data (86bbummwp Tier 2) ----------
 
 
