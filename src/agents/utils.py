@@ -143,6 +143,55 @@ def render_data_coverage_line(field_presence: dict[str, bool], gap_sentences: di
     return "standard." if not gaps else "; ".join(gaps) + "."
 
 
+def to_data_coverage(field_presence: dict[str, bool], gap_sentences: dict[str, str]) -> dict:
+    """D6's `data_coverage` mechanical flag (86bbummwp Tier 2), structured
+    (`{"present": [...], "absent": [...]}`) rather than prose -- for
+    `agent_outputs.data_coverage`, distinct from `render_data_coverage_line()`'s
+    prompt-facing sentence above.
+
+    Same two-argument shape and same filtering as `render_data_coverage_line()`
+    -- deliberately: neither Fundamental nor Macro Economist has a
+    separately-materialized "coarse" presence dict to hand to a bare
+    `field_presence`-only function (Fundamental's own full `field_presence` has
+    15 granular ratio keys it never wants surfaced here; Macro's own
+    `commodities`-relevance filtering happens inline inside its own
+    `_data_coverage_line()`, not as a reusable object) -- so this filters to
+    `gap_sentences`' own keys exactly the way the prose renderer already does,
+    letting every agent call this with the exact same two arguments it already
+    passes to `render_data_coverage_line()`, with no new object to build or
+    keep in sync between the two representations.
+    """
+    present = []
+    absent = []
+    for field, is_present in field_presence.items():
+        if field not in gap_sentences:
+            continue
+        (present if is_present else absent).append(field)
+    return {"present": present, "absent": absent}
+
+
+def render_data_warnings(anomalies: list[str], stale_data: list[str]) -> str:
+    """Combines D6's `anomalies` (86bbummwp Tier 2, already full sentences --
+    e.g. "US yield curve is inverted") and `stale_data` (bare series/category
+    names -- e.g. `["rate", "cpi"]`) into the one `data_warnings` prompt
+    placeholder every Pass 1 template already declares.
+
+    Generalizes Technical Analyst's own former `_data_warnings_line()` (which
+    only ever handled `anomalies`) to also cover `stale_data`, discovered
+    missing during this same investigation: `self.last_stale_data` was
+    computed and stored on every one of the 5 agents but never shown to the
+    model anywhere, even for Technical Analyst, whose `data_warnings` wiring
+    was otherwise the one agent doing this right since Tier 1b.
+
+    Returns `""` when both lists are empty (`"; ".join([])` on its own, no
+    `or ""` fallback needed), matching every prior version of this line.
+    """
+    parts = list(anomalies)
+    if stale_data:
+        parts.append(f"stale data: {', '.join(stale_data)}")
+    return "; ".join(parts)
+
+
 def build_pass1_reliability_warnings(agent_confidence: dict[str, str]) -> str:
     """Format: RSRCH: high (OK) | FUND: medium (caution) | TECH: low (unreliable) | ...
     Returns empty string when all agents are 'high'.

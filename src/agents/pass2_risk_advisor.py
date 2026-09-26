@@ -33,11 +33,28 @@ downside_scenarios: 2-4 items, no two within ±2% estimated_impact_pct.
 stop_loss_suggestion: null for TFSA/RRSP medium/long-term; numeric for Trading short-term.
 position_size_recommendation format: "X-Y%".
 key_factors: sentiment must be negative|neutral only.
+
+86bbummwp follow-on: Stage A's own `_validate_with_caveats()` now composes
+`validate_risk_advisor_stage_a` with a confidence/data-quality coupling rule
+-- if `groundedness_score` is high (see `_validate_with_caveats`'s own
+docstring for the threshold) while this agent's own `field_presence` shows a
+real gap and `caveats` is empty, validation fails and forces a retry. Real
+evidence this matters: `groundedness_score` was found to be exactly 92 on
+every real row queried, regardless of ticker or data completeness -- see
+`agents/validators/common.py::validate_confidence_requires_caveat_when_flagged`
+for the shared mechanism (also used by all 5 Pass 1 agents and Tax
+Strategist).
 """
+from functools import partial
+
 from agents.base import BaseRunner
 from agents.compression import build_pass2_user_message, extract_confidence_levels
 from agents.prompts import fill, load_template
 from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
+from agents.validators.common import (
+    GROUNDEDNESS_HIGH_THRESHOLD,
+    validate_confidence_requires_caveat_when_flagged,
+)
 from agents.validators.pass2 import validate_risk_advisor_stage_a, validate_risk_advisor_stage_b
 from data.schemas.data_bundle import DataBundle
 
@@ -89,6 +106,34 @@ def _precomputed_risk_metrics(bundle: DataBundle) -> tuple[str, dict[str, bool]]
         "avg_dollar_volume": rm.get("adv_millions") is not None,
     }
     return text, field_presence
+
+
+def _validate_with_caveats(output: dict, material_absent: list[str]) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp follow-on) -- Risk Advisor Stage A
+    previously called `validate_risk_advisor_stage_a` bare, no composition at
+    all. Adds the same confidence/data-quality coupling rule as the 5 Pass 1
+    agents, adapted for `groundedness_score` (numeric 0-100, not an enum) --
+    `is_high` is `groundedness_score >= GROUNDEDNESS_HIGH_THRESHOLD` (shared
+    with Tax Strategist -- see that constant's own comment in
+    `validators/common.py` for why 85 is a starting guess, not a verified
+    number). `material_absent` comes from this agent's own `field_presence`
+    (`beta`/`annualized_vol`/
+    `max_drawdown_1yr`/`max_drawdown_3yr`/`avg_dollar_volume`) -- all 5 are
+    real per-run signals (insufficient price history for this specific
+    ticker/run), unlike Stock Researcher's `transcript_excerpts` or Tax
+    Strategist's `wht`, so no exclusion is needed here. Real evidence this
+    rule matters: `groundedness_score` was found to be exactly 92 on all 13
+    real rows queried, regardless of ticker or real data completeness -- see
+    `validate_confidence_requires_caveat_when_flagged`'s own docstring for
+    the general mechanism."""
+    passed, errors = validate_risk_advisor_stage_a(output)
+    gs = output.get("groundedness_score")
+    cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
+        output,
+        is_high=isinstance(gs, (int, float)) and gs >= GROUNDEDNESS_HIGH_THRESHOLD,
+        material_absent=material_absent,
+    )
+    return passed and cq_passed, errors + cq_errors
 
 
 def build_user_message(
@@ -162,10 +207,11 @@ class RiskAdvisorRunner(BaseRunner):
                 "memory_brief": "",
             },
         )
+        material_absent = [k for k, v in field_presence.items() if not v]
         result, errors, context = await self.call_with_validation_start(
             system_prompt,
             user_msg,
-            validate_risk_advisor_stage_a,
+            partial(_validate_with_caveats, material_absent=material_absent),
             max_tokens=5000,
             temperature=0.3,
         )

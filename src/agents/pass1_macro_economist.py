@@ -49,15 +49,42 @@ the field-by-field note above) -- that's the correct, intended `False` for
 `input_field_coverage`'s own purpose, but it made every non-commodity-sensitive
 stock (the large majority) get a false "no sector commodity data available"
 line, exactly the active-misinformation problem this ticket exists to remove.
-`_data_coverage_line()` now drops the `commodities` key entirely when the
+`_coverage_presence()` now drops the `commodities` key entirely when the
 sector isn't commodity-relevant, the same "absent means not applicable"
 treatment already used for `statcan` -- confirmed live: AAPL/SHOP.TO/WELL.TO/
 RDDT/RY.TO (none commodity-sensitive) all reported this false gap before the
 fix, and reported "standard."/no commodities mention after it.
+
+86bbummwp Tier 2: `_coverage_presence()` is factored out of `_data_coverage_line()`
+(pulled out during this round, not duplicated) so the one piece of real
+conditional logic here -- dropping `commodities` when not sector-relevant --
+has a single source of truth, shared by both the prose line
+(`render_data_coverage_line()`) and the new structured `data_coverage` flag
+(`to_data_coverage()`).
+
+86bbummwp Tier 2, `stale_data`: real per-series age fields already exist
+(`*_age_days`) but were, until now, only ever read as presence booleans
+(`age_days is not None`), never compared to a threshold. A UNIFORM threshold
+across all 8 series would be wrong -- checked `_latest_age_days()` directly
+(below): it's the age of the most recently *released* data point, and
+economic series don't release on the same cadence. Daily/market series
+(policy rate, FX, VIX) get a short threshold; monthly series (CPI,
+unemployment, StatCan) get a threshold sized to survive a normal release lag,
+not a calendar guess; GDP (quarterly) wider still. `age is None` (a fetch
+failure) is NOT flagged here -- that's `data_coverage`'s job, and staleness
+can't be computed without a value to measure in the first place.
+
+86bbummwp Tier 2, `anomalies`: a threshold layer on top of already-computed
+classifiers (`_curve_shape()`, `_vix_regime()`) and delta fields, none of
+which were ever flagged as noteworthy before now -- just rendered as plain
+values.
 """
+from functools import partial
+
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import render_data_coverage_line
+from agents.utils import render_data_coverage_line, render_data_warnings, to_data_coverage
+from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_macro_economist
 from data.schemas.data_bundle import DataBundle
 from data.schemas.macro_sources_bundle import MacroSourcesBundle
@@ -74,11 +101,83 @@ _COVERAGE_GAP_SENTENCES = {
     "statcan": "no Statistics Canada demand indicator data available",
 }
 
+_STALE_DAILY_DAYS = 7        # policy rate, FX, VIX, commodities -- real market/daily series
+_STALE_MONTHLY_DAYS = 45     # CPI, unemployment, StatCan -- survives a normal ~30d release lag
+_STALE_QUARTERLY_DAYS = 100  # GDP -- survives a normal ~90d release lag
+
+# series -> MacroSourcesBundle age field, for the always-applicable series
+# (commodities/statcan are conditional -- handled separately below).
+_STALE_THRESHOLDS = {
+    "rate": ("policy_rate_age_days", _STALE_DAILY_DAYS),
+    "cpi": ("cpi_age_days", _STALE_MONTHLY_DAYS),
+    "gdp": ("gdp_age_days", _STALE_QUARTERLY_DAYS),
+    "employment": ("unemployment_age_days", _STALE_MONTHLY_DAYS),
+    "fx": ("cad_usd_age_days", _STALE_DAILY_DAYS),
+    "vix": ("vix_age_days", _STALE_DAILY_DAYS),
+}
+
+# field -> "an absolute delta at or beyond this magnitude is an unusually
+# large move" -- not exact science, starting points for a real design
+# decision (see module docstring).
+_LARGE_DELTA_THRESHOLDS = {
+    "policy_rate_90d_delta_bp": 100.0,     # a full percentage point in a quarter
+    "cpi_3m_delta_pp": 1.0,                # a 1pp inflation shift in 3 months
+    "cad_usd_90d_change_pct": 10.0,        # a 10% FX move in a quarter
+    "unemployment_6m_delta": 1.0,          # a 1pp unemployment shift in 6 months
+}
+
+
+def _stale_data(bundle: DataBundle) -> list[str]:
+    m = bundle.macro_sources
+    stale = [
+        series for series, (field, threshold) in _STALE_THRESHOLDS.items()
+        if (age := getattr(m, field)) is not None and age > threshold
+    ]
+    if (
+        m.sector_commodity_relevant
+        and m.sector_commodity_age_days is not None
+        and m.sector_commodity_age_days > _STALE_DAILY_DAYS
+    ):
+        stale.append("commodities")
+    if (
+        bundle.canadian_data_flags is not None
+        and m.statcan_age_days is not None
+        and m.statcan_age_days > _STALE_MONTHLY_DAYS
+    ):
+        stale.append("statcan")
+    return stale
+
+
+def _anomalies(bundle: DataBundle) -> list[str]:
+    m = bundle.macro_sources
+    flags = []
+    if m.us_curve_shape == "inverted":
+        flags.append("US yield curve is inverted")
+    if bundle.canadian_data_flags is not None and m.ca_curve_shape == "inverted":
+        flags.append("Canada yield curve is inverted")
+    if m.vix_regime == "high":
+        flags.append(f"VIX is in a high-volatility regime ({m.vix})")
+    for field, threshold in _LARGE_DELTA_THRESHOLDS.items():
+        value = getattr(m, field)
+        if value is not None and abs(value) >= threshold:
+            flags.append(f"{field}={value} is an unusually large move")
+    return flags
+
+
+def _coverage_presence(field_presence: dict[str, bool], sector_commodity_relevant: bool) -> dict[str, bool]:
+    """The one real conditional in this agent's coverage story: `commodities`
+    is not applicable at all (not a gap) for a non-commodity-sensitive sector.
+    Shared by both `_data_coverage_line()` and the structured `data_coverage`
+    flag so this isn't reimplemented twice."""
+    if sector_commodity_relevant:
+        return field_presence
+    return {k: v for k, v in field_presence.items() if k != "commodities"}
+
 
 def _data_coverage_line(field_presence: dict[str, bool], sector_commodity_relevant: bool) -> str:
-    if not sector_commodity_relevant:
-        field_presence = {k: v for k, v in field_presence.items() if k != "commodities"}
-    return render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
+    return render_data_coverage_line(
+        _coverage_presence(field_presence, sector_commodity_relevant), _COVERAGE_GAP_SENTENCES
+    )
 
 
 def _fmt(v, suffix: str = ""):
@@ -241,6 +340,33 @@ REMINDER: Your narrative must be 80-120 words (480-720 chars). This is strictly 
     return text, field_presence
 
 
+def _validate_with_caveats(
+    output: dict,
+    material_absent: list[str],
+    anomalies: list[str],
+    stale_data: list[str],
+) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp follow-on) -- this agent had no
+    caveat-specific validator to compose with `validate_macro_economist`
+    before now (unlike Technical/Sentiment/Stock Researcher), so this
+    wrapper is new here, not extended, but follows the identical pattern:
+    the base schema check plus the new confidence/data-quality coupling
+    rule, the backstop for the real, live case this whole follow-on plan
+    started from -- a real Macro Economist run claiming
+    `analysis_confidence: "high"` while its own stale_data flag showed 4
+    genuinely stale series. See
+    `validate_confidence_requires_caveat_when_flagged`'s own docstring."""
+    passed, errors = validate_macro_economist(output)
+    cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
+        output,
+        is_high=output.get("analysis_confidence") == "high",
+        material_absent=material_absent,
+        anomalies=anomalies,
+        stale_data=stale_data,
+    )
+    return passed and cq_passed, errors + cq_errors
+
+
 class MacroEconomistRunner(BaseRunner):
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "MACRO"
@@ -250,6 +376,14 @@ class MacroEconomistRunner(BaseRunner):
         # failed call still records whether its own input was already
         # incomplete.
         self.last_field_coverage = field_presence
+        is_commodity_relevant = bundle.macro_sources.sector_commodity_relevant
+        # 86bbummwp Tier 2 -- D6's structured data_coverage flag, from the same
+        # coverage_presence() filtering the prose line below already applies.
+        self.last_data_coverage = to_data_coverage(
+            _coverage_presence(field_presence, is_commodity_relevant), _COVERAGE_GAP_SENTENCES
+        )
+        self.last_stale_data = _stale_data(bundle)
+        self.last_anomalies = _anomalies(bundle)
         system_prompt = fill(
             load_template("macro_economist"),
             {
@@ -258,10 +392,8 @@ class MacroEconomistRunner(BaseRunner):
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "data_coverage_line": _data_coverage_line(
-                    field_presence, bundle.macro_sources.sector_commodity_relevant
-                ),
-                "data_warnings": "",
+                "data_coverage_line": _data_coverage_line(field_presence, is_commodity_relevant),
+                "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
                 "memory_brief": "",
                 "accuracy_brief": "",
                 "currency_exposure_hint": "",
@@ -271,7 +403,12 @@ class MacroEconomistRunner(BaseRunner):
         return await self.call_with_validation(
             system_prompt,
             user_msg,
-            validate_macro_economist,
+            partial(
+                _validate_with_caveats,
+                material_absent=self.last_data_coverage["absent"],
+                anomalies=self.last_anomalies,
+                stale_data=self.last_stale_data,
+            ),
             max_tokens=3000,
             temperature=0.3,
         )

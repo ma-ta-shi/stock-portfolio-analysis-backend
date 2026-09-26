@@ -113,6 +113,11 @@ class DataBundle(ContractModel):
     # missing. A quality/distortion flag, not a presence flag -- deliberately NOT folded
     # into input_field_coverage's {field: bool} map, which only answers "was this
     # present," not "is this present value trustworthy."
+    latest_financials_period_end: str | None  # ISO "YYYY-MM-DD", the newest quarter's
+    # own period_end (fundamentals.py::compute_all()'s own new return key, 86bbummwp
+    # Tier 2) -- was fetched (NormalizedFinancials.quarters[0]["period_end"]) but never
+    # forwarded past compute_all() before this. The only real freshness signal
+    # Fundamental Analyst has anywhere; None when quarters is empty.
 
     # --- Technical Analyst (Pass 1) ---
     technical_indicators: dict

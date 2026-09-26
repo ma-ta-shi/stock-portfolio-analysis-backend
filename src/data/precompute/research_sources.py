@@ -1012,8 +1012,19 @@ async def build_research_sources(
         if latest_filing_date
         else None
     )
+    # .date() on both sides, matching latest_filing_age_days right above --
+    # found live (86bbummwp Tier 2, 2026-09-25) while adding the first real
+    # consumer of this field (Stock Researcher's new stale_data flag):
+    # item.date can be timezone-aware (some news sources attach tzinfo) while
+    # the bare datetime.now() here is naive, and subtracting them raises
+    # "can't subtract offset-naive and offset-aware datetimes" -- the exact
+    # bug also caught and fixed in pass1_sentiment_analyst.py's own
+    # _stale_data() for the same reason. This field had no real consumer
+    # before now, so the crash was latent, never actually exercised.
     latest_news_age_days = (
-        (datetime.now() - max(item.date for item in news_items)).days if news_items else None
+        (datetime.now().date() - max(item.date for item in news_items).date()).days
+        if news_items
+        else None
     )
 
     return ResearchSourcesBundle(

@@ -59,28 +59,93 @@ never mechanically checked. This is a market-agnostic requirement, not a
 Canadian one, despite living in `agents/validators/pass1.py` next to
 `validate_canadian_caveat` -- see that function's own docstring for why RSRCH
 was split out of it entirely rather than folded in under a renamed flag.
+
+86bbummwp Tier 2: D6's mechanical flags, now real, stored fields on
+`agent_outputs`.
+- `data_coverage`: NOT built via the shared `to_data_coverage()` helper (see
+  `agents/utils.py`) -- that helper mirrors `render_data_coverage_line()`'s
+  own `(field_presence: dict[str, bool], gap_sentences)` shape, which doesn't
+  fit here: this agent's own `_data_coverage_line()` reads
+  `missing_sources_list` (a `list[str]`), not a presence dict, for the exact
+  same reason it was never migrated to `render_data_coverage_line()` in Tier
+  1. `_data_coverage()` below mirrors `_data_coverage_line()`'s own logic
+  instead, so both representations of the same underlying signal stay in
+  sync by construction, not by convention.
+- `anomalies`: one new cross-check, `buyback_activity`/`insider_net_direction_90d`
+  computed independently from the same insider-transaction fetch
+  (`precompute/research_sources.py`) and never compared until now. Real,
+  correct, cheap logic -- but `_compute_buyback_activity()`'s own docstring
+  documents that `"active"` is structurally rare for both markets (Form 4
+  doesn't capture large-scale US buybacks; the CA aggregate fallback
+  hardcodes `is_issuer=False`), so don't expect this to fire often in
+  practice.
+- `stale_data`: `latest_filing_age_days`/`latest_news_age_days` are real,
+  already-computed fields (`ResearchSourcesBundle`), same "age of latest
+  item, not fetch recency" shape as Macro Economist's own age fields -- a
+  filing filed 80 days ago is completely normal (companies report roughly
+  quarterly), so the threshold has to survive a normal filing cycle, not
+  flag most companies as stale most of the time. `latest_transcript_age_days`
+  is permanently `None` today (D3, transcripts don't exist yet) -- not
+  flagged here, that's a `data_coverage` gap (already tracked via
+  `missing_sources_list`), not a staleness signal; nothing to measure an age
+  from in the first place.
 """
 from functools import partial
 
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField
+from agents.utils import RenderedField, render_data_warnings
+from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_filing_depth_caveat, validate_stock_researcher
 from data.schemas.data_bundle import DataBundle
 
+_COVERAGE_SOURCES = ("filing_digests", "peer_blocks", "news_items")
+_STALE_FILING_DAYS = 120  # ~1 quarter (90d) plus a buffer for real-world reporting lag
+_STALE_NEWS_DAYS = 30     # no fresh news at all in a month is a real gap worth flagging
 
-def _validate_with_caveats(output: dict, has_filing_digest: bool) -> tuple[bool, list[str]]:
-    """Composing validator (86bbummwp 1d) -- merges the base schema check
+
+def _validate_with_caveats(
+    output: dict,
+    has_filing_digest: bool,
+    material_absent: list[str],
+    anomalies: list[str],
+    stale_data: list[str],
+) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp 1d, extended by the follow-on
+    confidence/data-quality coupling rule) -- merges the base schema check
     with the mandatory filing-depth caveat, the same closure-composition
     pattern as pass1_technical_analyst.py's own `_validate_with_caveats`
     (`call_with_validation()`'s validator callable takes exactly one
-    positional arg, so `has_filing_digest` is closed over via `partial()`
+    positional arg, so every extra param here is closed over via `partial()`
     at the call site instead). The real prompt already tells the model this
     caveat is mandatory when the flag is false (rule 5) -- this only makes
-    an already-visible instruction mechanically enforced, not a new one."""
+    an already-visible instruction mechanically enforced, not a new one.
+
+    `material_absent` is the caller's own `self.last_data_coverage["absent"]`
+    with `"transcript_excerpts"` already excluded -- that item is PERMANENTLY
+    absent (D3, transcripts don't exist in this system at all yet), so it
+    would otherwise trip the new confidence/data-quality rule on every single
+    run regardless of real data quality. See
+    `validate_confidence_requires_caveat_when_flagged`'s own docstring.
+
+    Note: `validate_stock_researcher`'s own schema already requires
+    `caveats` to have >=1 item on every call, unconditionally -- so the new
+    rule's own "caveats is empty" branch can never actually be the deciding
+    factor here (any output that reaches it already satisfies that base
+    requirement, or already failed for that unrelated reason). Composed
+    anyway for uniformity across all 7 call sites, and in case that base
+    bound is ever loosened -- not dead code removed, just currently
+    non-load-bearing for this one agent specifically."""
     passed, errors = validate_stock_researcher(output)
     fd_passed, fd_errors = validate_filing_depth_caveat(output, has_filing_digest)
-    return passed and fd_passed, errors + fd_errors
+    cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
+        output,
+        is_high=output.get("analysis_confidence") == "high",
+        material_absent=material_absent,
+        anomalies=anomalies,
+        stale_data=stale_data,
+    )
+    return passed and fd_passed and cq_passed, errors + fd_errors + cq_errors
 
 
 def _data_coverage_line(bundle: DataBundle) -> str:
@@ -95,6 +160,42 @@ def _data_coverage_line(bundle: DataBundle) -> str:
     # Permanent, not conditional on this run -- D3, see module docstring.
     gaps.append("earnings transcript excerpts are not available (not yet built into the data pipeline)")
     return "standard." if not gaps else "; ".join(gaps) + "."
+
+
+def _data_coverage(bundle: DataBundle) -> dict:
+    """D6's structured data_coverage flag (86bbummwp Tier 2) -- mirrors
+    `_data_coverage_line()`'s own logic exactly (same 3 conditional sources,
+    same permanent transcript-excerpts gap) so the two representations can't
+    drift apart."""
+    missing = set(bundle.research_sources.missing_sources_list)
+    present = [s for s in _COVERAGE_SOURCES if s not in missing]
+    absent = [s for s in _COVERAGE_SOURCES if s in missing]
+    absent.append("transcript_excerpts")  # permanent, D3 -- see module docstring
+    return {"present": present, "absent": absent}
+
+
+def _anomalies(bundle: DataBundle) -> list[str]:
+    """D6's `anomalies` flag (86bbummwp Tier 2) -- one cross-check between two
+    management-signal fields computed independently from the same
+    insider-transaction fetch (`precompute/research_sources.py`) and never
+    compared before now. See module docstring for the real-world caveat on
+    how often `buyback_activity == "active"` actually occurs."""
+    ms = bundle.research_sources.management_signals
+    if ms.buyback_activity == "active" and ms.insider_net_direction_90d == "selling":
+        return ["buyback program active while insiders are net sellers over the past 90 days"]
+    return []
+
+
+def _stale_data(bundle: DataBundle) -> list[str]:
+    """D6's `stale_data` flag (86bbummwp Tier 2) -- see module docstring for
+    why `latest_transcript_age_days` is never checked here."""
+    rs = bundle.research_sources
+    stale = []
+    if rs.latest_filing_age_days is not None and rs.latest_filing_age_days > _STALE_FILING_DAYS:
+        stale.append("filings")
+    if rs.latest_news_age_days is not None and rs.latest_news_age_days > _STALE_NEWS_DAYS:
+        stale.append("news")
+    return stale
 
 
 def _business_description(bundle: DataBundle) -> RenderedField:
@@ -286,6 +387,11 @@ class StockResearcherRunner(BaseRunner):
         # incomplete (see _agent_output_row's own comment on why that's
         # read regardless of completion status).
         self.last_field_coverage = field_presence
+        # 86bbummwp Tier 2 -- D6's mechanical flags, set here for the same
+        # reason as last_field_coverage above.
+        self.last_data_coverage = _data_coverage(bundle)
+        self.last_anomalies = _anomalies(bundle)
+        self.last_stale_data = _stale_data(bundle)
         system_prompt = fill(
             load_template("stock_researcher"),
             {
@@ -298,7 +404,7 @@ class StockResearcherRunner(BaseRunner):
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
                 "data_coverage_line": _data_coverage_line(bundle),
-                "data_warnings": "",
+                "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
                 "memory_brief": "",
                 "sector_moat_hint": "",
                 "has_filing_digest": str(bundle.research_sources.has_filing_digest).lower(),
@@ -308,10 +414,20 @@ class StockResearcherRunner(BaseRunner):
                 "peer_2_token": peers[1].peer_id if len(peers) > 1 else "another peer",
             },
         )
+        # transcript_excerpts is permanently absent (D3) -- excluded here, not in
+        # _data_coverage() itself, so the stored/badge-facing fact stays untouched
+        # while the new confidence/data-quality rule doesn't fire on it every run.
+        material_absent = [a for a in self.last_data_coverage["absent"] if a != "transcript_excerpts"]
         return await self.call_with_validation(
             system_prompt,
             user_msg,
-            partial(_validate_with_caveats, has_filing_digest=bundle.research_sources.has_filing_digest),
+            partial(
+                _validate_with_caveats,
+                has_filing_digest=bundle.research_sources.has_filing_digest,
+                material_absent=material_absent,
+                anomalies=self.last_anomalies,
+                stale_data=self.last_stale_data,
+            ),
             max_tokens=4000,
             temperature=0.3,
         )

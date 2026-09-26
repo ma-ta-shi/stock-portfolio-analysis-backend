@@ -47,12 +47,55 @@ NOT a clean port -- field-by-field notes, each verified against
   `peers_block`/`earnings_surprises`, not all 15 per-ratio keys, which stay
   granular-only in `input_field_coverage` and would be too noisy for a single
   prose line.
+
+86bbummwp Tier 2: D6's mechanical flags, now real, stored fields on
+`agent_outputs`.
+- `data_coverage`: built via the shared `to_data_coverage()` helper from the
+  same `field_presence`/`_COVERAGE_GAP_SENTENCES` pair already used for the
+  prose line above -- no new object needed.
+- `anomalies`: extends `_valid_peer_value()`'s already-tuned plausibility
+  ranges (`precompute/fundamentals.py::_PEER_METRIC_VALID_RANGE`) to the
+  PRIMARY stock's own values, not just peers. Deliberately a separate,
+  additive check in THIS file, not a change to `_valid_peer_value()` or its
+  call sites in `fundamentals.py` -- the primary stock's own out-of-range
+  number still renders exactly as before (a real, if implausible, fact the
+  LLM should see), this only adds a second, mechanical flag alongside it.
+  Only 6 of the range dict's 8 metrics have a real primary-stock field
+  anywhere on `DataBundle` -- `pb_ratio`/`ev_ebitda` are peer-only fields
+  with no subject-stock equivalent (confirmed directly against
+  `valuation_metrics`'s real keys), so those two are skipped here, not
+  fabricated.
+- `stale_data`: the one item needing an actual precompute-layer change, not
+  just orchestrator wiring -- `latest_financials_period_end` (real, already
+  fetched on every quarter, never forwarded past `compute_all()` before this)
+  is now a real field on `DataBundle`
+  (`fundamentals.py::compute_all()` + `data/pipeline.py`'s bundle assembly +
+  `data/schemas/data_bundle.py`), giving Fundamental Analyst its first real
+  freshness signal anywhere. Threshold is D6's own suggested ~180 days
+  (`docs/technical/pass1-confidence-model.md`).
 """
+from datetime import date
+from functools import partial
+
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField, render_data_coverage_line
+from agents.utils import RenderedField, render_data_coverage_line, render_data_warnings, to_data_coverage
+from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_fundamental_analyst
+from data.precompute.fundamentals import _PEER_METRIC_VALID_RANGE
 from data.schemas.data_bundle import DataBundle
+
+# metric name -> (DataBundle attribute, dict key) for the 6 of
+# _PEER_METRIC_VALID_RANGE's 8 metrics that have a real primary-stock field.
+_PRIMARY_PLAUSIBILITY_FIELDS = {
+    "pe_ratio": ("valuation_metrics", "pe_ratio"),
+    "debt_to_equity": ("balance_sheet_metrics", "debt_to_equity"),
+    "revenue_growth_yoy": ("growth_metrics", "revenue_growth_yoy"),
+    "gross_margin": ("profitability_metrics", "gross_margin"),
+    "operating_margin": ("profitability_metrics", "operating_margin"),
+    "roe": ("profitability_metrics", "roe"),
+}
+_STALE_FINANCIALS_DAYS = 180  # D6's own suggested threshold
 
 # Maps this prompt's own rendered field name to its "bucket.key" entry in
 # compute_all()'s missing_fields list (data/precompute/fundamentals.py) --
@@ -109,6 +152,57 @@ def _data_coverage_line(field_presence: dict[str, bool]) -> str:
 def _missing_fields_presence(bundle: DataBundle) -> dict[str, bool]:
     missing = set(bundle.missing_fields)
     return {name: full_key not in missing for name, full_key in _MISSING_FIELDS_MAP.items()}
+
+
+def _anomalies(bundle: DataBundle) -> list[str]:
+    """D6's `anomalies` flag (86bbummwp Tier 2) -- see module docstring for
+    why this is a separate, additive check rather than a change to
+    `_valid_peer_value()` itself."""
+    flags = []
+    for metric, (bucket_name, field) in _PRIMARY_PLAUSIBILITY_FIELDS.items():
+        value = getattr(bundle, bucket_name).get(field)
+        if value is None:
+            continue
+        low, high = _PEER_METRIC_VALID_RANGE[metric]
+        if not (low < value < high):
+            flags.append(f"{field}={value} is outside the plausible range ({low}, {high})")
+    return flags
+
+
+def _stale_data(bundle: DataBundle) -> list[str]:
+    """D6's `stale_data` flag (86bbummwp Tier 2) -- see module docstring for
+    why this required a precompute-layer change."""
+    period_end = bundle.latest_financials_period_end
+    if period_end is None:
+        return []
+    age_days = (bundle.data_vintage.date() - date.fromisoformat(period_end)).days
+    return ["financials"] if age_days > _STALE_FINANCIALS_DAYS else []
+
+
+def _validate_with_caveats(
+    output: dict,
+    material_absent: list[str],
+    anomalies: list[str],
+    stale_data: list[str],
+) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp follow-on) -- this agent had no
+    caveat-specific validator to compose with `validate_fundamental_analyst`
+    before now (unlike Technical/Sentiment/Stock Researcher), so this wrapper
+    is new here, not extended, but follows the identical pattern: the base
+    schema check plus the new confidence/data-quality coupling rule, the
+    backstop for a real, live case (Macro Economist claiming
+    `analysis_confidence: "high"` while its own stale_data flag showed real
+    staleness) -- see `validate_confidence_requires_caveat_when_flagged`'s
+    own docstring."""
+    passed, errors = validate_fundamental_analyst(output)
+    cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
+        output,
+        is_high=output.get("analysis_confidence") == "high",
+        material_absent=material_absent,
+        anomalies=anomalies,
+        stale_data=stale_data,
+    )
+    return passed and cq_passed, errors + cq_errors
 
 
 def _peers_text(bundle: DataBundle) -> RenderedField:
@@ -203,6 +297,11 @@ class FundamentalAnalystRunner(BaseRunner):
         # failed call still records whether its own input was already
         # incomplete.
         self.last_field_coverage = field_presence
+        # 86bbummwp Tier 2 -- D6's mechanical flags, set here for the same
+        # reason as last_field_coverage above.
+        self.last_data_coverage = to_data_coverage(field_presence, _COVERAGE_GAP_SENTENCES)
+        self.last_anomalies = _anomalies(bundle)
+        self.last_stale_data = _stale_data(bundle)
         system_prompt = fill(
             load_template("fundamental_analyst"),
             {
@@ -212,7 +311,7 @@ class FundamentalAnalystRunner(BaseRunner):
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
                 "data_coverage_line": _data_coverage_line(field_presence),
-                "data_warnings": "",
+                "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
                 "memory_brief": "",
                 "sector_specific_valuation_instruction": "",
             },
@@ -220,7 +319,12 @@ class FundamentalAnalystRunner(BaseRunner):
         return await self.call_with_validation(
             system_prompt,
             user_msg,
-            validate_fundamental_analyst,
+            partial(
+                _validate_with_caveats,
+                material_absent=self.last_data_coverage["absent"],
+                anomalies=self.last_anomalies,
+                stale_data=self.last_stale_data,
+            ),
             max_tokens=4000,
             temperature=0.3,
         )

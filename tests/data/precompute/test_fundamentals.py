@@ -715,11 +715,13 @@ def test_compute_all_happy_path_returns_full_shape():
         "quarters_available",
         "missing_fields",
         "currency_mismatch",
+        "latest_financials_period_end",
     }
     assert result["quarters_available"] == 5
     assert result["valuation_metrics"]["pe_ratio"] is not None
     assert result["dividend_info"]["dividend_yield"] is not None
     assert result["currency_mismatch"] is None
+    assert result["latest_financials_period_end"] == "2026-06-30"  # newest quarter, _QUARTERS[0]
 
 
 def test_compute_all_currency_mismatch_is_marked_not_raised():
@@ -745,6 +747,14 @@ def test_compute_all_missing_fields_lists_none_valued_keys():
     # No analyst_estimates/earnings_surprises passed -> both stay None,
     # correctly flagged as missing (86bbdu04a).
     assert "valuation_metrics.forward_pe" in result["missing_fields"]
+
+
+def test_compute_all_latest_financials_period_end_none_when_no_quarters():
+    """86bbummwp Tier 2 -- nothing to report a period_end from when the
+    company has zero reported quarters at all."""
+    empty_fin = _fin(quarters=[], annual=[])
+    result = compute_all(empty_fin, _price_info(), [], [])
+    assert result["latest_financials_period_end"] is None
 
 
 def test_compute_all_wires_analyst_estimates_and_earnings_surprises():
