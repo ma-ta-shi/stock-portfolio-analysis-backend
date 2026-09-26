@@ -90,6 +90,7 @@ Produce the structured output. Key fields:
 - **`dissent_note`**: 1-2 sentences on significant dissenting signals the investor should know about. Empty string if consensus or mild_dissent with no material dissenters.
 - **`parallel_predictions`**: 1-month and 3-month directional calls reusing your Stage 2 reasoning. Must be internally consistent with the primary outlook unless you cite a specific reason for divergence.
   - **Confidence differentiation**: each prediction's `confidence` value must correlate with (a) the clarity of the near-term catalyst named in the input payload, (b) whether TECH and RSRCH `analysis_confidence` is "high" specifically for the 1-month horizon, plus FUND and RSRCH for the 3-month horizon, and (c) the time horizon relative to the next known event. Flat confidences across stocks indicate the field is being filled out by default rather than calibrated — do not do this.
+    A Pass 1 agent's own `analysis_confidence` is its self-judgment, not a mechanical fact about its inputs — the payload also shows each agent's mechanical `quality` (stale data, anomalies, or coverage gaps). If the relevant agent for that horizon (TECH/RSRCH for 1-month, FUND/RSRCH for 3-month) has `confidence=high` but `quality=low`, do NOT let that confidence alone justify a differentiated near-term prediction — the underlying data may not support the certainty the agent itself reports.
 
 ---
 

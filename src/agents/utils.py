@@ -192,9 +192,63 @@ def render_data_warnings(anomalies: list[str], stale_data: list[str]) -> str:
     return "; ".join(parts)
 
 
-def build_pass1_reliability_warnings(agent_confidence: dict[str, str]) -> str:
+def compute_data_quality_assessment(
+    stale_data: list[str], anomalies: list[str], material_absent: list[str]
+) -> str:
+    """D6 §3's mechanical `data_quality_assessment` (86bbummwp Tier 3) -- the
+    machine's own view of a single Pass 1 agent's INPUT quality, computed
+    purely from that agent's own already-real `stale_data`/`anomalies`/
+    `data_coverage.absent`, distinct from `analysis_confidence` (the model's
+    own judgment of whether it could still produce a coherent synthesis --
+    the two can and do legitimately diverge, which is the whole reason both
+    are shown to Pass 2/CIO side by side rather than collapsing one into the
+    other).
+
+    `material_absent` is the caller's own `data_coverage["absent"]` with any
+    permanently-structural items already excluded (Stock Researcher's
+    `transcript_excerpts`, Sentiment's `peer_sentiment`) -- same list already
+    built for `validate_confidence_requires_caveat_when_flagged`'s own
+    `material_absent` param, reused here rather than recomputed.
+
+    Open threshold decision, flagged rather than silently picked: an anomaly
+    always forces `"low"` outright (a real contradiction, never "minor",
+    unlike a single missing/stale field); 2+ combined stale/absent items is
+    the medium-to-low cutoff. Not calibrated against real data yet -- needs
+    the same live-verification pass every other threshold in this project
+    got before being treated as final.
+    """
+    if anomalies or len(stale_data) + len(material_absent) >= 2:
+        return "low"
+    if stale_data or material_absent:
+        return "medium"
+    return "high"
+
+
+_QUALITY_STATUS_LABELS = {"high": "OK", "medium": "caution", "low": "unreliable"}
+
+
+def build_pass1_reliability_warnings(
+    agent_confidence: dict[str, str], agent_quality: dict[str, str] | None = None
+) -> str:
     """Format: RSRCH: high (OK) | FUND: medium (caution) | TECH: low (unreliable) | ...
     Returns empty string when all agents are 'high'.
+
+    `agent_quality` (86bbummwp Tier 3) is optional and additive, keyed by the
+    same agent IDs -- when supplied, each segment gains a mechanical
+    `data_quality_assessment` alongside the model's own `analysis_confidence`:
+    `"MACRO: high (OK), quality=low"`. Deliberately does NOT collapse the two
+    into one combined verdict (see `compute_data_quality_assessment`'s own
+    docstring) -- Pass 2/CIO need to see BOTH per agent specifically to catch
+    an agent claiming high confidence while its own data quality is
+    mechanically low, exactly the case that motivated building this at all.
+
+    The all-clear gate now requires BOTH signals to be clean when
+    `agent_quality` is supplied -- with the old confidence-only gate, an
+    agent with `confidence=high` but `quality=low` would have suppressed
+    this whole line (every confidence "OK" -> return ""), silently hiding the
+    one divergence this signal exists to surface. Omitting `agent_quality`
+    entirely (the default) preserves the exact old behavior for any
+    existing caller.
     """
     parts = []
     all_ok = True
@@ -203,7 +257,13 @@ def build_pass1_reliability_warnings(agent_confidence: dict[str, str]) -> str:
         status = CONFIDENCE_STATUS_LABELS.get(confidence, "skipped")
         if status != "OK":
             all_ok = False
-        parts.append(f"{agent_id}: {confidence} ({status})")
+        segment = f"{agent_id}: {confidence} ({status})"
+        if agent_quality is not None:
+            quality = agent_quality.get(agent_id, "low")
+            if _QUALITY_STATUS_LABELS.get(quality, "unreliable") != "OK":
+                all_ok = False
+            segment += f", quality={quality}"
+        parts.append(segment)
     if all_ok:
         return ""
     return " | ".join(parts)

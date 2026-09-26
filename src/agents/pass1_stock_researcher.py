@@ -94,7 +94,7 @@ from functools import partial
 
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField, render_data_warnings
+from agents.utils import RenderedField, compute_data_quality_assessment, render_data_warnings
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_filing_depth_caveat, validate_stock_researcher
 from data.schemas.data_bundle import DataBundle
@@ -392,6 +392,16 @@ class StockResearcherRunner(BaseRunner):
         self.last_data_coverage = _data_coverage(bundle)
         self.last_anomalies = _anomalies(bundle)
         self.last_stale_data = _stale_data(bundle)
+        # transcript_excerpts is permanently absent (D3) -- excluded here, not in
+        # _data_coverage() itself, so the stored/badge-facing fact stays untouched
+        # while the confidence/data-quality rule and the new data_quality_assessment
+        # rollup below don't fire/downgrade on it every run.
+        material_absent = [a for a in self.last_data_coverage["absent"] if a != "transcript_excerpts"]
+        # 86bbummwp Tier 3 -- D6 section 3's per-agent mechanical data_quality_assessment,
+        # set here for the same reason as last_field_coverage above.
+        self.last_data_quality_assessment = compute_data_quality_assessment(
+            self.last_stale_data, self.last_anomalies, material_absent
+        )
         system_prompt = fill(
             load_template("stock_researcher"),
             {
@@ -414,10 +424,6 @@ class StockResearcherRunner(BaseRunner):
                 "peer_2_token": peers[1].peer_id if len(peers) > 1 else "another peer",
             },
         )
-        # transcript_excerpts is permanently absent (D3) -- excluded here, not in
-        # _data_coverage() itself, so the stored/badge-facing fact stays untouched
-        # while the new confidence/data-quality rule doesn't fire on it every run.
-        material_absent = [a for a in self.last_data_coverage["absent"] if a != "transcript_excerpts"]
         return await self.call_with_validation(
             system_prompt,
             user_msg,

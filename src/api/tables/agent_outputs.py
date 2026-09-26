@@ -26,6 +26,16 @@ class AgentOutput(Base):
     stale_data: Mapped[Optional[list]] = mapped_column(JSON)          # which series are stale
     anomalies: Mapped[Optional[list]] = mapped_column(JSON)           # pre-flight contradiction findings
     data_coverage: Mapped[Optional[dict]] = mapped_column(JSON)       # {"present": [...], "absent": [...]}
+    # D6 section 3's mechanical per-agent rollup (86bbummwp Tier 3) -- high|medium|low,
+    # computed purely from this same row's own stale_data/anomalies/data_coverage, distinct
+    # from analysis_confidence (the model's own judgment, which can legitimately diverge --
+    # an agent can claim high confidence while this is low, exactly the case this flag
+    # exists to surface to Pass 2/CIO). Deliberately NOT also rolled up into one combined
+    # cross-agent value anywhere -- see docs/technical/pass1-confidence-model.md's own D6
+    # section 3 for the spec, and 86bbummwp's Tier 3 plan for why the combined rollup it
+    # also names was concluded not to be built at all (misleading for a human viewer just
+    # as much as an LLM prompt, not just lacking a consumer).
+    data_quality_assessment: Mapped[Optional[str]] = mapped_column(String(10))
     # {field_name: bool} -- did this agent's own build_user_message() render
     # a real value for this field, or "N/A" (86bbwachy Phase 4). Set only for
     # the 7 call sites that consume raw DataBundle fields directly (Stock

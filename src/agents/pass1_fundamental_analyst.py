@@ -79,7 +79,13 @@ from functools import partial
 
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField, render_data_coverage_line, render_data_warnings, to_data_coverage
+from agents.utils import (
+    RenderedField,
+    compute_data_quality_assessment,
+    render_data_coverage_line,
+    render_data_warnings,
+    to_data_coverage,
+)
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_fundamental_analyst
 from data.precompute.fundamentals import _PEER_METRIC_VALID_RANGE
@@ -302,6 +308,13 @@ class FundamentalAnalystRunner(BaseRunner):
         self.last_data_coverage = to_data_coverage(field_presence, _COVERAGE_GAP_SENTENCES)
         self.last_anomalies = _anomalies(bundle)
         self.last_stale_data = _stale_data(bundle)
+        # 86bbummwp Tier 3 -- D6 section 3's per-agent mechanical data_quality_assessment,
+        # set here for the same reason as last_field_coverage above. No permanent-absence
+        # exclusion needed here (unlike RSRCH/SENT) -- confirmed no hardcoded True/False
+        # literal exists anywhere in this agent's own field_presence construction.
+        self.last_data_quality_assessment = compute_data_quality_assessment(
+            self.last_stale_data, self.last_anomalies, self.last_data_coverage["absent"]
+        )
         system_prompt = fill(
             load_template("fundamental_analyst"),
             {
