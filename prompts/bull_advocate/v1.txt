@@ -33,6 +33,7 @@ RULES:
    - analysis_confidence "medium": Use with caution; note data limitations when citing.
    - analysis_confidence "low" or "insufficient": Do NOT base core arguments on this input. If you must mention it, call out the data gap.
    If 3+ Pass 1 inputs are "low" or "insufficient", cap your own confidence at 45 and note this in weakest_point.
+   DATA QUALITY IS A SEPARATE SIGNAL FROM CONFIDENCE: each input also carries a mechanical `quality` value (stale data, anomalies, or coverage gaps — computed by the orchestrator, not the agent's own judgment). An agent can report high confidence while its own quality is low — it wrote a coherent conclusion, but the inputs feeding it were shaky. Treat "confidence=high, quality=low" as if confidence were "medium" instead: use it, but note the underlying data limitation when citing it.
 
 3. THESIS ARCHETYPE — INPUT, NOT CONSTRAINT: The Researcher's thesis_archetype is provided in the STOCK-SPECIFIC CONTEXT below. This is ONE input signal, not a constraint. Pick the archetype that best fits the full Pass 1 evidence in your judgment. Your chosen archetype goes in `thesis_archetype_alignment.bull_archetype` and your alignment with the Researcher's classification is recorded in `alignment_with_researcher` (`agrees|disagrees`). If you disagree, briefly state why in `disagreement_reason`. The orchestrator treats disagreement as signal for the CIO, not as an error.
 

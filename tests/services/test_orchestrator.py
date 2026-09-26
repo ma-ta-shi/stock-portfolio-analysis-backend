@@ -158,6 +158,8 @@ class _StubRunner:
         self.last_stale_data = None
         self.last_anomalies = None
         self.last_data_coverage = None
+        # last_data_quality_assessment: 86bbummwp Tier 3 -- same pattern.
+        self.last_data_quality_assessment = None
         # None by default, matching BaseRunner's own pre-first-call state --
         # exercises _close_runner()'s real "session is None -> no-op"
         # branch. Tests that need to assert a session was actually closed
@@ -296,15 +298,17 @@ async def test_agent_output_input_field_coverage_null_for_out_of_scope_agent():
 
 
 async def test_agent_output_persists_mechanical_flags_when_runner_sets_them():
-    """86bbummwp Tier 2: a runner that stamps last_stale_data/last_anomalies/
-    last_data_coverage gets each persisted onto its own AgentOutput column,
-    the same getattr/None-default pattern as input_field_coverage above."""
+    """86bbummwp Tier 2 + Tier 3: a runner that stamps last_stale_data/
+    last_anomalies/last_data_coverage/last_data_quality_assessment gets each
+    persisted onto its own AgentOutput column, the same getattr/None-default
+    pattern as input_field_coverage above."""
     session = await _make_session()
     run = await _make_run(session)
     runner = _StubRunner(result={"analysis_confidence": "medium"})
     runner.last_stale_data = ["price"]
     runner.last_anomalies = [">25% gap on 2026-09-10 with no corresponding news item"]
     runner.last_data_coverage = {"present": ["news_block"], "absent": ["short_interest"]}
+    runner.last_data_quality_assessment = "low"
 
     _add_agent_output_and_calls(session, run, "TECH", "pass1", runner._result, [], runner)
     await session.commit()
@@ -315,21 +319,24 @@ async def test_agent_output_persists_mechanical_flags_when_runner_sets_them():
     assert row.stale_data == ["price"]
     assert row.anomalies == [">25% gap on 2026-09-10 with no corresponding news item"]
     assert row.data_coverage == {"present": ["news_block"], "absent": ["short_interest"]}
+    assert row.data_quality_assessment == "low"
 
 
 async def test_agent_output_mechanical_flags_null_for_agent_without_that_check():
-    """A runner that never sets last_stale_data/last_anomalies (in production,
-    every Pass 2/CIO/Shadow CIO runner, plus any future Pass 1 agent that
-    hasn't implemented a given check yet -- as of 86bbummwp Tier 2, all 5
-    Pass 1 agents implement all 3 flags) must read back None for the checks
-    it doesn't implement -- NOT an empty list, which would read as "checked,
-    found nothing" instead of "not implemented"."""
+    """A runner that never sets last_stale_data/last_anomalies/
+    last_data_quality_assessment (in production, every Pass 2/CIO/Shadow CIO
+    runner, plus any future Pass 1 agent that hasn't implemented a given
+    check yet -- as of 86bbummwp Tier 3, all 5 Pass 1 agents implement all 4)
+    must read back None for the checks it doesn't implement -- NOT an empty
+    list/string, which would read as "checked, found nothing" instead of
+    "not implemented"."""
     session = await _make_session()
     run = await _make_run(session)
     runner = _StubRunner(result={"analysis_confidence": "high"})
     runner.last_data_coverage = {"present": ["peers_block"], "absent": []}
     assert runner.last_stale_data is None
     assert runner.last_anomalies is None
+    assert runner.last_data_quality_assessment is None
 
     _add_agent_output_and_calls(session, run, "FUND", "pass1", runner._result, [], runner)
     await session.commit()
@@ -339,6 +346,7 @@ async def test_agent_output_mechanical_flags_null_for_agent_without_that_check()
     ).scalar_one()
     assert row.stale_data is None
     assert row.anomalies is None
+    assert row.data_quality_assessment is None
     assert row.data_coverage == {"present": ["peers_block"], "absent": []}
 
 

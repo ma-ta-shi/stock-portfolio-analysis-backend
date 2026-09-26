@@ -273,6 +273,9 @@ def _agent_output_row(
         stale_data=getattr(runner, "last_stale_data", None),
         anomalies=getattr(runner, "last_anomalies", None),
         data_coverage=getattr(runner, "last_data_coverage", None),
+        # 86bbummwp Tier 3 -- D6 section 3's per-agent mechanical rollup, same
+        # getattr/None-default pattern as the other 3 mechanical flags above.
+        data_quality_assessment=getattr(runner, "last_data_quality_assessment", None),
     )
 
     llm_calls = _llm_call_rows(run.run_id, agent_pass, runner)
@@ -564,7 +567,7 @@ class AnalysisOrchestrator:
         self._ticker = bundle.stock.ticker
 
         try:
-            pass1_outputs = await self._run_pass1(run, bundle, db)
+            pass1_outputs, mechanical_quality = await self._run_pass1(run, bundle, db)
         except OllamaUnavailable:
             # Environment-level failure (Ollama down / model not pulled) --
             # abort the whole run rather than contain it agent-by-agent, per
@@ -590,7 +593,9 @@ class AnalysisOrchestrator:
             await db.commit()
             return
 
-        compressed = compress_pass1_outputs(pass1_outputs, bundles=_build_pass2_view_bundles(bundle))
+        compressed = compress_pass1_outputs(
+            pass1_outputs, bundles=_build_pass2_view_bundles(bundle), mechanical_quality=mechanical_quality
+        )
 
         run.status = RunStatus.PASS2_RUNNING
         await db.commit()
@@ -878,7 +883,9 @@ class AnalysisOrchestrator:
         # calling this -- none do today, but there's no reason to couple
         # this method to owning that field when BaseRunner already does.
 
-    async def _run_pass1(self, run: AnalysisRun, bundle: DataBundle, db: AsyncSession) -> dict:
+    async def _run_pass1(
+        self, run: AnalysisRun, bundle: DataBundle, db: AsyncSession
+    ) -> tuple[dict, dict[str, str]]:
         runners = {
             "RSRCH": StockResearcherRunner(),
             "FUND": FundamentalAnalystRunner(),
@@ -902,17 +909,27 @@ class AnalysisOrchestrator:
         )
 
         outputs: dict[str, dict | None] = {}
+        # 86bbummwp Tier 3 -- collected here, while runners are still open, for
+        # compress_pass1_outputs() below. Mirrors analysis_confidence's own
+        # in-memory-only path: never re-read from the DB within a single run
+        # (see agents/compression.py's own docstring on why `bundles` -- and
+        # now this -- are threaded in as a param rather than read back from
+        # the AgentOutput rows _add_agent_output_and_calls just persisted).
+        mechanical_quality: dict[str, str] = {}
         ollama_unavailable: OllamaUnavailable | None = None
         for agent_id, result, errors, exc in results:
             _add_agent_output_and_calls(db, run, agent_id, "pass1", result, errors, runners[agent_id])
             outputs[agent_id] = result
+            quality = getattr(runners[agent_id], "last_data_quality_assessment", None)
+            if quality is not None:
+                mechanical_quality[agent_id] = quality
             if isinstance(exc, OllamaUnavailable):
                 ollama_unavailable = exc
         await db.commit()
         await asyncio.gather(*(_close_runner(r) for r in runners.values()))
         if ollama_unavailable is not None:
             raise ollama_unavailable
-        return outputs
+        return outputs, mechanical_quality
 
     async def _run_pass2(
         self, run: AnalysisRun, bundle: DataBundle, compressed: dict, db: AsyncSession

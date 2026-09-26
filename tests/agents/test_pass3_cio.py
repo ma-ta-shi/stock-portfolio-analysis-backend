@@ -41,17 +41,43 @@ def test_disagreement_cap_warning_for_high_conflict():
     assert "stock_outlook must be neutral/somewhat range" in msg
 
 
-def test_pass1_summaries_still_works_byte_for_byte_ported():
-    """Regression check on the ported (unmodified) helper -- confirms the
-    port didn't silently break this function's own real behavior."""
+def test_pass1_summaries_includes_confidence_finding_and_quality():
+    """86bbummwp Tier 3 extended this line with a mechanical quality={enum}
+    alongside the model's own confidence={enum} -- deliberately not
+    collapsed into one value, see build_pass1_reliability_warnings()'s own
+    docstring for why. This replaces the old byte-for-byte-ported assertion,
+    which is no longer accurate now that the line's shape has deliberately
+    changed."""
     compressed = {
-        "RSRCH": {"analysis_confidence": "high", "assessment_summary": "Durable moat.",
+        "RSRCH": {"analysis_confidence": "high", "data_quality_assessment": "medium",
+                   "assessment_summary": "Durable moat.",
                    "pass2_view": {"thesis_archetype": "secular_grower"}},
         "FUND": None,
     }
     summary = build_pass1_summaries(compressed)
-    assert "RSRCH: confidence=high | finding: Durable moat." in summary
+    assert "RSRCH: confidence=high, quality=medium | finding: Durable moat." in summary
     assert "FUND: NOT AVAILABLE" in summary
+
+
+def test_pass1_summaries_quality_defaults_to_low_when_missing():
+    compressed = {
+        "RSRCH": {"analysis_confidence": "high", "assessment_summary": "Durable moat.",
+                   "pass2_view": {"thesis_archetype": "secular_grower"}},
+    }
+    summary = build_pass1_summaries(compressed)
+    assert "quality=low" in summary
+
+
+def test_pass1_summaries_insufficient_data_branch_also_shows_quality():
+    """quality is a mechanical, pre-LLM-call fact -- shown even when the
+    agent's own output was too thin to build a pass2_view, matching
+    extract_data_quality_levels()'s own deliberate non-gating on pass2_view."""
+    compressed = {
+        "RSRCH": {"analysis_confidence": "insufficient", "data_quality_assessment": "high",
+                   "pass2_view": {}},
+    }
+    summary = build_pass1_summaries(compressed)
+    assert "INSUFFICIENT DATA (confidence=insufficient, quality=high)" in summary
 
 
 def test_advocate_summary_still_works_byte_for_byte_ported():

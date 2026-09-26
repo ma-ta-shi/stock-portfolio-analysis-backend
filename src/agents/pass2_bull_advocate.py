@@ -14,7 +14,7 @@ weakest_point_type: negative_catalyst|adverse_fundamental|data_gap|no_clear_inva
 thesis_archetype: secular_grower|dividend_compounder|cyclical_recovery|quality_compounder|value_trap_candidate.
 """
 from agents.base import BaseRunner
-from agents.compression import build_pass2_user_message, extract_confidence_levels
+from agents.compression import build_pass2_user_message, extract_confidence_levels, extract_data_quality_levels
 from agents.prompts import fill, load_template
 from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.pass2 import validate_bull_advocate
@@ -28,7 +28,8 @@ def build_user_message(
 ) -> str:
     base = build_pass2_user_message(bundle, compressed_pass1, account_type)
     confidence_levels = extract_confidence_levels(compressed_pass1)
-    warnings = build_pass1_reliability_warnings(confidence_levels)
+    quality_levels = extract_data_quality_levels(compressed_pass1)
+    warnings = build_pass1_reliability_warnings(confidence_levels, agent_quality=quality_levels)
     if warnings:
         base += f"\n\nRELIABILITY WARNINGS: {warnings}"
     # Same lookup the system prompt's {researcher_thesis_archetype} fill uses
@@ -51,6 +52,11 @@ class BullAdvocateRunner(BaseRunner):
         ctx = bundle.context
         user_msg = build_user_message(bundle, compressed_pass1, account_type)
         confidence_levels = extract_confidence_levels(compressed_pass1)
+        # 86bbummwp Tier 3 -- D6 section 3's mechanical per-agent data quality,
+        # shown alongside analysis_confidence (never collapsed into it) so this
+        # agent can catch a Pass 1 agent claiming high confidence while its own
+        # data quality is mechanically low.
+        quality_levels = extract_data_quality_levels(compressed_pass1)
         # Computed once and reused for both the prompt fill and the validator --
         # not called a second time inline in the fill dict below, redundant with
         # build_user_message()'s own call.
@@ -66,7 +72,9 @@ class BullAdvocateRunner(BaseRunner):
                 "memory_brief": "",
                 "accuracy_brief": "",
                 "winning_patterns_brief": "",
-                "pass1_reliability_warnings": build_pass1_reliability_warnings(confidence_levels) or "(none)",
+                "pass1_reliability_warnings": build_pass1_reliability_warnings(
+                    confidence_levels, agent_quality=quality_levels
+                ) or "(none)",
                 "researcher_thesis_archetype": real_researcher_archetype,
             },
         )

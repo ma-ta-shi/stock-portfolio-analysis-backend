@@ -48,7 +48,7 @@ Strategist).
 from functools import partial
 
 from agents.base import BaseRunner
-from agents.compression import build_pass2_user_message, extract_confidence_levels
+from agents.compression import build_pass2_user_message, extract_confidence_levels, extract_data_quality_levels
 from agents.prompts import fill, load_template
 from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.common import (
@@ -143,7 +143,8 @@ def build_user_message(
 ) -> tuple[str, dict[str, bool]]:
     base = build_pass2_user_message(bundle, compressed_pass1, account_type)
     confidence_levels = extract_confidence_levels(compressed_pass1)
-    warnings = build_pass1_reliability_warnings(confidence_levels)
+    quality_levels = extract_data_quality_levels(compressed_pass1)
+    warnings = build_pass1_reliability_warnings(confidence_levels, agent_quality=quality_levels)
     if warnings:
         base += f"\n\nRELIABILITY WARNINGS: {warnings}"
 
@@ -190,6 +191,9 @@ class RiskAdvisorRunner(BaseRunner):
         self.last_field_coverage = field_presence
         ctx = bundle.context
         confidence_levels = extract_confidence_levels(compressed_pass1)
+        # 86bbummwp Tier 3 -- see pass2_bull_advocate.py's own comment on this
+        # same addition for why both signals are shown, never collapsed.
+        quality_levels = extract_data_quality_levels(compressed_pass1)
         precomputed_risk_metrics_text, _ = _precomputed_risk_metrics(bundle)
         system_prompt = fill(
             load_template("risk_advisor", stage="a"),
@@ -201,7 +205,9 @@ class RiskAdvisorRunner(BaseRunner):
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
                 "precomputed_risk_metrics": precomputed_risk_metrics_text,
                 "researcher_thesis_archetype": researcher_thesis_archetype(compressed_pass1),
-                "pass1_reliability_warnings": build_pass1_reliability_warnings(confidence_levels) or "(none)",
+                "pass1_reliability_warnings": build_pass1_reliability_warnings(
+                    confidence_levels, agent_quality=quality_levels
+                ) or "(none)",
                 "accuracy_brief": "",
                 "winning_patterns_brief": "",
                 "memory_brief": "",
