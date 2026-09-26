@@ -39,11 +39,32 @@ Uses groundedness_score (NOT confidence).
 NO recommendation or archetype field.
 Passthroughs (±0.1 tolerance): dividend_yield_pct, withholding_tax_rate_pct, effective_after_tax_yield_pct.
 account_fit_score: excellent|good|fair|poor — "poor" mandates non-null cross_account_recommendation.
+
+86bbummwp follow-on: `_validate_with_caveats()` now composes
+`validate_tax_strategist` with two real fixes at once, both landing on the
+same call site. (1) `account_type` is finally supplied to
+`validate_tax_strategist` -- it had taken this param since 2026-09-01 to
+enable "Rule 14" (loss-harvesting must be null for TFSA/RRSP), but the real
+call site never passed it, so Rule 14 had never actually fired in
+production. (2) The same confidence/data-quality coupling rule as Risk
+Advisor and all 5 Pass 1 agents -- see
+`agents/validators/common.py::validate_confidence_requires_caveat_when_flagged`
+-- gated on `groundedness_score` (real evidence: 90/92 on real rows where
+`divid` was genuinely absent). `wht` is excluded from the material-gap check
+at the call site: `WHT_GRID` has zero entries for `us_reit`/
+`limited_partnership`/`adr` classifications, so it's permanently absent for
+those, never a real per-run signal.
 """
+from functools import partial
+
 from agents.base import BaseRunner
 from agents.compression import build_pass2_user_message, extract_confidence_levels
 from agents.prompts import fill, load_template
 from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
+from agents.validators.common import (
+    GROUNDEDNESS_HIGH_THRESHOLD,
+    validate_confidence_requires_caveat_when_flagged,
+)
 from agents.validators.pass2 import validate_tax_strategist
 from data.precompute.tax_metrics import build_tax_metrics_field, load_tax_rules_reference
 from data.schemas.data_bundle import DataBundle
@@ -86,6 +107,39 @@ def _tax_metrics_field_presence(tax_metrics_text: str) -> dict[str, bool]:
         "wht": "WHT (this account," in tax_metrics_text
         and "NOT MODELLED per REF withholding grid" not in tax_metrics_text,
     }
+
+
+def _validate_with_caveats(
+    output: dict, material_absent: list[str], account_type: str
+) -> tuple[bool, list[str]]:
+    """Composing validator (86bbummwp follow-on) -- Tax Strategist previously
+    called `validate_tax_strategist` bare, never supplying `account_type`
+    even though that function's own signature has taken it (for Rule 14,
+    loss-harvesting must be null for TFSA/RRSP) since 2026-09-01 -- so Rule
+    14 has never actually fired in production. Fixed here as the same call
+    site is already being restructured for the new confidence/data-quality
+    rule.
+
+    `material_absent` must already exclude `"wht"` (see the caller) -- WHT_GRID
+    (`data/precompute/tax_metrics.py`) has zero entries for `us_reit`/
+    `limited_partnership`/`adr` dividend classifications, so `wht` is
+    PERMANENTLY absent for those, never a real per-run signal; passing it
+    through unfiltered would fail validation on every single run for those
+    classifications. `divid` is kept -- a real, if imperfect, per-stock
+    signal (real evidence: `groundedness_score=90`/`92` on two real rows
+    where `divid` was genuinely absent). See
+    `validate_confidence_requires_caveat_when_flagged`'s own docstring for
+    the general mechanism, and `GROUNDEDNESS_HIGH_THRESHOLD`'s own comment
+    (shared with Risk Advisor, `validators/common.py`) for why 85 is a
+    starting guess, not a verified number."""
+    passed, errors = validate_tax_strategist(output, account_type=account_type)
+    gs = output.get("groundedness_score")
+    cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
+        output,
+        is_high=isinstance(gs, (int, float)) and gs >= GROUNDEDNESS_HIGH_THRESHOLD,
+        material_absent=material_absent,
+    )
+    return passed and cq_passed, errors + cq_errors
 
 
 def get_system_prompt(bundle: DataBundle, compressed_pass1: dict, account_type: str) -> str:
@@ -155,10 +209,16 @@ class TaxStrategistRunner(BaseRunner):
         # failed call still records whether its own input was already
         # incomplete.
         self.last_field_coverage = field_presence
+        # wht is permanently absent for us_reit/limited_partnership/adr classifications
+        # (WHT_GRID has zero entries for any of them) -- excluded here, not in
+        # _tax_metrics_field_presence() itself, so input_field_coverage's own stored
+        # fact stays untouched while the new confidence/data-quality rule doesn't fire
+        # on it every run for those classifications.
+        material_absent = [k for k, v in field_presence.items() if not v and k != "wht"]
         result, errors = await self.call_with_validation(
             system_prompt,
             user_msg,
-            validate_tax_strategist,
+            partial(_validate_with_caveats, material_absent=material_absent, account_type=acct),
             max_tokens=4000,
             temperature=0.3,
         )

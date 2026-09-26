@@ -25,7 +25,9 @@ from agents.utils import (
     gate2_check,
     parse_json_response,
     render_data_coverage_line,
+    render_data_warnings,
     researcher_thesis_archetype,
+    to_data_coverage,
     truncate_to_tokens,
     word_count,
 )
@@ -244,6 +246,72 @@ class TestRenderDataCoverageLine:
             {"news_block": True, "some_other_field": False}, self.GAP_SENTENCES
         )
         assert result == "standard."
+
+
+class TestToDataCoverage:
+    """86bbummwp Tier 2 -- D6's structured data_coverage flag, same
+    two-argument shape and filtering as render_data_coverage_line() above so
+    every agent can pass the exact same field_presence/gap_sentences pair to
+    both."""
+
+    GAP_SENTENCES = {
+        "news_block": "no news articles available",
+        "short_interest": "no short interest data available",
+    }
+
+    def test_all_present(self):
+        result = to_data_coverage({"news_block": True, "short_interest": True}, self.GAP_SENTENCES)
+        assert result == {"present": ["news_block", "short_interest"], "absent": []}
+
+    def test_all_absent(self):
+        result = to_data_coverage({"news_block": False, "short_interest": False}, self.GAP_SENTENCES)
+        assert result == {"present": [], "absent": ["news_block", "short_interest"]}
+
+    def test_mixed(self):
+        result = to_data_coverage({"news_block": True, "short_interest": False}, self.GAP_SENTENCES)
+        assert result == {"present": ["news_block"], "absent": ["short_interest"]}
+
+    def test_key_absent_from_field_presence_is_excluded_entirely(self):
+        """Same "not applicable" semantics as render_data_coverage_line() --
+        a key genuinely absent from field_presence (e.g. Macro's statcan for
+        a US stock) must not appear in either list."""
+        result = to_data_coverage({"news_block": True}, self.GAP_SENTENCES)
+        assert result == {"present": ["news_block"], "absent": []}
+
+    def test_field_presence_key_with_no_matching_gap_sentence_is_ignored(self):
+        result = to_data_coverage(
+            {"news_block": True, "some_other_field": False}, self.GAP_SENTENCES
+        )
+        assert result == {"present": ["news_block"], "absent": []}
+
+    def test_empty_field_presence_returns_empty_lists(self):
+        assert to_data_coverage({}, self.GAP_SENTENCES) == {"present": [], "absent": []}
+
+
+class TestRenderDataWarnings:
+    """86bbummwp follow-on -- generalizes Technical Analyst's own former
+    _data_warnings_line() (anomalies only) to also cover stale_data, found
+    missing during the investigation that led to this fix."""
+
+    def test_empty_when_both_empty(self):
+        assert render_data_warnings([], []) == ""
+
+    def test_anomalies_only_joined_with_semicolons(self):
+        result = render_data_warnings(
+            ["US yield curve is inverted", "VIX is in a high-volatility regime (35.0)"], []
+        )
+        assert result == "US yield curve is inverted; VIX is in a high-volatility regime (35.0)"
+
+    def test_stale_data_only_rendered_as_one_segment(self):
+        result = render_data_warnings([], ["rate", "cpi"])
+        assert result == "stale data: rate, cpi"
+
+    def test_both_combined_anomalies_first(self):
+        result = render_data_warnings(["US yield curve is inverted"], ["rate", "cpi"])
+        assert result == "US yield curve is inverted; stale data: rate, cpi"
+
+    def test_single_stale_series_no_trailing_comma(self):
+        assert render_data_warnings([], ["price"]) == "stale data: price"
 
 
 class TestResearcherThesisArchetype:

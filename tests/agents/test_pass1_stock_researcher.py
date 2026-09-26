@@ -11,7 +11,14 @@ value).
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass1_stock_researcher import _validate_with_caveats, build_user_message
+from agents.pass1_stock_researcher import (
+    _anomalies,
+    _data_coverage,
+    _data_coverage_line,
+    _stale_data,
+    _validate_with_caveats,
+    build_user_message,
+)
 
 
 def _news_item(id_="N1", headline="Company announces new product", tier="primary"):
@@ -64,6 +71,11 @@ def _bundle(**overrides) -> SimpleNamespace:
             missing_sources_list=[],
             has_filing_digest=True,
             transcript_excerpts=[],
+            # 86bbummwp Tier 2 -- real fields on ResearchSourcesBundle, well
+            # within _stale_data()'s own thresholds by default.
+            latest_filing_age_days=30,
+            latest_news_age_days=3,
+            latest_transcript_age_days=None,  # permanent, D3
         ),
     )
     return SimpleNamespace(**{**defaults, **overrides})
@@ -304,8 +316,18 @@ def _valid_stock_researcher_output(**overrides) -> dict:
     return base
 
 
+def _validate(output, has_filing_digest, material_absent=None, anomalies=None, stale_data=None):
+    return _validate_with_caveats(
+        output,
+        has_filing_digest=has_filing_digest,
+        material_absent=material_absent or [],
+        anomalies=anomalies or [],
+        stale_data=stale_data or [],
+    )
+
+
 def test_validate_with_caveats_passes_when_digest_present_and_schema_valid():
-    passed, errors = _validate_with_caveats(_valid_stock_researcher_output(), has_filing_digest=True)
+    passed, errors = _validate(_valid_stock_researcher_output(), has_filing_digest=True)
     assert passed, errors
 
 
@@ -313,14 +335,14 @@ def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_digest()
     out = _valid_stock_researcher_output(structured_data={
         **_valid_stock_researcher_output()["structured_data"], "thesis_archetype": "not_a_real_archetype",
     })
-    passed, errors = _validate_with_caveats(out, has_filing_digest=True)
+    passed, errors = _validate(out, has_filing_digest=True)
     assert not passed
     assert any("thesis_archetype" in e for e in errors)
 
 
 def test_validate_with_caveats_flags_missing_filing_depth_caveat():
     out = _valid_stock_researcher_output()  # no filing-depth mention
-    passed, errors = _validate_with_caveats(out, has_filing_digest=False)
+    passed, errors = _validate(out, has_filing_digest=False)
     assert not passed
     assert any("Filing depth limited" in e for e in errors)
 
@@ -330,11 +352,139 @@ def test_validate_with_caveats_passes_with_real_current_phrase_when_digest_absen
         "Filing depth limited: no regulatory filing text was available for this company; "
         "analysis relies on the company profile, public news and peer comparison."
     ])
-    passed, errors = _validate_with_caveats(out, has_filing_digest=False)
+    passed, errors = _validate(out, has_filing_digest=False)
     assert passed, errors
 
 
 def test_validate_with_caveats_not_checked_when_digest_present():
     out = _valid_stock_researcher_output()  # no filing-depth mention, but digest is present
-    passed, errors = _validate_with_caveats(out, has_filing_digest=True)
+    passed, errors = _validate(out, has_filing_digest=True)
     assert passed, errors
+
+
+# ---------- confidence/data-quality coupling rule (86bbummwp follow-on) ----------
+# NOTE: validate_stock_researcher's own schema already requires caveats to have
+# >=1 item unconditionally (see _validate_with_caveats's own docstring) -- so a
+# "confidence high + gap + empty caveats" failure case can't be constructed
+# through this composed wrapper without colliding with that unrelated base
+# check first. The shared rule's own "empty caveats" branch is covered in
+# isolation by test_validators_common.py; this just confirms the composition
+# doesn't break a real, valid output when a gap is present.
+
+
+def test_validate_with_caveats_passes_with_gap_when_real_caveat_already_present():
+    out = _valid_stock_researcher_output()  # default fixture already has a real caveat
+    passed, errors = _validate(out, has_filing_digest=True, material_absent=["filings"])
+    assert passed, errors
+
+
+# ---------- _data_coverage / _anomalies (86bbummwp Tier 2) ----------
+
+
+def test_data_coverage_all_present_when_nothing_missing():
+    bundle = _bundle()  # default: missing_sources_list=[]
+    result = _data_coverage(bundle)
+    assert result["present"] == ["filing_digests", "peer_blocks", "news_items"]
+    assert result["absent"] == ["transcript_excerpts"]  # permanent, D3
+
+
+def test_data_coverage_reflects_real_missing_sources():
+    bundle = _bundle()
+    bundle.research_sources.missing_sources_list = ["filing_digests", "peer_blocks"]
+    result = _data_coverage(bundle)
+    assert result["present"] == ["news_items"]
+    assert set(result["absent"]) == {"filing_digests", "peer_blocks", "transcript_excerpts"}
+
+
+def test_data_coverage_matches_data_coverage_line_semantics():
+    """Both representations must agree on what's missing -- confirmed by
+    comparing against _data_coverage_line's own prose for the same bundle."""
+    bundle = _bundle()
+    bundle.research_sources.missing_sources_list = ["news_items"]
+    line = _data_coverage_line(bundle)
+    structured = _data_coverage(bundle)
+    assert "no recent news available" in line
+    assert "news_items" in structured["absent"]
+    assert "news_items" not in structured["present"]
+
+
+def test_anomalies_empty_by_default():
+    """Default fixture: buyback=active, insider=buying -- no contradiction."""
+    assert _anomalies(_bundle()) == []
+
+
+def test_anomalies_flags_buyback_active_with_insider_selling():
+    bundle = _bundle(research_sources=SimpleNamespace(
+        filing_digests=[_filing_digest()], news_items=[_news_item()], peer_blocks=[_peer_block()],
+        management_signals=_management_signals(insider="selling", buyback="active"),
+        missing_sources_list=[], has_filing_digest=True, transcript_excerpts=[],
+    ))
+    result = _anomalies(bundle)
+    assert len(result) == 1
+    assert "buyback" in result[0].lower()
+    assert "sellers" in result[0].lower()
+
+
+def test_anomalies_not_flagged_when_buyback_suspended():
+    bundle = _bundle(research_sources=SimpleNamespace(
+        filing_digests=[_filing_digest()], news_items=[_news_item()], peer_blocks=[_peer_block()],
+        management_signals=_management_signals(insider="selling", buyback="suspended"),
+        missing_sources_list=[], has_filing_digest=True, transcript_excerpts=[],
+    ))
+    assert _anomalies(bundle) == []
+
+
+def test_anomalies_not_flagged_when_insider_buying():
+    bundle = _bundle(research_sources=SimpleNamespace(
+        filing_digests=[_filing_digest()], news_items=[_news_item()], peer_blocks=[_peer_block()],
+        management_signals=_management_signals(insider="buying", buyback="active"),
+        missing_sources_list=[], has_filing_digest=True, transcript_excerpts=[],
+    ))
+    assert _anomalies(bundle) == []
+
+
+# ---------- _stale_data (86bbummwp Tier 2) ----------
+
+
+def test_stale_data_empty_for_default_fixture():
+    assert _stale_data(_bundle()) == []
+
+
+def test_stale_data_flags_stale_filing_past_normal_reporting_cycle():
+    bundle = _bundle()
+    bundle.research_sources.latest_filing_age_days = 150
+    assert "filings" in _stale_data(bundle)
+
+
+def test_stale_data_filing_within_normal_quarterly_cycle_not_flagged():
+    """80 days is a completely normal filing age (companies report roughly
+    quarterly) -- must not be flagged."""
+    bundle = _bundle()
+    bundle.research_sources.latest_filing_age_days = 80
+    assert "filings" not in _stale_data(bundle)
+
+
+def test_stale_data_flags_stale_news():
+    bundle = _bundle()
+    bundle.research_sources.latest_news_age_days = 45
+    assert "news" in _stale_data(bundle)
+
+
+def test_stale_data_recent_news_not_flagged():
+    bundle = _bundle()
+    bundle.research_sources.latest_news_age_days = 5
+    assert "news" not in _stale_data(bundle)
+
+
+def test_stale_data_no_filing_at_all_not_flagged_as_stale():
+    """age=None means no filing digest exists at all -- a data_coverage gap
+    (missing_sources_list), not a staleness signal."""
+    bundle = _bundle()
+    bundle.research_sources.latest_filing_age_days = None
+    assert "filings" not in _stale_data(bundle)
+
+
+def test_stale_data_transcripts_never_checked():
+    """Permanently None today (D3) -- must never appear in stale_data, that's
+    data_coverage's job."""
+    assert "transcripts" not in _stale_data(_bundle())

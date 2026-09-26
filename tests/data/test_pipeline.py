@@ -179,6 +179,7 @@ def _fake_fundamentals_compute_all(**kwargs):
         "peer_metrics": {},
         "missing_fields": [],
         "currency_mismatch": None,
+        "latest_financials_period_end": "2026-06-30",
     }
 
 

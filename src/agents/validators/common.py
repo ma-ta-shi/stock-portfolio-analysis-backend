@@ -85,3 +85,65 @@ def _sweep_declared_enums(obj, errors: list, path: str = "") -> None:
     elif isinstance(obj, list):
         for i, v in enumerate(obj):
             _sweep_declared_enums(v, errors, f"{path}[{i}]")
+
+
+# 86bbummwp follow-on -- shared by Risk Advisor Stage A and Tax Strategist, the two
+# numeric-groundedness_score callers of validate_confidence_requires_caveat_when_flagged
+# below (real observed range is 80-95, queried from real agent_outputs rows; 85 is a
+# reasonable midpoint guess, not a verified number, flagged for reviewer sign-off).
+# Previously duplicated verbatim in both files, kept in sync only by a
+# "see the other file's comment" cross-reference -- centralized here since both agents
+# share the same 0-100 scale with no principled reason to diverge yet.
+GROUNDEDNESS_HIGH_THRESHOLD = 85
+
+
+def validate_confidence_requires_caveat_when_flagged(
+    output: dict,
+    is_high: bool,
+    material_absent: list[str],
+    anomalies: list[str] | None = None,
+    stale_data: list[str] | None = None,
+) -> tuple[bool, list[str]]:
+    """86bbummwp follow-on (2026-09-26): mechanical backstop for the case a
+    real Macro Economist run exposed live -- `analysis_confidence: "high"`
+    while the agent's own `stale_data` flag showed 4 series genuinely stale.
+    Root cause there was a wiring gap (the model was never shown its own
+    findings, see `render_data_warnings()`); this is the backstop for when a
+    model still doesn't react even after being shown them.
+
+    Generalized to a pre-computed `is_high` boolean rather than reading
+    `analysis_confidence`/`groundedness_score` itself, so ONE function serves
+    both: the 5 Pass 1 agents' enum (`analysis_confidence == "high"`) and
+    Risk Advisor/Tax Strategist's numeric `groundedness_score` (their own
+    call site decides the threshold -- see each file's own comment for why
+    85 is a starting guess, not a verified number).
+
+    `material_absent` is deliberately the caller's responsibility, not
+    `data_coverage["absent"]` read directly here: Stock Researcher's
+    `transcript_excerpts` and Tax Strategist's `wht` (for us_reit/
+    limited_partnership/adr classifications) are both PERMANENTLY absent by
+    construction, not per-run signals -- passing either straight through
+    would fail validation on every single call for those agents, turning an
+    occasional missed caveat into a permanent one. Each call site excludes
+    its own known-permanent items before calling this.
+
+    Mirrors `validate_earnings_proximity_caveat`'s own mechanism (Technical
+    Analyst, `pass1.py`) -- a real validation error forcing a retry through
+    `BaseRunner`'s existing retry loop, not a silent field rewrite -- except
+    that rule force-fails on a fixed, single trigger (earnings proximity);
+    this one only requires that SOME caveat exists, since the range of
+    possible triggers here (any combination of stale/anomalous/absent) is too
+    broad for a single fixed caveat phrase to check for content the way the
+    earnings rule does.
+    """
+    if not is_high:
+        return True, []
+    if not (material_absent or anomalies or stale_data):
+        return True, []
+    if not output.get("caveats"):
+        return False, [
+            "a real data-quality issue is flagged (stale data, an anomaly, or a "
+            "material coverage gap) while this agent's own confidence/groundedness "
+            "signal is high, and caveats is empty -- must explain why"
+        ]
+    return True, []

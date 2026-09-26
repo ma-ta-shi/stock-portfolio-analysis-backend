@@ -661,4 +661,8 @@ def compute_all(
         "quarters_available": len(fin.quarters),
         "missing_fields": missing_fields,
         "currency_mismatch": currency_mismatch,
+        # 86bbummwp Tier 2 -- already fetched on every quarter (NormalizedFinancials'
+        # own docstring), never forwarded past this function before now. Fundamental
+        # Analyst's only real freshness signal for stale_data.
+        "latest_financials_period_end": fin.quarters[0]["period_end"] if fin.quarters else None,
     }

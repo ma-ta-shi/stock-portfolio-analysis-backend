@@ -42,18 +42,37 @@ NOT a clean port -- field-by-field notes, verified against
   thin-volume caveats the user message already tells the model are
   mandatory/required (see `earnings_flag`/`volume_flag` below) -- previously
   requested in the prompt but never mechanically checked.
+
+86bbummwp Tier 2 additions -- D6's mechanical flags, now real, stored fields
+on `agent_outputs`, not just rendered into the prompt:
+- `data_coverage`: the same `field_presence` map, reshaped into
+  `{"present": [...], "absent": [...]}` via `to_data_coverage()`.
+- `anomalies`: `bundle.preflight_warnings` persisted as-is -- the same list
+  already rendered into `data_warnings` above, now also a queryable,
+  structured fact about this run instead of only ever a prompt string.
+- `stale_data`: real threshold on `bundle.days_old`, not `bundle.is_current`
+  -- checked `_freshness()`'s own definition directly
+  (`precompute/technicals.py`): `is_current` is `trading_days_old <= 0`,
+  strictly "does the data include the most recent trading day," which would
+  false-positive on ordinary fetch-timing variance (e.g. fetched the morning
+  before the new bar posts). `days_old > 5` (roughly a trading week) is a
+  meaningful threshold for a genuinely daily series; `is_current` is not used
+  here at all.
 """
 from functools import partial
 
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import render_data_coverage_line
+from agents.utils import render_data_coverage_line, render_data_warnings, to_data_coverage
+from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import (
     validate_earnings_proximity_caveat,
     validate_technical_analyst,
     validate_thin_volume_caveat,
 )
 from data.schemas.data_bundle import DataBundle
+
+_STALE_PRICE_DAYS = 5
 
 # Only 4 fields, all worth a coverage-line mention directly -- unlike
 # Fundamental Analyst's 15-key missing_fields map, no coarse/granular split
@@ -70,16 +89,10 @@ def _data_coverage_line(field_presence: dict[str, bool]) -> str:
     return render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
 
 
-def _data_warnings_line(preflight_warnings: list[str]) -> str:
-    """86bbummwp Tier 1b -- wires the real, already-computed anomaly detector
-    (`precompute/technicals.py`'s own `_preflight_warnings()`: zero-volume
-    sessions, negative/zero prices, unexplained >25% gaps) into the
-    `data_warnings` prompt placeholder, previously hardcoded to `""` and
-    silently discarding this signal on every run. `preflight_warnings` is
-    never `None` (DataBundle declares it `list[str]`, not `list[str] | None`),
-    so `"; ".join([])` already returns `""` on its own -- no `or ""` fallback
-    needed."""
-    return "; ".join(preflight_warnings)
+def _stale_data(days_old: int) -> list[str]:
+    """86bbummwp Tier 2 -- see the module docstring for why this uses
+    `days_old` and not `is_current`."""
+    return ["price"] if days_old > _STALE_PRICE_DAYS else []
 
 
 def _fmt(v, suffix: str = ""):
@@ -87,17 +100,27 @@ def _fmt(v, suffix: str = ""):
 
 
 def _validate_with_caveats(
-    output: dict, earnings_days: int | None, avg_dollar_vol: float | None
+    output: dict,
+    earnings_days: int | None,
+    avg_dollar_vol: float | None,
+    material_absent: list[str],
+    anomalies: list[str],
+    stale_data: list[str],
 ) -> tuple[bool, list[str]]:
-    """Composing validator (86bbummwp Tier 1c) -- merges the base schema
-    check with the two mandatory-caveat checks `call_with_validation()`
-    (agents/base.py) has no way to receive extra context for on its own: its
-    `validator` callable takes exactly one positional arg (`result`), so
-    `earnings_days`/`avg_dollar_vol` are closed over here via `partial()`
-    instead. Both checks already reflect a requirement the real prompt
+    """Composing validator (86bbummwp Tier 1c, extended by the follow-on
+    confidence/data-quality coupling rule) -- merges the base schema check
+    with the mandatory-caveat checks `call_with_validation()` (agents/base.py)
+    has no way to receive extra context for on its own: its `validator`
+    callable takes exactly one positional arg (`result`), so every extra
+    param here is closed over via `partial()` at the call site instead. The
+    earnings/thin-volume checks already reflect a requirement the real prompt
     already tells the model about (`earnings_flag`/`volume_flag` in
     build_user_message() above) -- this only makes an already-visible
-    instruction mechanically enforced, not a new one.
+    instruction mechanically enforced, not a new one. The new confidence/
+    data-quality rule is the backstop for a real, live case (Macro Economist
+    claiming `analysis_confidence: "high"` while its own stale_data flag
+    showed 4 stale series) -- see `validate_confidence_requires_caveat_when_flagged`'s
+    own docstring.
 
     `earnings_days`/`avg_dollar_vol` can be `None` when the underlying data
     itself is absent (no earnings calendar entry, no liquidity data) -- both
@@ -115,7 +138,14 @@ def _validate_with_caveats(
         vol_passed, vol_errors = validate_thin_volume_caveat(output, avg_dollar_vol)
         passed = passed and vol_passed
         errors = errors + vol_errors
-    return passed, errors
+    cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
+        output,
+        is_high=output.get("analysis_confidence") == "high",
+        material_absent=material_absent,
+        anomalies=anomalies,
+        stale_data=stale_data,
+    )
+    return passed and cq_passed, errors + cq_errors
 
 
 def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
@@ -233,6 +263,12 @@ class TechnicalAnalystRunner(BaseRunner):
         # failed call still records whether its own input was already
         # incomplete.
         self.last_field_coverage = field_presence
+        # 86bbummwp Tier 2 -- D6's mechanical flags, set here for the same
+        # reason as last_field_coverage above (persisted regardless of
+        # whether the LLM call itself succeeds).
+        self.last_data_coverage = to_data_coverage(field_presence, _COVERAGE_GAP_SENTENCES)
+        self.last_anomalies = list(bundle.preflight_warnings)
+        self.last_stale_data = _stale_data(bundle.days_old)
         system_prompt = fill(
             load_template("technical_analyst"),
             {
@@ -242,7 +278,7 @@ class TechnicalAnalystRunner(BaseRunner):
                 "timeline": ctx.timeline,
                 "timeline_instruction": f"Timeline: {ctx.timeline}.",
                 "data_coverage_line": _data_coverage_line(field_presence),
-                "data_warnings": _data_warnings_line(bundle.preflight_warnings),
+                "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
                 "memory_brief": "",
                 "earnings_proximity_days": str(ep.get("earnings_proximity_days", "N/A")),
                 "nearest_support": str(sr.get("nearest_support", "N/A")),
@@ -257,7 +293,14 @@ class TechnicalAnalystRunner(BaseRunner):
         return await self.call_with_validation(
             system_prompt,
             user_msg,
-            partial(_validate_with_caveats, earnings_days=earnings_days, avg_dollar_vol=avg_dollar_vol),
+            partial(
+                _validate_with_caveats,
+                earnings_days=earnings_days,
+                avg_dollar_vol=avg_dollar_vol,
+                material_absent=self.last_data_coverage["absent"],
+                anomalies=self.last_anomalies,
+                stale_data=self.last_stale_data,
+            ),
             max_tokens=3500,
             temperature=0.3,
         )

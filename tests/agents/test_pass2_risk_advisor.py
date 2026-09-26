@@ -10,7 +10,7 @@ from the harness."""
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass2_risk_advisor import _precomputed_risk_metrics, build_user_message
+from agents.pass2_risk_advisor import _precomputed_risk_metrics, _validate_with_caveats, build_user_message
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -134,5 +134,96 @@ def test_field_presence_avg_dollar_volume_false_when_missing():
     bundle = _bundle(risk_metrics={**_bundle().risk_metrics, "adv_millions": None})
     _, presence = build_user_message(bundle, {})
     assert presence["avg_dollar_volume"] is False
+
+
+# ---------- _validate_with_caveats (86bbummwp follow-on -- new here, this agent
+# previously called validate_risk_advisor_stage_a bare, no composition at all) ----------
+
+
+def _valid_stage_a_output(**overrides) -> dict:
+    base = {
+        "groundedness_score": 78,
+        "thesis_summary": "A moderate risk profile. Beta amplifies market moves but FCF is strong enough to manage current leverage.",
+        "strongest_signal": "FUND: D/E of 0.42 is the highest in 5 years.",
+        "caveats": [],
+        "key_factors": [
+            {"factor": "Elevated leverage", "importance": "high", "sentiment": "negative", "evidence": "FUND: D/E 0.42"},
+            {"factor": "Technical trend weakness", "importance": "medium", "sentiment": "neutral", "evidence": "TECH: RSI 51.3"},
+        ],
+        "narrative": (
+            "This stock presents a moderate-to-acceptable risk profile for a medium-term "
+            "investment. The primary risk is post-acquisition leverage, which is not alarming "
+            "in absolute terms but represents a real increase from the historical baseline. In "
+            "an elevated rate environment, higher leverage amplifies interest expense "
+            "sensitivity, and a further rate increase would compound refinancing risk on any "
+            "floating-rate debt taken on to fund the acquisition, particularly if the company "
+            "needs to refinance any of it before maturity in a less favorable rate environment "
+            "than when it was originally issued. The beta means the stock will experience "
+            "meaningfully more volatility than the broader market on both the upside and "
+            "downside, which matters more for a shorter holding period than a longer one. The "
+            "52-week range demonstrates real downside exposure, though the stock is currently "
+            "trading well above the 52-week low, suggesting the worst of the drawdown has "
+            "likely already occurred absent a fresh negative catalyst emerging over the coming "
+            "quarters. Two distinct downside scenarios exist and are not meaningfully "
+            "correlated with each other, providing a fair stress test of the risk framework "
+            "rather than two versions of the same underlying event playing out twice. Overall, "
+            "position sizing should reflect the elevated but not extreme nature of this risk "
+            "profile, favoring a moderate rather than aggressive allocation given the balance "
+            "of leverage, volatility, and the still-intact underlying competitive position that "
+            "supports the broader investment thesis over a multi-quarter horizon."
+        ),
+        "risk_profile": {
+            "volatility_assessment": "moderate",
+            "beta_interpretation": "A beta above 1 means the stock moves more than the broader market on average.",
+            "max_drawdown_interpretation": "The peak-to-trough decline took roughly two quarters to recover from.",
+            "downside_scenarios": [
+                {"scenario": "Competitive disruption triggers multiple compression", "probability": "medium", "estimated_impact_pct": -18.0, "trigger": "RSRCH: competitive threat", "timeline": "3_to_12_months"},
+                {"scenario": "Integration costs exceed guidance", "probability": "medium", "estimated_impact_pct": -10.0, "trigger": "FUND: integration risk noted in filing", "timeline": "1_to_3_months"},
+            ],
+            "risk_reward_ratio": "neutral",
+            "data_sanity_flags": [],
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_with_caveats_passes_when_schema_valid_and_below_threshold():
+    """groundedness_score=78 is below the 85 threshold -- the new rule never
+    applies regardless of gaps, matching the default fixture's own real,
+    empty caveats list."""
+    passed, errors = _validate_with_caveats(_valid_stage_a_output(), material_absent=["beta"])
+    assert passed, errors
+
+
+def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_gap():
+    out = _valid_stage_a_output(risk_profile={
+        **_valid_stage_a_output()["risk_profile"], "volatility_assessment": "extreme",
+    })
+    passed, errors = _validate_with_caveats(out, material_absent=[])
+    assert not passed
+    assert any("volatility_assessment" in e for e in errors)
+
+
+def test_validate_with_caveats_flags_high_groundedness_with_gap_and_no_caveat():
+    out = _valid_stage_a_output(groundedness_score=92, caveats=[])
+    passed, errors = _validate_with_caveats(out, material_absent=["max_drawdown_3yr"])
+    assert not passed
+    assert any("caveats is empty" in e for e in errors)
+
+
+def test_validate_with_caveats_passes_high_groundedness_with_gap_when_caveat_present():
+    out = _valid_stage_a_output(
+        groundedness_score=92,
+        caveats=["Insufficient price history for a real 3yr drawdown figure."],
+    )
+    passed, errors = _validate_with_caveats(out, material_absent=["max_drawdown_3yr"])
+    assert passed, errors
+
+
+def test_validate_with_caveats_exactly_at_threshold_counts_as_high():
+    out = _valid_stage_a_output(groundedness_score=85, caveats=[])
+    passed, errors = _validate_with_caveats(out, material_absent=["beta"])
+    assert not passed
 
 

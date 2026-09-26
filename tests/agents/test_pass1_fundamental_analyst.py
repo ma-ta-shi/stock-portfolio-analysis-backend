@@ -3,7 +3,13 @@ equivalent -- see test_pass1_stock_researcher.py's docstring for why."""
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass1_fundamental_analyst import _data_coverage_line, build_user_message
+from agents.pass1_fundamental_analyst import (
+    _anomalies,
+    _data_coverage_line,
+    _stale_data,
+    _validate_with_caveats,
+    build_user_message,
+)
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -27,6 +33,7 @@ def _bundle(**overrides) -> SimpleNamespace:
                             "buy_count": 22, "hold_count": 8, "sell_count": 2},
         peer_metrics={"sector_medians": {"sector_median_pe": 20.1}, "peer_records": []},
         missing_fields=[],
+        latest_financials_period_end="2026-06-30",  # 86bbummwp Tier 2 -- well within threshold
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -210,3 +217,151 @@ def test_data_coverage_line_ignores_the_15_per_ratio_keys():
     line = _data_coverage_line(presence)
     assert "peg_ratio" not in line
     assert "no peer data available" in line  # still real (default fixture has none)
+
+
+# ---------- _anomalies (86bbummwp Tier 2) ----------
+
+
+def test_anomalies_empty_when_all_within_plausible_ranges():
+    assert _anomalies(_bundle()) == []
+
+
+def test_anomalies_flags_absurd_pe_ratio():
+    bundle = _bundle(valuation_metrics={"pe_ratio": 5000.0, "forward_pe": 22.1, "peg_ratio": 1.8})
+    result = _anomalies(bundle)
+    assert len(result) == 1
+    assert "pe_ratio=5000.0" in result[0]
+
+
+def test_anomalies_flags_negative_gross_margin_above_range():
+    """Range is (0.0, 0.99) -- confirms the lower bound is checked too, not
+    just an absurdly high value."""
+    bundle = _bundle(profitability_metrics={
+        "gross_margin": -0.1, "operating_margin": 0.12, "net_margin": 0.09,
+        "roe": 0.15, "fcf_to_net_income": 1.1,
+    })
+    result = _anomalies(bundle)
+    assert any("gross_margin" in f for f in result)
+
+
+def test_anomalies_none_value_is_not_flagged():
+    """A missing value (None) is a coverage gap, not an anomaly -- must not
+    be flagged here (that's data_coverage's job)."""
+    bundle = _bundle(valuation_metrics={"pe_ratio": None, "forward_pe": 22.1, "peg_ratio": 1.8})
+    assert _anomalies(bundle) == []
+
+
+def test_anomalies_can_flag_multiple_metrics_at_once():
+    bundle = _bundle(
+        valuation_metrics={"pe_ratio": 5000.0, "forward_pe": 22.1, "peg_ratio": 1.8},
+        balance_sheet_metrics={"debt_to_equity": 999.0, "current_ratio": 1.8,
+                                "interest_coverage": 12.0, "cash_position": 5.2e9},
+    )
+    result = _anomalies(bundle)
+    assert len(result) == 2
+    assert any("pe_ratio" in f for f in result)
+    assert any("debt_to_equity" in f for f in result)
+
+
+def test_anomalies_ignores_peer_only_metrics_not_on_bundle():
+    """pb_ratio/ev_ebitda have no primary-stock field anywhere -- must never
+    be referenced, not even as a crash."""
+    result = _anomalies(_bundle())
+    assert not any("pb_ratio" in f or "ev_ebitda" in f for f in result)
+
+
+# ---------- _stale_data (86bbummwp Tier 2) ----------
+
+
+def test_stale_data_empty_for_default_fixture():
+    assert _stale_data(_bundle()) == []
+
+
+def test_stale_data_flags_stale_financials():
+    bundle = _bundle(latest_financials_period_end="2025-01-01")  # well over 180 days before 2026-09-23
+    assert _stale_data(bundle) == ["financials"]
+
+
+def test_stale_data_within_threshold_not_flagged():
+    bundle = _bundle(latest_financials_period_end="2026-04-01")  # ~175 days before 2026-09-23
+    assert _stale_data(bundle) == []
+
+
+def test_stale_data_no_financials_at_all_not_flagged_as_stale():
+    """None means no quarters exist at all -- a data_coverage-shaped gap
+    (nothing to measure an age from), not a staleness signal."""
+    assert _stale_data(_bundle(latest_financials_period_end=None)) == []
+
+
+# ---------- _validate_with_caveats (86bbummwp follow-on -- new here, this agent
+# had no caveat-specific validator to compose with before now) ----------
+
+
+def _valid_fundamental_output(**overrides) -> dict:
+    base = {
+        "assessment_summary": "A solid technology company with strong fundamentals.",
+        "analysis_confidence": "high",
+        "caveats": ["Coverage limited to public filings and earnings calls."],
+        "key_factors": [
+            {"factor": "Revenue growth", "importance": "high", "sentiment": "positive", "evidence": "FILING:10-K: 14.2% YoY"},
+            {"factor": "FCF generation", "importance": "high", "sentiment": "positive", "evidence": "FILING:MD&A: FCF yield 4.8%"},
+        ],
+        "risks": [
+            {"risk": "Competitive pressure", "severity": "medium", "evidence": "N1: new entrant"},
+        ],
+        "narrative": (
+            "The company demonstrates strong compounding fundamentals with revenue growth of "
+            "14.2% driven by cloud migration and steady margin expansion. Free cash flow "
+            "generation remains healthy relative to peers, supporting continued reinvestment "
+            "in growth initiatives without excessive leverage. Management has a consistent "
+            "track record of meeting guidance, which supports confidence in forward estimates. "
+            "The balance sheet remains conservatively positioned with ample interest coverage "
+            "and a comfortable current ratio, leaving room to weather a cyclical downturn "
+            "without needing to raise capital on unfavorable terms. Overall the thesis rests "
+            "on durable competitive advantages and disciplined capital allocation over the "
+            "medium term horizon, with valuation broadly in line with sector peers on a "
+            "forward earnings basis, leaving upside contingent on continued execution."
+        ),
+        "interpretive_fields": {
+            "valuation_vs_sector": "fair",
+            "health_rating": "healthy",
+            "guidance_vs_consensus": "inline",
+            "dividend_sustainability": "strong",
+            "peer_comparison_summary": "Leads sector on FCF yield and margins.",
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_with_caveats_passes_when_schema_valid_and_no_gap():
+    passed, errors = _validate_with_caveats(
+        _valid_fundamental_output(), material_absent=[], anomalies=[], stale_data=[]
+    )
+    assert passed, errors
+
+
+def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_gap():
+    out = _valid_fundamental_output(interpretive_fields={
+        **_valid_fundamental_output()["interpretive_fields"], "health_rating": "not_a_real_rating",
+    })
+    passed, errors = _validate_with_caveats(out, material_absent=[], anomalies=[], stale_data=[])
+    assert not passed
+    assert any("health_rating" in e for e in errors)
+
+
+def test_validate_with_caveats_flags_high_confidence_stale_data_with_no_caveat():
+    out = _valid_fundamental_output(caveats=[])
+    passed, errors = _validate_with_caveats(
+        out, material_absent=[], anomalies=[], stale_data=["financials"]
+    )
+    assert not passed
+    assert any("caveats is empty" in e for e in errors)
+
+
+def test_validate_with_caveats_passes_high_confidence_stale_data_with_caveat_present():
+    out = _valid_fundamental_output(caveats=["Financials are 200 days old, beyond the usual reporting cycle."])
+    passed, errors = _validate_with_caveats(
+        out, material_absent=[], anomalies=[], stale_data=["financials"]
+    )
+    assert passed, errors

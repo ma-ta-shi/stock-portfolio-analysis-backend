@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 from agents.pass1_technical_analyst import (
     _data_coverage_line,
-    _data_warnings_line,
+    _stale_data,
     _validate_with_caveats,
     build_user_message,
 )
@@ -163,7 +163,7 @@ def test_field_presence_support_resistance_false_when_pivots_unresolved():
     assert presence["support_resistance"] is False
 
 
-# ---------- _data_coverage_line / _data_warnings_line (86bbummwp Tier 1a/1b) ----------
+# ---------- _data_coverage_line (86bbummwp Tier 1a) ----------
 
 
 def test_data_coverage_line_standard_with_full_field_presence():
@@ -183,18 +183,9 @@ def test_data_coverage_line_flags_multiple_real_gaps():
     assert "weekly timeframe" not in line  # that one's still present in this fixture
 
 
-def test_data_warnings_line_empty_when_no_preflight_warnings():
-    assert _data_warnings_line([]) == ""
-
-
-def test_data_warnings_line_joins_real_anomalies():
-    warnings = ["zero-volume session on 2026-09-10", "unexplained 28% gap on 2026-09-15"]
-    assert _data_warnings_line(warnings) == (
-        "zero-volume session on 2026-09-10; unexplained 28% gap on 2026-09-15"
-    )
-
-
-# ---------- _validate_with_caveats (86bbummwp Tier 1c) ----------
+# ---------- _validate_with_caveats (86bbummwp Tier 1c, extended by the follow-on
+# confidence/data-quality coupling rule -- material_absent/anomalies/stale_data=[]
+# below keeps these existing tests unaffected by the new rule) ----------
 
 
 def _valid_technical_output(**overrides) -> dict:
@@ -232,35 +223,46 @@ def _valid_technical_output(**overrides) -> dict:
     return base
 
 
+def _validate(output, earnings_days=45, avg_dollar_vol=5_000_000, material_absent=None, anomalies=None, stale_data=None):
+    return _validate_with_caveats(
+        output,
+        earnings_days=earnings_days,
+        avg_dollar_vol=avg_dollar_vol,
+        material_absent=material_absent or [],
+        anomalies=anomalies or [],
+        stale_data=stale_data or [],
+    )
+
+
 def test_validate_with_caveats_passes_when_no_condition_and_schema_valid():
-    passed, errors = _validate_with_caveats(_valid_technical_output(), earnings_days=45, avg_dollar_vol=5_000_000)
+    passed, errors = _validate(_valid_technical_output())
     assert passed, errors
 
 
 def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_caveats():
     out = _valid_technical_output(interpretive_fields={"primary_trend": "ranging", "trend_strength": "moderate", "momentum_zone": "neutral"})
-    passed, errors = _validate_with_caveats(out, earnings_days=45, avg_dollar_vol=5_000_000)
+    passed, errors = _validate(out)
     assert not passed
     assert any("primary_trend" in e for e in errors)
 
 
 def test_validate_with_caveats_flags_missing_earnings_caveat():
     out = _valid_technical_output()  # no earnings mention
-    passed, errors = _validate_with_caveats(out, earnings_days=3, avg_dollar_vol=5_000_000)
+    passed, errors = _validate(out, earnings_days=3)
     assert not passed
     assert any("earnings proximity caveat" in e for e in errors)
 
 
 def test_validate_with_caveats_flags_missing_thin_volume_caveat():
     out = _valid_technical_output()  # no volume/liquidity mention
-    passed, errors = _validate_with_caveats(out, earnings_days=45, avg_dollar_vol=500_000)
+    passed, errors = _validate(out, avg_dollar_vol=500_000)
     assert not passed
     assert any("thin volume" in e for e in errors)
 
 
 def test_validate_with_caveats_merges_errors_from_both_checks():
     out = _valid_technical_output()
-    passed, errors = _validate_with_caveats(out, earnings_days=3, avg_dollar_vol=500_000)
+    passed, errors = _validate(out, earnings_days=3, avg_dollar_vol=500_000)
     assert not passed
     assert any("earnings proximity caveat" in e for e in errors)
     assert any("thin volume" in e for e in errors)
@@ -269,12 +271,53 @@ def test_validate_with_caveats_merges_errors_from_both_checks():
 def test_validate_with_caveats_earnings_none_skips_that_check():
     """No earnings calendar data at all -- nothing to flag, not a crash."""
     out = _valid_technical_output()
-    passed, errors = _validate_with_caveats(out, earnings_days=None, avg_dollar_vol=5_000_000)
+    passed, errors = _validate(out, earnings_days=None)
     assert passed, errors
 
 
 def test_validate_with_caveats_avg_dollar_vol_none_skips_that_check():
     """No liquidity data at all -- nothing to flag, not a crash."""
     out = _valid_technical_output()
-    passed, errors = _validate_with_caveats(out, earnings_days=45, avg_dollar_vol=None)
+    passed, errors = _validate(out, avg_dollar_vol=None)
     assert passed, errors
+
+
+# ---------- confidence/data-quality coupling rule (86bbummwp follow-on) ----------
+
+
+def test_validate_with_caveats_flags_high_confidence_with_stale_data_and_no_caveat():
+    out = _valid_technical_output(caveats=[])
+    passed, errors = _validate(out, stale_data=["price"])
+    assert not passed
+    assert any("caveats is empty" in e for e in errors)
+
+
+def test_validate_with_caveats_passes_high_confidence_with_stale_data_when_caveat_present():
+    out = _valid_technical_output(caveats=["Price data is 6 trading days old."])
+    passed, errors = _validate(out, stale_data=["price"])
+    assert passed, errors
+
+
+def test_validate_with_caveats_stale_data_not_flagged_when_confidence_not_high():
+    out = _valid_technical_output(analysis_confidence="medium", caveats=[])
+    passed, errors = _validate(out, stale_data=["price"])
+    assert passed, errors
+
+
+# ---------- _stale_data (86bbummwp Tier 2) ----------
+
+
+def test_stale_data_empty_when_current():
+    assert _stale_data(days_old=0) == []
+
+
+def test_stale_data_empty_within_threshold():
+    assert _stale_data(days_old=5) == []
+
+
+def test_stale_data_flags_price_past_threshold():
+    assert _stale_data(days_old=6) == ["price"]
+
+
+def test_stale_data_flags_price_far_past_threshold():
+    assert _stale_data(days_old=30) == ["price"]

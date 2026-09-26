@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import pytest
 import structlog
@@ -1399,6 +1399,61 @@ async def test_build_research_sources_degrades_cleanly_with_nothing_available(mo
     assert set(bundle.missing_sources_list) == {"filing_digests", "peer_blocks", "news_items"}
     assert bundle.latest_filing_age_days is None
     assert bundle.latest_news_age_days is None
+
+
+async def test_build_research_sources_latest_news_age_days_handles_aware_article_dates(monkeypatch):
+    """Regression test for a real bug caught live (86bbummwp Tier 2,
+    2026-09-25): `latest_news_age_days` used bare `datetime.now() -
+    max(item.date...)`, which raises "can't subtract offset-naive and
+    offset-aware datetimes" the moment `item.date` is timezone-aware (some
+    news sources attach tzinfo, e.g. Finnhub via SENT's own equivalent
+    field, which hit the exact same bug independently). This field had no
+    real consumer before Stock Researcher's new stale_data flag started
+    reading it, so the crash was latent, never actually exercised until now.
+    Fixed to compare at `.date()` granularity, matching
+    `latest_filing_age_days`'s own already-correct pattern immediately above
+    it in the source."""
+    monkeypatch.setattr("data.precompute.research_sources.is_crosslisted", lambda t: False)
+    monkeypatch.setattr("data.precompute.research_sources.is_canadian", lambda stock, ticker: True)
+
+    class _FakeRouter:
+        def __init__(self, ticker):
+            self.ticker = ticker
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get_company_info(self, ticker):
+            return {"name": "Some Co"}
+
+        async def get_peers(self, ticker, limit):
+            return []
+
+        async def get_insider_trading(self, ticker, days):
+            return []
+
+        async def get_dividend_history(self, ticker, from_date, to_date):
+            return []
+
+    monkeypatch.setattr("data.precompute.research_sources.Router", _FakeRouter)
+
+    articles = [
+        {
+            "id": "N1",
+            "date": datetime(2026, 9, 1, tzinfo=UTC),  # aware -- the real trigger condition
+            "headline": "Some Co reports earnings",
+            "source": "Reuters",
+            "quality_tier": "primary",
+        }
+    ]
+
+    bundle = await build_research_sources("WELL.TO", articles)  # must not raise
+
+    assert bundle.latest_news_age_days is not None
+    assert bundle.latest_news_age_days >= 0
 
 
 async def test_build_research_sources_logs_when_main_company_name_unresolvable(monkeypatch):
