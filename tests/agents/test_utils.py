@@ -18,6 +18,7 @@ from agents.utils import (
     agent_completed,
     build_pass1_reliability_warnings,
     char_count,
+    compute_data_quality_assessment,
     compute_disagreement_score,
     compute_outlook_distance,
     extract_numeric_tokens,
@@ -197,6 +198,72 @@ class TestReliabilityWarnings:
 
     def test_status_labels_cover_all_confidence_levels(self):
         assert set(CONFIDENCE_STATUS_LABELS) == {"high", "medium", "low", "insufficient"}
+
+    # ---------- agent_quality (86bbummwp Tier 3) -- additive, optional ----------
+
+    def test_agent_quality_omitted_is_byte_identical_to_old_behavior(self):
+        confidence = {"RSRCH": "high", "FUND": "medium", "TECH": "low", "SENT": "insufficient", "MACRO": "high"}
+        assert build_pass1_reliability_warnings(confidence) == (
+            "RSRCH: high (OK) | FUND: medium (caution) | TECH: low (unreliable) | "
+            "SENT: insufficient (skipped) | MACRO: high (OK)"
+        )
+
+    def test_agent_quality_appends_quality_segment_per_agent(self):
+        confidence = {aid: "high" for aid in PASS1_AGENT_IDS}
+        quality = {"RSRCH": "high", "FUND": "medium", "TECH": "high", "SENT": "high", "MACRO": "low"}
+        result = build_pass1_reliability_warnings(confidence, agent_quality=quality)
+        assert "MACRO: high (OK), quality=low" in result
+        assert "FUND: high (OK), quality=medium" in result
+
+    def test_all_high_confidence_all_high_quality_still_returns_empty_string(self):
+        confidence = {aid: "high" for aid in PASS1_AGENT_IDS}
+        quality = {aid: "high" for aid in PASS1_AGENT_IDS}
+        assert build_pass1_reliability_warnings(confidence, agent_quality=quality) == ""
+
+    def test_all_high_confidence_one_low_quality_does_not_suppress_the_line(self):
+        """The exact bug this design avoided: with the old confidence-only
+        gate, an agent claiming high confidence while its own data quality is
+        low would have been silently hidden whenever every agent's
+        confidence happened to be high -- the one divergence this signal
+        exists to surface."""
+        confidence = {aid: "high" for aid in PASS1_AGENT_IDS}
+        quality = {**{aid: "high" for aid in PASS1_AGENT_IDS}, "MACRO": "low"}
+        result = build_pass1_reliability_warnings(confidence, agent_quality=quality)
+        assert result != ""
+        assert "MACRO: high (OK), quality=low" in result
+
+    def test_agent_quality_missing_entry_defaults_to_low(self):
+        confidence = {aid: "high" for aid in PASS1_AGENT_IDS}
+        result = build_pass1_reliability_warnings(confidence, agent_quality={})
+        for aid in PASS1_AGENT_IDS:
+            assert f"{aid}: high (OK), quality=low" in result
+
+
+class TestComputeDataQualityAssessment:
+    """86bbummwp Tier 3 -- D6 section 3's per-agent mechanical rollup."""
+
+    def test_all_clean_is_high(self):
+        assert compute_data_quality_assessment([], [], []) == "high"
+
+    def test_single_stale_item_is_medium(self):
+        assert compute_data_quality_assessment(["price"], [], []) == "medium"
+
+    def test_single_absent_item_is_medium(self):
+        assert compute_data_quality_assessment([], [], ["peers_block"]) == "medium"
+
+    def test_two_combined_items_is_low(self):
+        assert compute_data_quality_assessment(["price"], [], ["peers_block"]) == "low"
+
+    def test_two_stale_items_alone_is_low(self):
+        assert compute_data_quality_assessment(["rate", "cpi"], [], []) == "low"
+
+    def test_any_anomaly_is_low_even_alone(self):
+        """An anomaly always forces low outright -- a real contradiction,
+        never "minor", unlike a single missing/stale field."""
+        assert compute_data_quality_assessment([], ["US yield curve is inverted"], []) == "low"
+
+    def test_anomaly_plus_otherwise_clean_is_still_low(self):
+        assert compute_data_quality_assessment([], ["some anomaly"], []) == "low"
 
 
 class TestRenderDataCoverageLine:

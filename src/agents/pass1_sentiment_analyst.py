@@ -85,6 +85,7 @@ from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import (
     RenderedField,
+    compute_data_quality_assessment,
     render_data_coverage_line,
     render_data_warnings,
     to_data_coverage,
@@ -331,6 +332,19 @@ class SentimentAnalystRunner(BaseRunner):
         self.last_data_coverage = to_data_coverage(field_presence, _COVERAGE_GAP_SENTENCES)
         self.last_stale_data = _stale_data(bundle)
         self.last_anomalies = _anomalies(bundle)
+        # peer_sentiment is permanently absent (hardcoded empty in data/pipeline.py's
+        # DataBundle assembly) -- excluded here, not in last_data_coverage itself, so the
+        # stored/badge-facing fact stays untouched while the confidence/data-quality rule
+        # and the new data_quality_assessment rollup below don't fire/downgrade on it every
+        # run (86bbummwp Tier 3 -- this exclusion was missing here, found live: the
+        # follow-on's own validator call below used to pass last_data_coverage["absent"]
+        # unfiltered, meaning it over-fired on this permanent gap on every single run).
+        material_absent = [a for a in self.last_data_coverage["absent"] if a != "peer_sentiment"]
+        # 86bbummwp Tier 3 -- D6 section 3's per-agent mechanical data_quality_assessment,
+        # set here for the same reason as last_field_coverage above.
+        self.last_data_quality_assessment = compute_data_quality_assessment(
+            self.last_stale_data, self.last_anomalies, material_absent
+        )
         system_prompt = fill(
             load_template("sentiment_analyst"),
             {
@@ -353,7 +367,7 @@ class SentimentAnalystRunner(BaseRunner):
             partial(
                 _validate_with_caveats,
                 canadian_sentiment_inferred=bundle.canadian_data_flags is not None,
-                material_absent=self.last_data_coverage["absent"],
+                material_absent=material_absent,
                 anomalies=self.last_anomalies,
                 stale_data=self.last_stale_data,
             ),

@@ -78,19 +78,36 @@ def build_pass1_summaries(compressed_pass1: dict) -> str:
         if out is None:
             lines.append(f"  {agent_id}: NOT AVAILABLE")
         elif not out.get("pass2_view"):
+            # quality={enum} (86bbummwp Tier 3) shown here too, not gated on
+            # pass2_view -- it's a mechanical fact about input DATA, computed
+            # before the LLM call ever happens, unaffected by whether this
+            # agent's own narrative output was coherent enough to build one
+            # (same reasoning as compression.py's own extract_data_quality_levels()).
             lines.append(
-                f"  {agent_id}: INSUFFICIENT DATA (confidence={out.get('analysis_confidence', 'insufficient')})"
+                f"  {agent_id}: INSUFFICIENT DATA (confidence={out.get('analysis_confidence', 'insufficient')}, "
+                f"quality={out.get('data_quality_assessment', 'low')})"
             )
         else:
-            # confidence={enum}: was "reliability={score}/100, quality={enum}" pre-D6
-            # (86bbummwp); narrative context only, not a verification layer (audit E58).
+            # confidence={enum}, quality={enum}: this line briefly carried
+            # "reliability={score}/100, quality={enum}" pre-D6 (86bbummwp),
+            # then dropped quality entirely when reliability_score was
+            # removed (audit E58) since nothing mechanical replaced it yet.
+            # Tier 3 restores quality, now mechanically sourced from this
+            # same agent's own stale_data/anomalies/data_coverage rather
+            # than an LLM-derived or avg() value -- narrative context only,
+            # not a verification layer, same as confidence alongside it.
+            # Deliberately NOT collapsed into one combined verdict here or
+            # anywhere else Pass 1 quality reaches Pass 2/CIO -- see
+            # agents/utils.py::build_pass1_reliability_warnings()'s own
+            # docstring for why both signals are shown side by side instead.
             # finding={assessment_summary}: added 86bbt1k1p -- Stage A's own "Pass 1
             # citation inventory" step requires a concrete finding per agent ("FUND:
             # revenue grew 15.7% YoY", not just "FUND"), which confidence alone can
             # never supply. Single pipe-delimited line, matching this file's existing
             # convention elsewhere (e.g. the Risk Advisor block below).
             lines.append(
-                f"  {agent_id}: confidence={out['analysis_confidence']} | "
+                f"  {agent_id}: confidence={out['analysis_confidence']}, "
+                f"quality={out.get('data_quality_assessment', 'low')} | "
                 f"finding: {out.get('assessment_summary', '')}"
             )
     return "\n".join(lines) if lines else "(no Pass 1 output available)"

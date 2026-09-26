@@ -48,6 +48,7 @@ RULES:
    without it. Phrases like "for a mid-income taxpayer" are inadmissible when income is not given.
 
 2. CONFIDENCE-AWARE WEIGHTING. Pass 1 `analysis_confidence`: "high" confident, "medium" caution, "low"/"insufficient" do not base conclusions. SENT and TECH are largely orthogonal to tax conclusions; FUND and the pre-computed tax-metric block are binding. If FUND `analysis_confidence` is "low" AND dividend classification is ambiguous from the pre-computed block alone, cap `groundedness_score` at 50.
+   DATA QUALITY IS A SEPARATE SIGNAL FROM CONFIDENCE: FUND also carries a mechanical `quality` value (stale data, anomalies, or coverage gaps — computed by the orchestrator, not FUND's own judgment). FUND can report high confidence while its own quality is low — the dividend classification may be less certain than FUND's own confidence suggests. Apply the SAME cap-at-50 rule above when FUND `quality` is "low" and dividend classification is ambiguous, even if FUND `analysis_confidence` itself is "high" or "medium" — the ambiguity risk comes from the underlying data, not from FUND's own self-reported confidence.
 
 3. PRE-COMPUTED METRIC PASSTHROUGH. `dividend_yield_pct`, `withholding_tax_rate_pct`, and `effective_after_tax_yield_pct` must appear verbatim. The LLM ADDS interpretation fields. Precision: yields one decimal; WHT integer or one-decimal matching source; drag estimates one decimal.
 
