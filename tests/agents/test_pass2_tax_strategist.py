@@ -9,7 +9,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agents.pass2_tax_strategist import _tax_metrics_block, build_user_message
+from agents.pass2_tax_strategist import _tax_metrics_block, _validate_with_caveats, build_user_message
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -97,3 +97,117 @@ def test_field_presence_both_false_for_etf_branch():
     )
     _, presence = build_user_message(bundle, {}, "tfsa")
     assert presence == {"divid": False, "wht": False}
+
+
+# ---------- _validate_with_caveats (86bbummwp follow-on -- new here, this agent
+# previously called validate_tax_strategist bare, no composition and no
+# account_type at all, so Rule 14 (loss harvesting null for TFSA/RRSP) had
+# never actually fired in production) ----------
+
+
+def _valid_tax_output(**overrides) -> dict:
+    base = {
+        "groundedness_score": 82,
+        "thesis_summary": "Holding this stock in a TFSA incurs a 15% US withholding tax on the dividend that is not recoverable under the Canada-US tax treaty.",
+        "strongest_signal": "WHT: 15% US withholding tax on dividends is NOT recoverable in a TFSA.",
+        "caveats": ["Tax rules verified against CRA guidance as of March 2026."],
+        "key_factors": [
+            {"factor": "US dividend WHT drag", "importance": "medium", "sentiment": "negative", "evidence": "WHT: 15% non-recoverable in TFSA"},
+            {"factor": "Capital gains tax-free in TFSA", "importance": "high", "sentiment": "positive", "evidence": "REF: TFSA capital gains are completely tax-free"},
+        ],
+        "narrative": (
+            "This US-domiciled company (DOM) trades on NASDAQ (LIST). The dividend yield "
+            "triggers US withholding tax of 15% (WHT) when held in a TFSA. Unlike an RRSP, a "
+            "TFSA is not recognized as a retirement account under the Canada-US tax treaty, so "
+            "the withholding exemption does not apply (REF/Cross-border). This results in a "
+            "modest effective after-tax yield reduction (ELIG). The tax drag from withholding "
+            "is modest and should not be the primary factor in the investment decision for a "
+            "capital-appreciation-oriented thesis. For a medium-term TFSA investor, the "
+            "dominant tax advantage is the capital gains exemption (CGAIN) -- any price "
+            "appreciation would be entirely tax-free in a TFSA, compared to a 50% inclusion "
+            "rate in a taxable account. The ROOM consideration is relevant: holding a "
+            "high-growth stock in TFSA maximizes the tax-free compounding advantage, and "
+            "contribution room is restored on January 1 of the year following a sell (REF/TFSA), "
+            "so an exit is not permanently costly. FUND reports a modest payout ratio, so the "
+            "dividend is a small component of total return and the withholding drag stays "
+            "secondary; MACRO notes no pending treaty change that would alter this treatment "
+            "over the holding period, and RSRCH's own archetype supports a longer holding "
+            "period consistent with this account's own tax treatment favoring patience."
+        ),
+        "tax_profile": {
+            "account_fit_score": "good",
+            "tax_efficiency_for_account": "favorable",
+            "dividend_yield_pct": 1.8,
+            "withholding_tax_rate_pct": 15.0,
+            "effective_after_tax_yield_pct": 1.53,
+            "is_eligible_canadian_dividend": False,
+            "capital_gains_treatment": "Tax-free in TFSA -- all capital gains are completely exempt from Canadian tax.",
+            "loss_risk_assessment": "Capital losses in TFSA permanently reduce available TFSA room.",
+            "cross_account_recommendation": None,
+            "recommended_account": "current_account_is_optimal",
+            "loss_harvesting_opportunity": None,
+            "key_tax_risks": [
+                {
+                    "risk": "The 15% withholding is permanently lost in a TFSA and cannot be reclaimed as a foreign tax credit.",
+                    "severity": "medium",
+                    "evidence": "WHT: 15% non-recoverable in TFSA per REF/TFSA",
+                },
+            ],
+            "tax_optimization_actions": [],
+        },
+    }
+    base.update(overrides)
+    return base
+
+
+def test_validate_with_caveats_passes_when_schema_valid_and_below_threshold():
+    """groundedness_score=82 is below the 85 threshold -- the new confidence/
+    data-quality rule never applies regardless of gaps."""
+    passed, errors = _validate_with_caveats(
+        _valid_tax_output(), material_absent=["divid"], account_type="tfsa"
+    )
+    assert passed, errors
+
+
+def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_gap():
+    out = _valid_tax_output(tax_profile={
+        **_valid_tax_output()["tax_profile"], "account_fit_score": "excellent-ish",
+    })
+    passed, errors = _validate_with_caveats(out, material_absent=[], account_type="tfsa")
+    assert not passed
+    assert any("account_fit_score" in e for e in errors)
+
+
+def test_validate_with_caveats_flags_high_groundedness_with_gap_and_no_caveat():
+    out = _valid_tax_output(groundedness_score=92, caveats=[])
+    passed, errors = _validate_with_caveats(out, material_absent=["divid"], account_type="tfsa")
+    assert not passed
+    assert any("caveats is empty" in e for e in errors)
+
+
+def test_validate_with_caveats_passes_high_groundedness_with_gap_when_caveat_present():
+    out = _valid_tax_output(
+        groundedness_score=92, caveats=["No dividend history available for this stock."]
+    )
+    passed, errors = _validate_with_caveats(out, material_absent=["divid"], account_type="tfsa")
+    assert passed, errors
+
+
+def test_validate_with_caveats_enforces_rule_14_loss_harvesting_null_for_tfsa():
+    """Rule 14, real and now actually wired: loss_harvesting_opportunity must
+    be null in a TFSA/RRSP -- previously dead because account_type was never
+    supplied to validate_tax_strategist at all."""
+    out = _valid_tax_output(tax_profile={
+        **_valid_tax_output()["tax_profile"], "loss_harvesting_opportunity": "harvest now",
+    })
+    passed, errors = _validate_with_caveats(out, material_absent=[], account_type="tfsa")
+    assert not passed
+    assert any("loss_harvesting_opportunity" in e for e in errors)
+
+
+def test_validate_with_caveats_rule_14_not_checked_for_trading_account():
+    out = _valid_tax_output(tax_profile={
+        **_valid_tax_output()["tax_profile"], "loss_harvesting_opportunity": "harvest now",
+    })
+    passed, errors = _validate_with_caveats(out, material_absent=[], account_type="trading")
+    assert passed, errors

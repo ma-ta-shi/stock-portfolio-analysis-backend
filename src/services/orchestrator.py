@@ -264,6 +264,15 @@ def _agent_output_row(
         # (possibly incomplete) input, and knowing that is exactly the
         # point (see this field's own column comment).
         input_field_coverage=getattr(runner, "last_field_coverage", None),
+        # 86bbummwp Tier 2 -- D6's mechanical flags, same getattr/None-default
+        # pattern as input_field_coverage above, for the same reason (set
+        # before the LLM call, read regardless of completion status). None is
+        # a real, distinct state from an empty list here: it means this agent
+        # doesn't implement that particular check (yet), not "checked, found
+        # nothing" -- see agent_outputs.py's own column comments.
+        stale_data=getattr(runner, "last_stale_data", None),
+        anomalies=getattr(runner, "last_anomalies", None),
+        data_coverage=getattr(runner, "last_data_coverage", None),
     )
 
     llm_calls = _llm_call_rows(run.run_id, agent_pass, runner)

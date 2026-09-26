@@ -3,7 +3,13 @@ equivalent -- see test_pass1_stock_researcher.py's docstring for why."""
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from agents.pass1_sentiment_analyst import _data_coverage_line, _validate_with_caveats, build_user_message
+from agents.pass1_sentiment_analyst import (
+    _anomalies,
+    _data_coverage_line,
+    _stale_data,
+    _validate_with_caveats,
+    build_user_message,
+)
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -258,8 +264,18 @@ def _valid_sentiment_analyst_output(**overrides) -> dict:
     return base
 
 
+def _validate(output, canadian_sentiment_inferred, material_absent=None, anomalies=None, stale_data=None):
+    return _validate_with_caveats(
+        output,
+        canadian_sentiment_inferred=canadian_sentiment_inferred,
+        material_absent=material_absent or [],
+        anomalies=anomalies or [],
+        stale_data=stale_data or [],
+    )
+
+
 def test_validate_with_caveats_passes_when_not_inferred_and_schema_valid():
-    passed, errors = _validate_with_caveats(_valid_sentiment_analyst_output(), canadian_sentiment_inferred=False)
+    passed, errors = _validate(_valid_sentiment_analyst_output(), canadian_sentiment_inferred=False)
     assert passed, errors
 
 
@@ -267,14 +283,14 @@ def test_validate_with_caveats_fails_on_base_schema_error_regardless_of_inferenc
     out = _valid_sentiment_analyst_output(structured_data={
         **_valid_sentiment_analyst_output()["structured_data"], "social_sentiment": "bearish",
     })
-    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=False)
+    passed, errors = _validate(out, canadian_sentiment_inferred=False)
     assert not passed
     assert any("social_sentiment" in e for e in errors)
 
 
 def test_validate_with_caveats_flags_missing_canadian_caveat():
     out = _valid_sentiment_analyst_output()  # no Canadian inference mention
-    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=True)
+    passed, errors = _validate(out, canadian_sentiment_inferred=True)
     assert not passed
     assert any("scored from headlines only" in e for e in errors)
 
@@ -285,11 +301,142 @@ def test_validate_with_caveats_passes_with_real_current_phrase_when_inferred():
         "provider, and is not validated against a ground-truth dataset. Canadian articles are "
         "scored from headlines only — the Canadian news feed returns no article body."
     ])
-    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=True)
+    passed, errors = _validate(out, canadian_sentiment_inferred=True)
     assert passed, errors
 
 
 def test_validate_with_caveats_not_checked_when_not_inferred():
     out = _valid_sentiment_analyst_output()  # no Canadian inference mention, but not inferred
-    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=False)
+    passed, errors = _validate(out, canadian_sentiment_inferred=False)
     assert passed, errors
+
+
+# ---------- confidence/data-quality coupling rule (86bbummwp follow-on) ----------
+
+
+def test_validate_with_caveats_flags_high_confidence_with_anomaly_and_no_caveat():
+    out = _valid_sentiment_analyst_output(caveats=[])
+    passed, errors = _validate(out, canadian_sentiment_inferred=False, anomalies=["real divergence"])
+    assert not passed
+    assert any("caveats is empty" in e for e in errors)
+
+
+def test_validate_with_caveats_passes_high_confidence_with_anomaly_when_caveat_present():
+    out = _valid_sentiment_analyst_output(caveats=["News sentiment positive despite net insider selling."])
+    passed, errors = _validate(out, canadian_sentiment_inferred=False, anomalies=["real divergence"])
+    assert passed, errors
+
+
+# ---------- _stale_data (86bbummwp Tier 2) ----------
+
+
+def test_stale_data_empty_for_default_fixture():
+    """Default fixture: news is 3 days old (well within threshold), and
+    short_interest has no as_of_date key at all (not applicable, not stale)."""
+    assert _stale_data(_bundle()) == []
+
+
+def test_stale_data_flags_old_news():
+    bundle = _bundle(news_with_sentiment=[
+        {"id": "N1", "headline": "Old story", "source": "Reuters", "quality_tier": "primary",
+         "sentiment": "neutral", "date": datetime(2026, 8, 1, tzinfo=UTC)},
+    ])
+    assert _stale_data(bundle) == ["news"]
+
+
+def test_stale_data_handles_naive_article_date():
+    """Regression test for a real bug caught live (2026-09-25, a real SENT
+    run on RDDT): finnhub.py builds article dates via bare
+    datetime.fromtimestamp()/datetime.now() (naive), while data_vintage is
+    datetime.now(UTC) (aware) -- subtracting them raised "can't subtract
+    offset-naive and offset-aware datetimes" and failed the whole agent.
+    Must not raise, naive or aware."""
+    bundle = _bundle(news_with_sentiment=[
+        {"id": "N1", "headline": "Old story", "source": "Reuters", "quality_tier": "primary",
+         "sentiment": "neutral", "date": datetime(2026, 8, 1)},  # naive, no tzinfo
+    ])
+    assert _stale_data(bundle) == ["news"]
+
+
+def test_stale_data_uses_most_recent_article_not_oldest():
+    bundle = _bundle(news_with_sentiment=[
+        {"id": "N1", "headline": "Old", "source": "Reuters", "quality_tier": "primary",
+         "sentiment": "neutral", "date": datetime(2026, 1, 1, tzinfo=UTC)},
+        {"id": "N2", "headline": "Recent", "source": "Reuters", "quality_tier": "primary",
+         "sentiment": "neutral", "date": datetime(2026, 9, 22, tzinfo=UTC)},
+    ])
+    assert _stale_data(bundle) == []  # the recent one is what matters
+
+
+def test_stale_data_no_news_is_not_flagged():
+    """No articles at all is a coverage gap (data_coverage's job), not a
+    staleness signal -- nothing to compute an age from."""
+    assert _stale_data(_bundle(news_with_sentiment=[])) == []
+
+
+def test_stale_data_flags_old_short_interest():
+    bundle = _bundle(short_interest={
+        "short_interest_pct": 1.2, "days_to_cover": 1.8, "shares_short": 50_000_000,
+        "shares_short_prior_month": 55_000_000, "as_of_date": "2026-06-01",
+    })
+    assert "short_interest" in _stale_data(bundle)
+
+
+def test_stale_data_recent_short_interest_not_flagged():
+    bundle = _bundle(short_interest={
+        "short_interest_pct": 1.2, "days_to_cover": 1.8, "shares_short": 50_000_000,
+        "shares_short_prior_month": 55_000_000, "as_of_date": "2026-09-10",
+    })
+    assert "short_interest" not in _stale_data(bundle)
+
+
+def test_stale_data_no_short_interest_is_not_flagged():
+    assert "short_interest" not in _stale_data(_bundle(short_interest=None))
+
+
+# ---------- _anomalies (86bbummwp Tier 2) ----------
+
+
+def test_anomalies_empty_for_default_fixture():
+    """Default: 1 positive article, no insider transactions, low short
+    interest -- no divergence to flag."""
+    assert _anomalies(_bundle()) == []
+
+
+def test_anomalies_empty_when_sentiment_not_strongly_positive():
+    bundle = _bundle(news_with_sentiment=[
+        {"id": "N1", "headline": "Mixed", "source": "Reuters", "quality_tier": "primary",
+         "sentiment": "negative", "date": datetime(2026, 9, 20, tzinfo=UTC)},
+    ])
+    assert _anomalies(bundle) == []
+
+
+def test_anomalies_flags_positive_sentiment_with_net_insider_selling():
+    recent = (datetime.now(UTC).date() - timedelta(days=10)).isoformat()
+    bundle = _bundle(
+        insider_activity={"transactions": [
+            {"date": recent, "is_issuer": False, "transaction_type": "sale", "shares": 100, "value": 1000},
+            {"date": recent, "is_issuer": False, "transaction_type": "sale", "shares": 100, "value": 1000},
+        ]},
+    )
+    result = _anomalies(bundle)
+    assert any("net sellers" in f for f in result)
+
+
+def test_anomalies_flags_positive_sentiment_with_elevated_short_interest():
+    bundle = _bundle(short_interest={
+        "short_interest_pct": 15.0, "days_to_cover": 4.0, "shares_short": 90_000_000,
+        "shares_short_prior_month": 80_000_000,
+    })
+    result = _anomalies(bundle)
+    assert any("elevated short interest" in f for f in result)
+
+
+def test_anomalies_no_scored_articles_returns_empty():
+    """Only unscored articles (sentiment=None) -- nothing to compute a ratio
+    from, must not crash."""
+    bundle = _bundle(news_with_sentiment=[
+        {"id": "N1", "headline": "Unscored", "source": "Reuters", "quality_tier": "primary",
+         "sentiment": None, "date": datetime(2026, 9, 20, tzinfo=UTC)},
+    ])
+    assert _anomalies(bundle) == []

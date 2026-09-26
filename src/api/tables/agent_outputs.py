@@ -16,10 +16,16 @@ class AgentOutput(Base):
     confidence: Mapped[Optional[int]]                         # 0-100 (null for pass1)
     # reliability_score (0-100) retired 86bbummwp (decision D6, docs/technical/
     # pass1-confidence-model.md): removed, not redesigned -- never LLM-produced again.
-    # analysis_confidence (pass1 only) is the real, live replacement signal. Mechanical
-    # flags (stale_data/anomalies/data_coverage) are a separate, not-yet-built orchestrator
-    # computation -- no speculative column added for them here; see the D6 doc.
+    # analysis_confidence (pass1 only) is the real, live replacement signal.
     analysis_confidence: Mapped[Optional[str]] = mapped_column(String(20))  # pass1 only
+    # D6's three mechanical, orchestrator-computed flags (86bbummwp Tier 2) -- distinct
+    # from input_field_coverage below (finer-grained, per-rendered-field). All three are
+    # nullable, and null is a real, distinct state from an empty list: null means this
+    # agent doesn't implement that check (yet); [] means it does, and found nothing.
+    # Pass 1 only, same as analysis_confidence -- Pass 2/CIO/Shadow CIO never set these.
+    stale_data: Mapped[Optional[list]] = mapped_column(JSON)          # which series are stale
+    anomalies: Mapped[Optional[list]] = mapped_column(JSON)           # pre-flight contradiction findings
+    data_coverage: Mapped[Optional[dict]] = mapped_column(JSON)       # {"present": [...], "absent": [...]}
     # {field_name: bool} -- did this agent's own build_user_message() render
     # a real value for this field, or "N/A" (86bbwachy Phase 4). Set only for
     # the 7 call sites that consume raw DataBundle fields directly (Stock
@@ -27,12 +33,10 @@ class AgentOutput(Base):
     # Macro Economist, Risk Advisor Stage A, Tax Strategist) -- null for
     # Bull/Bear Advocate, CIO, Shadow CIO, which only ever see compressed
     # Pass 1 output and have no raw-field presence of their own to report.
-    # NOT the same thing as D6's own `data_coverage` above (a coarser,
-    # data-source-type signal meant for a not-yet-built user-facing badge,
-    # deliberately deferred, still unbuilt) -- this is the finer-grained,
-    # per-rendered-field instrumentation signal, with an immediate consumer
-    # (run_quality_summary, ordinary debugging), not a bet on a future
-    # feature's exact shape.
+    # NOT the same thing as data_coverage above (a coarser, data-source-type
+    # signal, also feeding a not-yet-built user-facing badge) -- this is the
+    # finer-grained, per-rendered-field instrumentation signal, with an
+    # immediate consumer (run_quality_summary, ordinary debugging).
     input_field_coverage: Mapped[Optional[dict]] = mapped_column(JSON)
     key_factors: Mapped[Optional[list]] = mapped_column(JSON)
     risks: Mapped[Optional[list]] = mapped_column(JSON)

@@ -133,6 +133,7 @@ def _bundle(**overrides) -> DataBundle:
         price_info={},
         missing_fields=[],
         currency_mismatch=None,
+        latest_financials_period_end=None,
         technical_indicators={},
         support_resistance={},
         trend_structure={},
