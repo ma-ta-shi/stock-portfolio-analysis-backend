@@ -50,7 +50,7 @@ Address each in turn:
 **Advocates.** Restate the strongest argument from each side in your own words, identify each side's biggest weakness, and decide which evidence is more probative given current context. Do not resolve by averaging — take a view.
 
 **Disagreement-score consumption.** All four bands are reachable in practice.
-- `consensus` (0–19): no cap. Neither advocate has conviction; the stock is largely unknowable.
+- `consensus` (0–19): no cap. No material two-sided conflict — either neither advocate has a strong case, or only one side does (check each side's own `confidence` to tell which).
 - `mild_dissent` (20–39): no cap, but note dissent.
 - `split_decision` (40–59): `confidence` MUST be ≤ 65. Acknowledge uncertainty.
 - `high_conflict` (60–100): `stock_outlook` must be `neutral`, `somewhat_bullish`, or `somewhat_bearish`. `confidence` 40–60 unless one side has clearly superior evidence quality (state why).
