@@ -410,7 +410,7 @@ async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
     assert rec.stock_outlook_direction == "somewhat_bullish"
     assert rec.position_size_suggestion == "3-5%"
     assert rec.synthesis_narrative == "Buy on strength."
-    assert rec.expected_return_tier == "moderate"  # outperform -> moderate, lossy 5->4 tier map
+    assert rec.expected_return_tier == "outperform"  # 86bbt1kpj: 5-tier vocabulary stored as-is, no lossy DB collapse
 
     pred = (await session.execute(select(Prediction).where(Prediction.recommendation_id == rec.recommendation_id))).scalar_one()
     assert pred.price_at_recommendation == 220.0
@@ -418,11 +418,76 @@ async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
 
     shadow = (await session.execute(select(ShadowPrediction).where(ShadowPrediction.analysis_run_id == run.run_id))).scalar_one()
     assert shadow.shadow_outlook_direction == "neutral"
+    assert shadow.primary_expected_return_tier == "outperform"
+    assert shadow.shadow_expected_return_tier == "market_perform"
+    assert shadow.primary_cio_outlook_distance == 1  # somewhat_bullish(1) vs neutral(0)
+    assert shadow.high_divergence is False
+    assert shadow.divergence_magnitude == "minor"
 
     agent_outputs = (await session.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))).scalars().all()
     # 5 pass1 + 4 pass2 + cio(synthesis, written twice: stage A and stage B) + shadow_cio = 12
     assert len(agent_outputs) == 12
     assert all(row.status == "completed" for row in agent_outputs)
+
+
+@pytest.mark.asyncio
+async def test_strong_underperform_expected_return_tier_persists_without_lossy_collapse():
+    """86bbt1kpj: before this fix, _RETURN_TIER_TO_RECOMMENDATION_VOCAB collapsed
+    both underperform and strong_underperform to "minimal", destroying the one
+    distinction the ticket exists to preserve. Asserts the real 5-tier value
+    survives end-to-end through _create_recommendation and _run_shadow_cio, not
+    just at the (now-removed) shim boundary."""
+    session = await _make_session()
+    run = await _make_run(session)
+    bundle = _fake_bundle()
+
+    cio_stage_a = _completed(
+        stock_outlook="bearish", expected_return_tier="strong_underperform",
+        thesis_summary="Deteriorating fundamentals.", key_decision_factors=[{"factor": "margins"}],
+    )
+    cio_stage_b = {
+        "synthesis_narrative": "Exit position.",
+        "position_sizing_recommendation": "0%",
+        "expected_return_tier": "strong_underperform",
+        "tax_summary": {}, "risk_profile_summary": {},
+    }
+    shadow_result = _completed(stock_outlook="somewhat_bearish", expected_return_tier="underperform")
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch("services.orchestrator.StockResearcherRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(_completed(recommendation="bullish"))),
+        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
+        patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
+        patch(
+            "services.orchestrator.RiskAdvisorRunner",
+            _StubRunner(_completed(risk_profile={}), stage_b_result={"position_size_recommendation": "0%"}),
+        ),
+        patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
+        patch("services.orchestrator.ShadowCIORunner", _StubRunner(shadow_result)),
+        patch("services.orchestrator.Router") as MockRouter,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        router_instance = AsyncMock()
+        router_instance.get_quote = AsyncMock(return_value={"current_price": 5800.0})
+        MockRouter.return_value.__aenter__ = AsyncMock(return_value=router_instance)
+        MockRouter.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await AnalysisOrchestrator().run(run, session)
+
+    rec = (await session.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))).scalar_one()
+    assert rec.expected_return_tier == "strong_underperform"  # not "minimal"
+
+    shadow = (await session.execute(select(ShadowPrediction).where(ShadowPrediction.analysis_run_id == run.run_id))).scalar_one()
+    assert shadow.primary_expected_return_tier == "strong_underperform"
+    assert shadow.shadow_expected_return_tier == "underperform"
+    assert shadow.primary_cio_outlook_distance == 1  # bearish(-2) vs somewhat_bearish(-1)
+    assert shadow.high_divergence is False
+    assert shadow.divergence_magnitude == "minor"
 
 
 @pytest.mark.asyncio

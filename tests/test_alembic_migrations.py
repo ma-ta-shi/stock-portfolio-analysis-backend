@@ -13,6 +13,7 @@ own async engine creation opens its own separate connection per call, and an
 in-memory SQLite DB is only visible to the connection that created it.
 """
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -62,14 +63,21 @@ def _normalize(sql: str | None) -> str | None:
     sorts it, so `... UNIQUE (x), FOREIGN KEY(y) ...` and
     `... FOREIGN KEY(y), UNIQUE (x) ...` compare equal. CREATE INDEX
     statements have no such clause list and just get whitespace-collapsed.
+
+    Also strips double-quoting around identifiers in the preamble (e.g.
+    `CREATE TABLE "shadow_predictions"` vs `CREATE TABLE shadow_predictions`)
+    -- confirmed live (86bbt1kpj) that SQLite's batch-mode table recreation
+    (`op.batch_alter_table`, needed for a column rename on SQLite) quotes the
+    rebuilt table's name where `create_all()` doesn't, on an otherwise
+    identical schema. Not needed until a migration first used batch mode.
     """
     if sql is None:
         return None
     collapsed = " ".join(sql.split())
     open_paren = collapsed.find("(")
     if open_paren == -1 or not collapsed.rstrip().endswith(")"):
-        return collapsed  # not a "NAME (...)" shape -- nothing to reorder
-    preamble = collapsed[:open_paren]
+        return re.sub(r'"([^"]+)"', r"\1", collapsed)  # not a "NAME (...)" shape -- nothing to reorder
+    preamble = re.sub(r'"([^"]+)"', r"\1", collapsed[:open_paren])
     body = collapsed[open_paren + 1 : collapsed.rfind(")")]
 
     clauses, depth, start = [], 0, 0
