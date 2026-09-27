@@ -20,8 +20,6 @@ import json
 import re
 from dataclasses import dataclass
 
-import numpy as np
-
 
 @dataclass
 class RenderedField:
@@ -63,29 +61,44 @@ AGENT_ID_MAP = {
 PASS1_AGENT_IDS = ["RSRCH", "FUND", "TECH", "SENT", "MACRO"]
 
 
-def compute_disagreement_score(bull_confidence: int, bear_confidence: int) -> tuple[int, str]:
-    """Exact formula from Orchestration Engine doc."""
-    scores = [2, -2]  # bull always bullish=2, bear always bearish=-2
-    confidences = [bull_confidence / 100.0, bear_confidence / 100.0]
-    total_weight = sum(confidences)
-    if total_weight < 1e-6:
-        return 0, "consensus"
-    weighted_mean = sum(s * c for s, c in zip(scores, confidences)) / total_weight
-    weighted_var = sum(
-        c * (s - weighted_mean) ** 2 for s, c in zip(scores, confidences)
-    ) / max(total_weight, 1e-6)
-    direction_component = min(50, int(weighted_var / 4.0 * 50))
-    confidence_spread = int(np.std(confidences) * 50)
-    disagreement_score = min(100, direction_component + confidence_spread)
-    if disagreement_score <= 19:
+def compute_disagreement_score(bull_confidence, bear_confidence) -> tuple[int, str]:
+    """86bbuhkr1 rebuild -- replaces a formula that hardcoded Bull=bullish(+2)/
+    Bear=bearish(-2) direction regardless of content, then computed a variance+spread
+    blend that was invariant to absolute magnitude: (5, 5) and (95, 95) scored
+    identically. Confirmed degenerate on real output -- all 7 scenarios in
+    simulation/results/ (bull/bear confidence pairs from (18,35) to (65,20)) produced
+    scores 45-52, 100% landing in split_decision regardless of how different the real
+    inputs were.
+
+    Bull and Bear are opposed by role, always -- that part of "disagreement" is
+    trivial and doesn't need measuring. What varies and matters is whether EACH side
+    independently earns a strong case: real conflict requires both sides genuinely
+    confident, not merely balanced. min() captures that directly -- a lopsided pair
+    reads low (one side has no real case), a jointly-weak pair also reads low (nobody
+    has conviction), and only a jointly-strong pair reads high. Band cutoffs are
+    unchanged from the old formula -- validated this session against 26 real
+    (bull, bear) pairs pooled across multiple simulation snapshots: the existing
+    0-19/20-39/40-59/60-100 bands already produce real spread once the input
+    quantity itself is fixed, so no new thresholds were needed.
+    """
+    try:
+        score = min(max(0, min(100, int(bull_confidence))), max(0, min(100, int(bear_confidence))))
+    except (TypeError, ValueError):
+        # agent_completed() allows validation-failed output through (see its own
+        # docstring below) -- confidence isn't guaranteed to be a valid number here.
+        # Either side being malformed already forces the min() to 0 once coerced, so
+        # a single guard around the whole expression is equivalent to per-side
+        # coercion and simpler.
+        score = 0
+    if score <= 19:
         label = "consensus"
-    elif disagreement_score <= 39:
+    elif score <= 39:
         label = "mild_dissent"
-    elif disagreement_score <= 59:
+    elif score <= 59:
         label = "split_decision"
     else:
         label = "high_conflict"
-    return disagreement_score, label
+    return score, label
 
 
 def compute_outlook_distance(primary_outlook: str, shadow_outlook: str) -> tuple[int, bool]:

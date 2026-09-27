@@ -13,7 +13,7 @@ from agents.validators.compression import (
     validate_reliability_warning_format,
     validate_stub_fundamental,
 )
-from agents.utils import build_pass1_reliability_warnings, compute_disagreement_score, compute_outlook_distance
+from agents.utils import build_pass1_reliability_warnings, compute_outlook_distance
 
 
 # ─── Bull Advocate Tests ──────────────────────────────────────────────────────
@@ -882,25 +882,11 @@ class TestStubFundamental:
         assert not passed
 
 
-# ─── Disagreement Score Tests ─────────────────────────────────────────────────
-
-class TestDisagreementScore:
-    def test_opposite_equal_confidence_gives_split_decision(self):
-        score, label = compute_disagreement_score(70, 70)
-        assert label in ("split_decision", "mild_dissent"), f"Got {label} ({score})"
-
-    def test_asymmetric_confidence_can_give_high_conflict(self):
-        score, label = compute_disagreement_score(90, 30)
-        assert label in ("split_decision", "high_conflict"), f"Got {label} ({score})"
-
-    def test_zero_confidence_gives_consensus(self):
-        score, label = compute_disagreement_score(0, 0)
-        assert label == "consensus"
-
-    def test_high_both_gives_split(self):
-        score, label = compute_disagreement_score(75, 70)
-        # Bull=75, Bear=70 — opposite directions, roughly equal confidence
-        assert score >= 40, f"Expected split_decision range, got score={score}"
+# ─── Disagreement Score Tests -- moved to test_utils.py (86bbuhkr1 rebuild) so this
+# logic has one canonical test location instead of two independently-maintained
+# copies (this codebase has already had a field-copy silently drift across 4 copies
+# once -- researcher_thesis_archetype, per utils.py's own docstring). See
+# test_utils.py::TestDisagreementScore.
 
 
 # ─── Outlook Distance Tests (86bbt1kct) ────────────────────────────────────────

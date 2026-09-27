@@ -57,21 +57,60 @@ def _completed():
 
 
 class TestDisagreementScore:
-    def test_opposite_equal_confidence_gives_split_decision(self):
-        score, label = compute_disagreement_score(70, 70)
-        assert label in ("split_decision", "mild_dissent"), f"Got {label} ({score})"
+    """86bbuhkr1 rebuild. Real conflict requires BOTH sides to independently earn a
+    strong case, not just be balanced -- disagreement_score is min(bull, bear), not a
+    gap or variance between them. Each expectation below is derived from that
+    definition, not backfit to whatever the implementation happens to output (the
+    tests this replaces asserted the old formula's actual, since-confirmed-degenerate
+    behavior as if it were the spec)."""
 
-    def test_asymmetric_confidence_can_give_high_conflict(self):
+    def test_both_strong_and_opposed_gives_high_conflict(self):
+        # Both sides genuinely confident -- this is what real conflict looks like,
+        # and should hedge the CIO's outlook. The old formula placed this in
+        # split_decision purely because the two confidences were equal, independent
+        # of their magnitude -- the exact magnitude-blindness bug this rebuild fixes.
+        score, label = compute_disagreement_score(70, 70)
+        assert score == 70
+        assert label == "high_conflict"
+
+    def test_asymmetric_confidence_is_not_high_conflict(self):
+        # One side has essentially no case (30) -- there's no real fight here even
+        # though the other side is very confident. The old formula could read this
+        # as high_conflict; asserting that was the bug, not the spec.
         score, label = compute_disagreement_score(90, 30)
-        assert label in ("split_decision", "high_conflict"), f"Got {label} ({score})"
+        assert score == 30
+        assert label == "mild_dissent"
 
     def test_zero_confidence_gives_consensus(self):
         score, label = compute_disagreement_score(0, 0)
+        assert score == 0
         assert label == "consensus"
 
-    def test_high_both_gives_split(self):
-        score, label = compute_disagreement_score(75, 70)
-        assert score >= 40, f"Expected split_decision range, got score={score}"
+    def test_jointly_weak_but_balanced_is_not_high_conflict(self):
+        # Both sides equally unconvinced of their own case. The old variance-based
+        # formula was invariant to absolute magnitude, so (10, 10) scored identically
+        # to (95, 95) -- this is the regression case for that specific bug.
+        score, label = compute_disagreement_score(10, 10)
+        assert score == 10
+        assert label == "consensus"
+
+    def test_moderately_close_both_gives_split_decision(self):
+        score, label = compute_disagreement_score(55, 45)
+        assert score == 45
+        assert label == "split_decision"
+
+    def test_out_of_range_confidence_is_clamped(self):
+        # agent_completed() allows validation-failed output through (utils.py's own
+        # docstring) -- confidence isn't guaranteed to be in [0, 100] by the time
+        # this is called.
+        score, label = compute_disagreement_score(150, 70)
+        assert score == 70
+        assert label == "high_conflict"
+
+    def test_non_numeric_confidence_falls_back_to_zero(self):
+        score, label = compute_disagreement_score("high", 70)
+        assert score == 0
+        assert label == "consensus"
 
 
 class TestOutlookDistance:
