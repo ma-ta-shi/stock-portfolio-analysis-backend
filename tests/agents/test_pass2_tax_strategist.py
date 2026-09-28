@@ -249,7 +249,11 @@ def _valid_tax_output(**overrides) -> dict:
             "withholding_tax_rate_pct": 15.0,
             "effective_after_tax_yield_pct": 1.53,
             "is_eligible_canadian_dividend": False,
+            # 86bc8eg3j: real schema field is capital_gains_treatment_summary, not
+            # capital_gains_treatment -- same stale-fixture mismatch fixed in
+            # test_pass2_validators.py's own _valid_tax_output().
             "capital_gains_treatment": "Tax-free in TFSA -- all capital gains are completely exempt from Canadian tax.",
+            "capital_gains_treatment_summary": "Tax-free in TFSA -- all capital gains are completely exempt from Canadian tax.",
             "loss_risk_assessment": "Capital losses in TFSA permanently reduce available TFSA room.",
             "cross_account_recommendation": None,
             "recommended_account": "current_account_is_optimal",

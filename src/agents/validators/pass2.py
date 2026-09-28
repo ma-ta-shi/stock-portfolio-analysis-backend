@@ -777,6 +777,14 @@ def validate_tax_strategist(
             if v is not None and not isinstance(v, (int, float)):
                 errors.append(f"tax_profile.{field}: must be a number (passthrough from orchestrator)")
 
+        # 86bc8eg3j: capital_gains_treatment_summary is requested by the prompt's
+        # Output Schema (Step 5, "Per Rule 8") but was never actually enforced --
+        # added here to hold it to the same reliability bar as
+        # tax_optimization_actions below, now that both flow into the CIO's own
+        # Stage B input (_build_tax_strategist_summary, pass3_cio.py).
+        if not str(tp.get("capital_gains_treatment_summary") or "").strip():
+            errors.append("tax_profile.capital_gains_treatment_summary: must be non-empty")
+
         # Rule 12: key_tax_risks 1-4; each needs risk, severity, and cited evidence.
         _check_array_bounds(tp, "key_tax_risks", 1, 4, errors)
         valid_sev = {"high", "medium", "low"}

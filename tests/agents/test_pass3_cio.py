@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from agents.pass3_cio import (
+    _build_tax_strategist_summary,
     build_advocate_summary,
     build_pass1_summaries,
     build_risk_advisor_stage_a_summary,
@@ -100,3 +101,114 @@ def test_risk_advisor_stage_a_summary_still_works_byte_for_byte_ported():
     summary = build_risk_advisor_stage_a_summary(risk_output)
     assert "risk_reward_ratio: 2.1" in summary
     assert "beta: 1.8 | max_drawdown_1yr: -28.4%" in summary
+
+
+# ---------- _build_tax_strategist_summary (86bc8eg3j) ----------
+# Field shapes below match what 86bc8efvb's real live verification (real RY.TO
+# data, real Ollama gpt-oss:20b call) actually observed for a Trading-account
+# run -- not invented from the schema alone.
+
+
+def test_tax_strategist_summary_includes_capital_gains_and_optimization_actions():
+    """The real gap this ticket closes: both fields were computed by every real
+    Tax Strategist run but never reached the CIO's own Stage B input."""
+    tax_result = {
+        "groundedness_score": 60,
+        "thesis_summary": "Trading account holding.",
+        "strongest_signal": "MARG: 31.48%",
+        "tax_profile": {
+            "tax_efficiency_for_account": "favorable",
+            "account_fit_score": "excellent",
+            "dividend_classification": "canadian_eligible",
+            "wht_interpretation": "No withholding tax applies in a trading account.",
+            "capital_gains_treatment_summary": (
+                "Capital gains are taxed at a 50% inclusion rate in a trading account; "
+                "Canadian dividends retain the dividend tax credit."
+            ),
+            "tax_optimization_actions": [
+                {
+                    "action": "Avoid repurchasing within 30 days of a loss to preserve it.",
+                    "applies_to": "trading",
+                    "estimated_benefit_pct": 2.3,
+                    "justification": (
+                        "Superficial-loss rule denial would eliminate the tax benefit "
+                        "(REF/Taxable)."
+                    ),
+                },
+            ],
+        },
+    }
+    summary = _build_tax_strategist_summary(tax_result)
+    assert (
+        "capital_gains_treatment_summary: Capital gains are taxed at a 50% "
+        "inclusion rate in a trading account" in summary
+    )
+    assert (
+        "tax_optimization_actions: Avoid repurchasing within 30 days of a loss to "
+        "preserve it. (benefit=2.3%/yr, justification=Superficial-loss rule denial "
+        "would eliminate the tax benefit (REF/Taxable).)" in summary
+    )
+
+
+def test_tax_strategist_summary_tax_optimization_actions_empty_when_absent():
+    """Matches key_tax_risks's own existing `or []` degrade pattern -- no crash,
+    just an empty rendered section."""
+    tax_result = {"tax_profile": {"capital_gains_treatment_summary": "Tax-free in TFSA."}}
+    summary = _build_tax_strategist_summary(tax_result)
+    assert summary.endswith("tax_optimization_actions: ")
+
+
+def test_tax_strategist_summary_capital_gains_summary_defaults_to_na_when_missing():
+    """Rendering fallback, distinct from the new validator check on the same
+    field (agents/validators/pass2.py) -- a caller building a summary from an
+    already-invalid output still gets a safe 'N/A', not a crash."""
+    tax_result = {"tax_profile": {}}
+    summary = _build_tax_strategist_summary(tax_result)
+    assert "capital_gains_treatment_summary: N/A" in summary
+
+
+def test_build_user_message_has_zero_tax_strategist_input():
+    """Stage A must be account-neutral by design -- confirmed directly in the
+    Stage A runtime prompt ("the SAME read... regardless of which account
+    eventually holds the position") and the Stage A validator's own comment
+    ("tax" removed from key_decision_factors[].source for exactly this reason).
+    An earlier version of build_user_message() leaked Tax Strategist's own
+    account-specific facts here anyway; this asserts none of them can appear
+    even when tax data IS available (not just when it's absent -- the
+    'renders_real_context_fields' test above never passes a tax key at all, so
+    it wouldn't catch this regression). Checks every field that was actually in
+    the leaked block, not just a couple of them -- a partial reintroduction
+    (e.g. someone adds back just account_fit_score under a new header) should
+    fail this test exactly as loudly as reintroducing the whole block would."""
+    pass2_outputs = {
+        "tax": {
+            "groundedness_score": 75,
+            "thesis_summary": "Trading account holding.",
+            "tax_profile": {
+                "account_fit_score": "good",
+                "tax_efficiency_for_account": "neutral",
+                "effective_after_tax_yield_pct": 2.3,
+                "capital_gains_treatment_summary": "Taxed at a 50% inclusion rate.",
+                "cross_account_recommendation": {
+                    "better_account": "tfsa",
+                    "reasoning": "Shelters future gains.",
+                    "drag_delta_pct": 0.0,
+                },
+                "tax_optimization_actions": [
+                    {
+                        "action": "Move to a TFSA to shelter future gains.",
+                        "estimated_benefit_pct": 0.0,
+                        "justification": "Tax-free growth in a TFSA (REF/TFSA).",
+                    },
+                ],
+            },
+        },
+    }
+    msg = build_user_message(_bundle(), {}, pass2_outputs, 20, "consensus")
+    assert "TAX STRATEGIST" not in msg
+    assert "account_fit_score" not in msg
+    assert "tax_efficiency_for_account" not in msg
+    assert "effective_after_tax_yield_pct" not in msg
+    assert "capital_gains_treatment_summary" not in msg
+    assert "cross_account_recommendation" not in msg
+    assert "tax_optimization_actions" not in msg

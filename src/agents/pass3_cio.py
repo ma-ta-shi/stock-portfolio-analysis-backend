@@ -11,13 +11,18 @@ directly, so there's no per-field DataBundle-translation risk here. Only
 `bundle.context` reads -- every summary-building function below
 (`build_pass1_summaries`, `build_advocate_summary`,
 `build_risk_advisor_stage_a_summary`, `_build_general_outlook_summary`,
-`_build_risk_advisor_stage_b_summary`, `_build_tax_strategist_summary`) is a
-byte-for-byte port, since none of them ever touched `fixture` at all.
+`_build_risk_advisor_stage_b_summary`) is a byte-for-byte port, since none of
+them ever touched `fixture` at all. `_build_tax_strategist_summary` was too,
+originally -- no longer accurate as of 86bc8eg3j, which added
+`capital_gains_treatment_summary`/`tax_optimization_actions` to it (Stage B
+only; see that function's own docstring, and `build_user_message()`'s comment
+on why Stage A gets neither).
 
 Synthesis pass. Cloud-only. Produces final stock_outlook and prediction.
 Input semantics: Bull/Bear confidence = directional conviction.
 Risk/Tax groundedness_score = data quality (NOT direction).
-Directional proxies: Risk → risk_reward_ratio; Tax → tax_efficiency_for_account.
+Directional proxies: Risk → risk_reward_ratio (Stage A); Tax → tax_efficiency_for_account
+(Stage B only -- Stage A has zero Tax Strategist input, see build_user_message()).
 Disagreement caps: split_decision → confidence ≤65; high_conflict → outlook must be neutral/somewhat range.
 """
 import json
@@ -247,24 +252,18 @@ def build_user_message(
     lines.append(build_advocate_summary(pass2_outputs.get("bull"), "BULL"))
     lines.append(build_advocate_summary(pass2_outputs.get("bear"), "BEAR"))
 
-    # Tax Strategist stays inline here, not extracted -- the Shadow CIO never
-    # receives Tax Strategist output at all (docs/agents/shadow_cio.md v2:
-    # no account-specific counterpart), so there is no second consumer to
-    # share this block with.
-    tax = pass2_outputs.get("tax")
-    if tax:
-        tp = tax.get("tax_profile", {})
-        lines.append("\nTAX STRATEGIST:")
-        lines.append(f"  groundedness_score: {tax.get('groundedness_score', 0)}/100 (data quality, NOT directional)")
-        lines.append(f"  account_fit_score: {tp.get('account_fit_score', 'N/A')}")
-        lines.append(f"  tax_efficiency_for_account: {tp.get('tax_efficiency_for_account', 'N/A')} (use as directional proxy)")
-        lines.append(f"  effective_after_tax_yield_pct: {tp.get('effective_after_tax_yield_pct', 'N/A')}%")
-        lines.append(f"  thesis_summary: {tax.get('thesis_summary', '')}")
-        if tp.get("cross_account_recommendation"):
-            lines.append(f"  cross_account_recommendation: {tp['cross_account_recommendation']}")
-    else:
-        lines.append("\nTAX STRATEGIST: NOT AVAILABLE")
-
+    # Tax Strategist has NO input into Stage A, deliberately and by documented
+    # design -- confirmed directly: the Stage A runtime prompt states the read
+    # must be "the SAME... regardless of which account eventually holds the
+    # position," and the Stage A validator's own key_decision_factors[].source
+    # check already restricts citations to bull|bear|risk|pass1, with a comment
+    # noting "tax" was removed from that set for exactly this reason. This
+    # function used to leak account-specific Tax Strategist facts here anyway
+    # (account_fit_score, tax_efficiency_for_account, cross_account_recommendation,
+    # etc. -- all inherently account-specific, since Tax Strategist only ever runs
+    # scoped to one account_type) -- removed. Do not add a Tax Strategist block
+    # back here, even a "NOT AVAILABLE" placeholder -- Stage A shouldn't
+    # reference Tax Strategist's existence at all, not just its content.
     lines.append(build_risk_advisor_stage_a_summary(pass2_outputs.get("risk")))
 
     if disagreement_category in ("split_decision", "high_conflict"):
@@ -333,13 +332,37 @@ def _build_risk_advisor_stage_b_summary(risk_stage_b_result: dict | None) -> str
     )
 
 
+def _render_tax_optimization_actions(actions: list | None) -> str:
+    """Used by _build_tax_strategist_summary() (Stage B) only -- Stage A has no
+    Tax Strategist input at all (see build_user_message()'s own comment), so this
+    is a single-consumer helper despite once being shared with a since-removed
+    Stage A rendering (86bc8eg3j originally added it there too; that addition
+    itself violated Stage A's account-neutrality and was reverted). Kept as its
+    own function anyway -- correct, tested, and reasonably self-contained even
+    with one caller. Includes estimated_benefit_pct, not just action/justification
+    -- matches this file's own existing convention of surfacing a quantified
+    number alongside qualitative text (see _build_tax_strategist_summary()'s
+    cross_text/drag_delta_pct)."""
+    return "; ".join(
+        f"{a.get('action', '')} (benefit={a.get('estimated_benefit_pct', 'N/A')}%/yr, "
+        f"justification={a.get('justification', 'N/A')})"
+        for a in (actions or []) if isinstance(a, dict)
+    )
+
+
 def _build_tax_strategist_summary(tax_result: dict | None) -> str:
     """Tax Strategist's structured fields, for the CIO's own Stage B call --
     the ticket's actual core ask (86bbt1k1p names this "the highest-value
     item"). Field list from the reference pseudocode
     (format_tax_strategist_for_cio), with one correction: the doc's
     `output.data_quality_assessment` reference is omitted -- D6 (86bbummwp)
-    already removed that field from the real schema."""
+    already removed that field from the real schema.
+
+    86bc8eg3j: adds capital_gains_treatment_summary and tax_optimization_actions
+    -- both real, prompt-governed fields (Step 5/Rule 8, Rules 14/15 respectively
+    in prompts/tax_strategist/v1.txt) that this function previously stopped short
+    of, so they never reached the CIO's own Stage B system prompt despite being
+    computed on every real Tax Strategist run."""
     if not tax_result:
         return "TAX STRATEGIST: NOT AVAILABLE"
 
@@ -359,6 +382,8 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
         for kr in key_risks if isinstance(kr, dict)
     )
 
+    actions_text = _render_tax_optimization_actions(tp.get("tax_optimization_actions"))
+
     return (
         f"groundedness_score: {tax_result.get('groundedness_score', 'N/A')}/100\n"
         f"tax_efficiency_for_account: {tp.get('tax_efficiency_for_account', 'N/A')}\n"
@@ -370,8 +395,10 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
         f"after_tax_yield: {tp.get('effective_after_tax_yield_pct', 'N/A')}% | "
         f"annual_drag: {tp.get('annual_tax_drag_pct', 'N/A')}%/yr\n"
         f"wht_interpretation: {tp.get('wht_interpretation', '')}\n"
+        f"capital_gains_treatment_summary: {tp.get('capital_gains_treatment_summary', 'N/A')}\n"
         f"cross_account_recommendation: {cross_text}\n"
-        f"key_tax_risks: {risks_text}"
+        f"key_tax_risks: {risks_text}\n"
+        f"tax_optimization_actions: {actions_text}"
     )
 
 
