@@ -28,7 +28,13 @@ from api.tables.recommendations import Recommendation
 from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
 from api.tables.stock import Stock
-from services.orchestrator import AnalysisOrchestrator, _add_agent_output_and_calls, _market_cap_bucket
+from api.tables.user_profile import UserProfile
+from services.orchestrator import (
+    AnalysisOrchestrator,
+    _add_agent_output_and_calls,
+    _build_tax_inputs,
+    _market_cap_bucket,
+)
 from sqlalchemy import select
 
 
@@ -428,6 +434,116 @@ async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
     # 5 pass1 + 4 pass2 + cio(synthesis, written twice: stage A and stage B) + shadow_cio = 12
     assert len(agent_outputs) == 12
     assert all(row.status == "completed" for row in agent_outputs)
+
+
+# --- 86bc8efvb: real UserProfile -> account_state/user_tax_profile wiring ---
+
+
+def test_build_tax_inputs_none_when_no_profile():
+    assert _build_tax_inputs(None) == (None, None)
+
+
+def test_build_tax_inputs_converts_dollars_to_cents_and_passes_as_of():
+    profile = UserProfile(
+        user_id=uuid4(),
+        display_name="test",
+        province="ON",
+        income_annual=95_000.0,
+        tfsa_room_remaining=7_500.0,
+        tfsa_room_as_of=datetime(2026, 9, 1),
+    )
+    account_state, user_tax_profile = _build_tax_inputs(profile)
+    assert account_state["tfsa_room_remaining_cents"] == 750_000
+    assert account_state["tfsa_room_as_of"] == datetime(2026, 9, 1)
+    assert "rrsp_room_remaining_cents" not in account_state  # unset fields aren't fabricated
+    assert user_tax_profile == {"province": "ON", "income_annual": 95_000.0}
+
+
+def test_build_tax_inputs_returns_none_not_empty_dict_when_profile_has_nothing_set():
+    """A UserProfile row existing at all doesn't guarantee it has any of the
+    relevant fields set -- an all-unset profile should read the same as no
+    profile, not as a present-but-empty dict."""
+    profile = UserProfile(user_id=uuid4(), display_name="test")
+    assert _build_tax_inputs(profile) == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_full_pipeline_real_user_profile_reaches_tax_runner():
+    """The real code path this ticket exists to wire, not just the isolated
+    precompute/agent units: a real UserProfile row, keyed to run.user_id,
+    reaches TaxStrategistRunner.run() as account_state/user_tax_profile --
+    exercised through the actual orchestrator, not a direct call to
+    _build_tax_inputs() alone."""
+    session = await _make_session()
+    user_id = uuid4()
+    session.add(
+        UserProfile(
+            user_id=user_id,
+            display_name="test",
+            province="ON",
+            income_annual=95_000.0,
+            tfsa_room_remaining=7_500.0,
+            tfsa_room_as_of=datetime(2026, 9, 1),
+        )
+    )
+    await session.commit()
+    run = await _make_run(session, user_id=user_id)
+    bundle = _fake_bundle()
+
+    class _RecordingTaxRunner(_StubRunner):
+        """Same as _StubRunner, but records the kwargs .run() was actually
+        called with."""
+
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.run_calls = []
+
+        async def run(self, *a, **kw):
+            self.run_calls.append(kw)
+            return await super().run(*a, **kw)
+
+    tax_stub = _RecordingTaxRunner(_completed(tax_profile={}))
+
+    cio_stage_a = _completed(
+        stock_outlook="neutral", expected_return_tier="market_perform",
+        thesis_summary="Mixed signals.", key_decision_factors=[{"factor": "valuation"}],
+    )
+    cio_stage_b = {
+        "synthesis_narrative": "Hold.", "position_sizing_recommendation": "2-3%",
+        "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
+    }
+    shadow_result = _completed(stock_outlook="neutral", expected_return_tier="market_perform")
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch("services.orchestrator.StockResearcherRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(_completed(recommendation="bullish"))),
+        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
+        patch("services.orchestrator.TaxStrategistRunner", tax_stub),
+        patch(
+            "services.orchestrator.RiskAdvisorRunner",
+            _StubRunner(_completed(risk_profile={}), stage_b_result={"position_size_recommendation": "2-3%"}),
+        ),
+        patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
+        patch("services.orchestrator.ShadowCIORunner", _StubRunner(shadow_result)),
+        patch("services.orchestrator.Router") as MockRouter,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        router_instance = AsyncMock()
+        router_instance.get_quote = AsyncMock(return_value={"current_price": 5800.0})
+        MockRouter.return_value.__aenter__ = AsyncMock(return_value=router_instance)
+        MockRouter.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await AnalysisOrchestrator().run(run, session)
+
+    assert len(tax_stub.run_calls) == 1
+    call_kwargs = tax_stub.run_calls[0]
+    assert call_kwargs["user_tax_profile"] == {"province": "ON", "income_annual": 95_000.0}
+    assert call_kwargs["account_state"]["tfsa_room_remaining_cents"] == 750_000
 
 
 @pytest.mark.asyncio

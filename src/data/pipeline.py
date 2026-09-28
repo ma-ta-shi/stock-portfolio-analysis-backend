@@ -11,7 +11,6 @@ import asyncio
 from collections.abc import Iterator
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from uuid import UUID
 
 from sqlalchemy import select
@@ -25,7 +24,6 @@ from data.precompute.canadian_data_flags import build_canadian_data_flags
 from data.precompute.macro_sources import compute_macro_sources
 from data.precompute.news_id_assignment import assign_news_ids
 from data.precompute.research_sources import build_research_sources
-from data.precompute.tax_metrics import build_tax_metrics_field
 from data.providers.boc import BOCMacroDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fred import FredMacroDataProvider
@@ -391,20 +389,6 @@ class DataPipeline:
                 combined_sources["get_price_history:sector_etf"] = sector_source
             data_freshness = build_data_freshness(combined_sources, at=fetched_at)
 
-            # Minimal stand-in for build_tax_metrics_field()'s bundle param -
-            # it only ever reads these three attributes (confirmed by
-            # reading its full body). A real DataBundle can't be used here
-            # since tax_metrics is itself one of DataBundle's own fields and
-            # the model is frozen - no construct-then-fill-in-after path.
-            # Matches this codebase's own established convention for this
-            # exact situation (test_tax_metrics.py's _fake_bundle()).
-            tax_metrics_input = SimpleNamespace(
-                company_info=company_info,
-                dividend_history=dividend_history,
-                price_info=price_info,
-            )
-            tax_metrics = build_tax_metrics_field(ticker, context.account_type, tax_metrics_input)
-
             return DataBundle(
                 stock=stock_ref,
                 context=context,
@@ -448,7 +432,6 @@ class DataPipeline:
                     benchmark_ticker=benchmark_ticker,
                     currency=company_info.get("currency", stock.currency),
                 ),
-                tax_metrics=tax_metrics,
                 benchmark_ticker=benchmark_ticker,
                 data_freshness=data_freshness,
                 data_vintage=fetched_at,

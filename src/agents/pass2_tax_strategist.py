@@ -7,28 +7,24 @@ just a translation:
 - The harness manually reconstructs the whole "TAX-RELEVANT DATA" block
   (DIVID/LIST/DOM/WHT/ELIG/ROOM/CGAIN/LOSS lines) field-by-field from
   `fixture["orchestrator_precomputed"]` + `fixture["fundamental_data"]`.
-  Production doesn't need to: `DataBundle.tax_metrics` IS that exact block,
-  already fully rendered by `precompute/tax_metrics.py::build_tax_metrics_field()`
-  at `DataPipeline.prepare()` time (confirmed by reading that function's real
-  output -- DIVID/ELIG/LIST/DOM/WHT/effective-yield/tax-drag/CGAIN/ROOM/LOSS/
-  US_SITUS/TAX_RULE_SNAPSHOT lines, a superset of what the harness rebuilds
-  by hand). This runner reads it directly rather than re-deriving it.
-- Real, load-bearing wrinkle this simplification surfaces: `bundle.tax_metrics`
-  is fixed at DataBundle-construction time for ONE account_type
-  (`bundle.context.account_type`) -- `DataPipeline.prepare()` only ever builds
-  it for the context it was given. If this runner is called with an
-  `account_type` override that DIFFERS from `bundle.context.account_type`
-  (the same override capability the harness's own `run()` signature has),
-  `bundle.tax_metrics` would silently describe the WRONG account. Handled by
-  calling `build_tax_metrics_field()` fresh for that specific account_type in
-  the override case -- it's a plain, callable function (not tied to pipeline
-  internals) that accepts a real DataBundle directly.
+  Production doesn't need to: `_tax_metrics_block()` calls
+  `precompute/tax_metrics.py::build_tax_metrics_field()` directly, fresh, every
+  call (confirmed by reading that function's real output -- DIVID/ELIG/LIST/
+  DOM/WHT/effective-yield/tax-drag/CGAIN/MARG/ROOM/LOSS/US_SITUS/
+  TAX_RULE_SNAPSHOT lines, a superset of what the harness rebuilds by hand).
 - `account_state` (ROOM remaining, superficial-loss window, YTD realized
-  gains/losses) stays `None` -- not a DataBundle field, and no real service
-  produces one yet. Matches `build_precomputed_tax_metrics()`'s own
-  documented normal case ("account_state is genuinely, usually None in
-  practice today because no real service exists to produce one") -- not a
-  gap this runner introduces.
+  gains/losses) and `user_tax_profile` (province/income/marginal-rate override
+  -- drives MARG) are real, per-user inputs threaded in from the orchestrator
+  (86bc8efvb), fetched via `UserProfile`/`get_user_profile()`. `DataBundle`
+  itself carries neither -- it's frozen (immutable) and both depend on
+  per-user data that can't be known at `DataPipeline.prepare()` time, which is
+  why there used to be a `bundle.tax_metrics` field built up front and a fast
+  path reusing it: that field was removed (86bc8efvb) once it became clear it
+  could never stay correct once real per-user data entered the picture, and
+  this runner always rebuilds the block fresh instead. Either can genuinely be
+  `None` (no `UserProfile` row, or one with fields unset) -- the precompute
+  layer already handles that as real, intentional absence, not a gap this
+  runner introduces.
 - `{tax_rules_reference}` (the full reference document text for the system
   prompt) now reads via `precompute/tax_metrics.py::load_tax_rules_reference()`
   directly, rather than duplicating a second, independently-maintained
@@ -66,16 +62,36 @@ from agents.validators.common import (
     validate_confidence_requires_caveat_when_flagged,
 )
 from agents.validators.pass2 import validate_tax_strategist
-from data.precompute.tax_metrics import build_tax_metrics_field, load_tax_rules_reference
+from data.precompute.tax_metrics import (
+    AccountStateInput,
+    UserTaxProfileInput,
+    build_tax_metrics_field,
+    load_tax_rules_reference,
+)
 from data.schemas.data_bundle import DataBundle
 
 
-def _tax_metrics_block(bundle: DataBundle, account_type: str) -> str:
-    if account_type == bundle.context.account_type and bundle.tax_metrics is not None:
-        return bundle.tax_metrics
-    # Override case: bundle.tax_metrics was built for a different account_type
-    # than this call needs -- rebuild fresh for the one actually requested.
-    return build_tax_metrics_field(bundle.stock.ticker, account_type, bundle)
+def _tax_metrics_block(
+    bundle: DataBundle,
+    account_type: str,
+    account_state: AccountStateInput | None = None,
+    user_tax_profile: UserTaxProfileInput | None = None,
+) -> str:
+    """Always builds fresh (86bc8efvb) -- there is no cached bundle.tax_metrics
+    to fall back to any more (that field was removed: it could never be correct
+    once account_state/user_tax_profile carry real per-user data DataBundle
+    doesn't hold, so the old "reuse the cached string when account_type matches"
+    fast path would have silently kept returning a string built before either
+    was known). Re-reading the tax rules reference file on every call is an
+    accepted cost, per load_tax_rules_reference()'s own documented stance
+    ("re-reading one small local file per call is cheap")."""
+    return build_tax_metrics_field(
+        bundle.stock.ticker,
+        account_type,
+        bundle,
+        account_state=account_state,
+        user_tax_profile=user_tax_profile,
+    )
 
 
 def _tax_metrics_field_presence(tax_metrics_text: str) -> dict[str, bool]:
@@ -101,11 +117,28 @@ def _tax_metrics_field_presence(tax_metrics_text: str) -> dict[str, bool]:
 
     The ETF early-return path (build_precomputed_tax_metrics's own
     structure=="etf" branch) renders neither a DIVID nor a WHT line at all
-    -- both correctly read False there too."""
+    -- both correctly read False there too.
+
+    MARG (86bc8efvb): a simple substring check -- MARG is user-profile-gated,
+    same class as ROOM, and follows ROOM's own convention of omitting the line
+    entirely when genuinely absent rather than rendering an "unknown"
+    placeholder, so presence is just "is the line there at all," no WHT-style
+    second condition needed.
+
+    ROOM (86bc8efvb): unlike MARG, ROOM DOES need a second condition -- a
+    *stale* room figure still renders (with a "(stale, ...)" suffix, see
+    build_precomputed_tax_metrics), so a plain substring check would read
+    `True` even when the underlying number can't actually be trusted. Staleness
+    is deliberately made to read as absent here, not just annotated in the
+    text, so it flows into the same material_absent/confidence-caveat gate
+    below as genuine absence -- the point being that whether the agent notices
+    the caveat is not left to chance."""
     return {
         "divid": "DIVID:" in tax_metrics_text and "DIVID: no dividend history" not in tax_metrics_text,
         "wht": "WHT (this account," in tax_metrics_text
         and "NOT MODELLED per REF withholding grid" not in tax_metrics_text,
+        "marg": "MARG:" in tax_metrics_text,
+        "room": "ROOM:" in tax_metrics_text and "(stale" not in tax_metrics_text,
     }
 
 
@@ -142,7 +175,13 @@ def _validate_with_caveats(
     return passed and cq_passed, errors + cq_errors
 
 
-def get_system_prompt(bundle: DataBundle, compressed_pass1: dict, account_type: str) -> str:
+def get_system_prompt(
+    bundle: DataBundle,
+    compressed_pass1: dict,
+    account_type: str,
+    account_state: AccountStateInput | None = None,
+    user_tax_profile: UserTaxProfileInput | None = None,
+) -> str:
     # fill(), not .format() -- the real prompt's Output Schema block embeds
     # literal JSON, which .format() reads as placeholders and raises KeyError.
     ctx = bundle.context
@@ -164,7 +203,17 @@ def get_system_prompt(bundle: DataBundle, compressed_pass1: dict, account_type: 
             "account_type": account_type,
             "account_instruction": f"Account: {account_type.upper()}.",
             "tax_rules_reference": tax_rules_reference,
-            "precomputed_tax_metrics": _tax_metrics_block(bundle, account_type),
+            "precomputed_tax_metrics": _tax_metrics_block(
+                bundle, account_type, account_state, user_tax_profile
+            ),
+            # 86bc8efvb deliberately leaves this "" -- Rule 13 references
+            # user_tax_context.expected_retirement_marginal_rate_pct, a field
+            # that was never added to UserProfile (retirement-timeline fields
+            # were explicitly cut during that ticket's design). Populating this
+            # with province/income prose would just be a second, redundant
+            # channel for what MARG (the token, above) already carries
+            # correctly. Rule 13's wording is a separate, real prompt-revision
+            # issue, not fixed here.
             "user_tax_context": "",
             "memory_brief": "",
             "accuracy_brief": "",
@@ -181,6 +230,8 @@ def build_user_message(
     bundle: DataBundle,
     compressed_pass1: dict,
     account_type: str,
+    account_state: AccountStateInput | None = None,
+    user_tax_profile: UserTaxProfileInput | None = None,
 ) -> tuple[str, dict[str, bool]]:
     base = build_pass2_user_message(bundle, compressed_pass1, account_type)
     confidence_levels = extract_confidence_levels(compressed_pass1)
@@ -189,7 +240,7 @@ def build_user_message(
     if warnings:
         base += f"\n\nRELIABILITY WARNINGS: {warnings}"
 
-    tax_metrics_text = _tax_metrics_block(bundle, account_type)
+    tax_metrics_text = _tax_metrics_block(bundle, account_type, account_state, user_tax_profile)
     base += f"""
 
 TAX-RELEVANT DATA (PRE-COMPUTED BY ORCHESTRATOR):
@@ -206,11 +257,17 @@ class TaxStrategistRunner(BaseRunner):
         bundle: DataBundle,
         compressed_pass1: dict,
         account_type: str | None = None,
+        account_state: AccountStateInput | None = None,
+        user_tax_profile: UserTaxProfileInput | None = None,
     ) -> tuple[dict, list[str]]:
         self.current_agent = "tax"
         acct = account_type or bundle.context.account_type
-        system_prompt = get_system_prompt(bundle, compressed_pass1, acct)
-        user_msg, field_presence = build_user_message(bundle, compressed_pass1, acct)
+        system_prompt = get_system_prompt(
+            bundle, compressed_pass1, acct, account_state, user_tax_profile
+        )
+        user_msg, field_presence = build_user_message(
+            bundle, compressed_pass1, acct, account_state, user_tax_profile
+        )
         # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
         # failed call still records whether its own input was already
         # incomplete.
@@ -220,7 +277,15 @@ class TaxStrategistRunner(BaseRunner):
         # _tax_metrics_field_presence() itself, so input_field_coverage's own stored
         # fact stays untouched while the new confidence/data-quality rule doesn't fire
         # on it every run for those classifications.
-        material_absent = [k for k, v in field_presence.items() if not v and k != "wht"]
+        # room (86bc8efvb): ROOM never renders for a Trading account at all
+        # (build_precomputed_tax_metrics's own ROOM branch only handles
+        # tfsa/rrsp) -- that's architecturally correct absence, not missing
+        # data, the same class of exclusion as wht's above. Excluded here, same
+        # reasoning, same place.
+        excluded_when_absent = {"wht"} | ({"room"} if acct == "trading" else set())
+        material_absent = [
+            k for k, v in field_presence.items() if not v and k not in excluded_when_absent
+        ]
         result, errors = await self.call_with_validation(
             system_prompt,
             user_msg,

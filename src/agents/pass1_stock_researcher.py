@@ -49,8 +49,10 @@ against `data/schemas/research_sources_bundle.py` and
   price_info/dividend_info already being read by both Fundamental and
   Stock Researcher in the harness fixture.
 - `eligible_canadian_dividend`: no discrete field anywhere -- Canadian
-  dividend-eligibility is baked into `tax_metrics`'s own rendered string
-  (Tax Strategist's field), not exposed separately. Omitted, not fabricated.
+  dividend-eligibility is baked into the ELIG line of
+  `build_precomputed_tax_metrics()`'s rendered block (Tax Strategist's own
+  input, built fresh per call, not a DataBundle field), not exposed
+  separately. Omitted, not fabricated.
 
 86bbummwp 1d: the retry loop's validator now also enforces the mandatory
 filing-depth caveat the user message already tells the model about via

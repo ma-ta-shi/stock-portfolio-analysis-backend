@@ -159,19 +159,13 @@ class DataBundle(ContractModel):
     # --- Risk Advisor (Pass 2) ---
     risk_metrics: dict
 
-    # --- Tax Strategist (Pass 2) ---
-    tax_metrics: str | None  # precompute/tax_metrics.py::build_tax_metrics_field() (86bbztxpj),
-    # which wraps build_precomputed_tax_metrics(); always a real rendered string from a real
-    # assembly call today (the function has no path that returns None for a valid
-    # tfsa/rrsp/trading account_type) — None stays legal on the schema for a bundle built
-    # without running full assembly (e.g. a test fixture), not a real skip-path.
-    #
-    # No cross-field model_validator (unlike benchmark_ticker/canadian_data_flags): those are
-    # pure functions of `stock` alone, re-derivable and compared at construction time. This
-    # field isn't — it also depends on account_state (not a DataBundle field) and embeds
-    # datetime.now() in its own TAX_RULE_SNAPSHOT line, so a naive "recompute and compare"
-    # check would fail even on genuinely correct input. Trusted like most other DataBundle
-    # fields (risk_metrics, technical_indicators, ...), not cross-checked.
+    # Tax Strategist (Pass 2) has no DataBundle field of its own (removed 86bc8efvb,
+    # was `tax_metrics: str | None`): it depends on account_state and
+    # user_tax_profile, neither of which DataBundle carries (both are per-user data,
+    # not derivable from `stock` alone), and DataBundle is frozen — a field that
+    # can't be correctly computed at construction time has no business being one.
+    # pass2_tax_strategist.py now calls build_tax_metrics_field() directly, fresh,
+    # every call — the only real consumer this field ever had.
 
     # --- Metadata ---
     benchmark_ticker: str

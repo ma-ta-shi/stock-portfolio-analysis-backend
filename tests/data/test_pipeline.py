@@ -312,10 +312,6 @@ async def _fake_compute_macro_sources(
     )
 
 
-def _fake_build_tax_metrics_field(ticker, account_type, bundle, account_state=None, **kwargs):
-    return f"tax metrics for {ticker} ({account_type})"
-
-
 def _fake_assign_news_ids(articles):
     return []
 
@@ -332,7 +328,6 @@ def patched_precompute(monkeypatch):
         pipeline_module, "build_canadian_data_flags", _fake_build_canadian_data_flags
     )
     monkeypatch.setattr(pipeline_module, "compute_macro_sources", _fake_compute_macro_sources)
-    monkeypatch.setattr(pipeline_module, "build_tax_metrics_field", _fake_build_tax_metrics_field)
     monkeypatch.setattr(pipeline_module, "assign_news_ids", _fake_assign_news_ids)
     monkeypatch.setattr(
         pipeline_module,
@@ -429,7 +424,6 @@ async def test_prepare_us_stock_populates_every_field(patched_precompute):
     assert bundle.short_interest == {"short_percent_of_float": 1.2}
     assert bundle.insider_activity == {"transactions": []}
     assert bundle.peer_sentiment == []
-    assert bundle.tax_metrics == "tax metrics for AAPL (trading)"
     assert bundle.data_freshness["get_price_history"]
     assert bundle.data_freshness["get_price_history:benchmark"]
     assert bundle.data_freshness["get_price_history:sector_etf"]
@@ -474,7 +468,6 @@ async def test_prepare_ca_stock_populates_every_field(patched_precompute):
     assert bundle.benchmark_ticker == "^GSPTSE"
     assert bundle.canadian_data_flags is not None
     assert bundle.analyst_recommendation_trends is None
-    assert bundle.tax_metrics == "tax metrics for RY.TO (tfsa)"
     assert bundle.data_freshness["get_price_history:sector_etf"]
     assert ("RY.TO", "5y", "1d") in _FakeRouter.price_history_calls
     assert ("^GSPTSE", "5y", "1d") in _FakeRouter.price_history_calls

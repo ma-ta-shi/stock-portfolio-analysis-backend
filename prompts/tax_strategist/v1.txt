@@ -27,6 +27,7 @@ RULES:
    - DOM    (security structure: ordinary, REIT, MLP, ADR; distribution decomposition where applicable)
    - WHT    (withholding-tax rate by account, pre-computed per treaty + structure)
    - CGAIN  (capital-gains state — YTD realized in Trading; account treatment)
+   - MARG   (combined federal+Ontario marginal tax rate on the next dollar of ordinary income — NOT average/effective; absent when province/income aren't on file)
    - ROOM   (contribution-room state — TFSA / RRSP remaining)
    - LOSS   (loss-harvesting state — superficial-loss-window status; available realized losses; dual_listed flag)
    - ELIG   (Canadian-eligible-dividend status)
