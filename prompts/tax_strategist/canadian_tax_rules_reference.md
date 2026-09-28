@@ -1,10 +1,8 @@
 # Canadian Tax Rules Reference
 
-Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_reference()`) and injected into its system prompt as structured context. This is the sole maintained copy — rule changes are made here directly. (Previously described as synced with a Notion page and a `docs/product/` mirror; the mirror was never actually created. Two duplicate copies also existed at the top-level repo's `prompts/` and at `simulation/prompts/` — the former was content-identical to this one, the latter had already drifted (missing the Coverage and Withholding tax grid sections below). Both were retired 2026-09-18; this is now the only copy.)
-
 **Disclaimer:** For system-prompt injection only. Not tax advice. Rules are summarized for LLM consumption. Always verify against CRA publications for the current tax year.
 
-**Last verified:** 2026-03-01 _(content verified March 2026; the day is nominal — kept as a full date for the parser. The whole reference needs a CRA freshness check before launch: the contribution limits are 2024 figures and the capital-gains inclusion rule above $250k was politically contested.)_
+**Last verified:** 2026-09-28 _(2026 tax year figures)_
 
 **Coverage:** This reference fully covers **ordinary common and preferred shares of Canadian and US corporations**, in all three account types, plus **Canadian REITs / income trusts in registered accounts** (TFSA/RRSP — 0% withholding, Canadian-source). It does **not** cover: Canadian REIT/trust treatment in a *taxable* account, US REITs, MLPs, non-MLP limited partnerships, ADRs, or non-US foreign withholding rates — the precompute returns those as `classification_confidence: low` / `modelled: false` for the agent to caveat and defer. Expanding this with the deferred `(classification × structure × account)` rows is tracked post-launch (ClickUp 86bbpm06v).
 
@@ -15,7 +13,7 @@ Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_re
 **Core principle:** All investment income earned within a TFSA — capital gains, dividends, interest — is completely tax-free. Withdrawals are tax-free. Contributions are made with after-tax dollars (no deduction).
 
 **Contribution room:**
-- Annual limit: $7,000 (2024, 2025). Check CRA for current year.
+- Annual limit: $7,000 for 2026. Check CRA for current year.
 - Cumulative: Unused room carries forward indefinitely.
 - Withdrawals: Amount withdrawn is added back to contribution room on January 1 of the following year.
 - Over-contribution penalty: 1% per month on the excess amount.
@@ -25,8 +23,7 @@ Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_re
 - **Best for:** Highest-growth investments, since gains compound tax-free permanently.
 - **Capital gains:** Tax-free. A stock that 10x in a TFSA generates zero tax.
 - **Canadian dividends:** Tax-free (no dividend tax credit needed since there's no tax).
-- **US dividends:** Subject to 15% US withholding tax under the Canada-US tax treaty. The US does not recognize the TFSA as a retirement account, so the treaty exemption does NOT apply. This withholding is NOT recoverable. For a stock yielding 3%, this costs ~0.45% annually.
-- **Other foreign dividends:** Subject to withholding tax of the source country. Not recoverable.
+- **Foreign dividend withholding:** Not recoverable in a TFSA — see Cross-border considerations for the mechanics and the Withholding tax grid for exact rates. For a US stock yielding 3%, the non-recoverable 15% US withholding costs ~0.45% annually.
 - **Losses:** Cannot be used to offset gains elsewhere. A loss in a TFSA is a permanent loss of tax-sheltered room. This makes permanent capital loss risk especially painful in a TFSA.
 - **Day trading caution:** CRA may consider frequent trading in a TFSA as carrying on a business, which could make the gains taxable. Keep TFSA investments as genuine investment, not active trading.
 
@@ -37,7 +34,7 @@ Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_re
 **Core principle:** Contributions are tax-deductible (reduce taxable income in the year of contribution). All investment income grows tax-deferred. Withdrawals are taxed as ordinary income.
 
 **Contribution room:**
-- Annual limit: 18% of previous year's earned income, up to the annual maximum ($31,560 for 2024). Check CRA for current year.
+- Annual limit: 18% of previous year's earned income, up to the annual maximum ($33,810 for 2026). Check CRA for current year.
 - Cumulative: Unused room carries forward indefinitely.
 - Pension adjustment: Employer pension contributions reduce RRSP room.
 - Over-contribution: $2,000 lifetime over-contribution buffer. Beyond that, 1% per month penalty.
@@ -46,14 +43,11 @@ Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_re
 - **Best for:** Income-generating investments (especially US dividend stocks), assets expected to have high returns, and situations where your tax rate at contribution is higher than your expected tax rate at withdrawal (retirement).
 - **Capital gains:** Tax-deferred. Taxed as ordinary income on withdrawal (not as capital gains). This means the 50% inclusion rate advantage of capital gains is lost — all RRSP withdrawals are taxed at your marginal rate.
 - **Canadian dividends:** Tax-deferred. Dividend tax credit is NOT available on RRSP withdrawals. The dividend is effectively converted to ordinary income.
-- **US dividends:** Withholding-tax-EXEMPT under the Canada-US tax treaty (Article XVIII). The US recognizes the RRSP as a retirement account. This is the key advantage of holding US dividend stocks in an RRSP.
-- **Other foreign dividends:** Withholding tax of source country applies. May be recoverable as a foreign tax credit in some cases.
+- **Foreign dividend withholding:** US dividends are exempt (see Cross-border considerations) — this is the key advantage of holding US dividend stocks in an RRSP. Other foreign dividends still face source-country withholding, sometimes recoverable as a foreign tax credit.
 - **Losses:** Same as TFSA — losses inside an RRSP cannot offset gains elsewhere.
 - **Withdrawal timing:** Withdrawals in low-income years (early retirement, sabbatical) minimize tax impact.
 
-**RRSP vs TFSA decision framework for the Tax Strategist:**
-- High US dividend yield → RRSP (withholding tax exemption)
-- High growth / low dividend → TFSA (tax-free capital gains)
+**RRSP vs TFSA decision framework for the Tax Strategist** (see the Account optimization decision matrix below for stock-characteristic-based rules; these two compare the user's own financial state, which the matrix doesn't capture):
 - Current marginal rate > expected retirement rate → RRSP (tax deferral advantage)
 - Current marginal rate < expected retirement rate → TFSA (no tax on withdrawal)
 
@@ -77,8 +71,7 @@ Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_re
 
 **Foreign dividends (including US):**
 - Taxed as ordinary income (no dividend tax credit).
-- US withholding tax (15%) can be claimed as a foreign tax credit on your Canadian tax return, partially or fully offsetting the Canadian tax.
-- Net cost: Usually small or zero for US dividends in a taxable account because the foreign tax credit covers most of the withholding.
+- US withholding is recoverable via foreign tax credit (see Cross-border considerations) — net cost is usually small or zero for US dividends in a taxable account.
 
 **Interest income:**
 - Fully taxable as ordinary income. Worst tax treatment of any investment income type.
@@ -101,13 +94,12 @@ Runtime-bundled reference loaded by the Tax Strategist agent (`load_tax_rules_re
 
 # Cross-border considerations (Canada-US tax treaty)
 
-**Withholding tax summary:**
+**Why US dividend withholding differs by account** — the treaty ties the exemption to whether the US recognizes the account as a retirement vehicle, not to the investor or the stock:
+- **TFSA:** 15% withholding, non-recoverable. The US does not recognize the TFSA as a retirement account, so the treaty exemption doesn't apply.
+- **RRSP:** 0% withholding. Exempt under treaty Article XVIII, which does recognize the RRSP as a retirement account.
+- **Taxable:** 15% withholding, but recoverable as a foreign tax credit on the Canadian return.
 
-| Account type | US dividend withholding | Recoverable? |
-|---|---|---|
-| TFSA | 15% | No (treaty doesn't recognize the TFSA) |
-| RRSP | 0% | N/A (exempt under treaty Article XVIII) |
-| Taxable | 15% | Yes, via foreign tax credit on the Canadian return |
+Exact modelled rates for every dividend classification × account combination are in the Withholding tax grid below — this section explains the mechanism, that section has the numbers.
 
 **US estate tax exposure:** Canadian residents holding US-situs assets (US stocks, US real estate) worth over $60,000 USD may be subject to US estate tax on death. The Canada-US tax treaty provides some relief, but this is a consideration for very large US stock holdings.
 
@@ -119,7 +111,7 @@ Formal restatement of the withholding treatment for the combinations the precomp
 
 | `dividend_classification` + `security_structure` | TFSA | RRSP | Taxable |
 |---|---|---|---|
-| `canadian_eligible` — CA corp, ordinary or preferred | 0% | 0% | 0% withholding; **eligible for the dividend tax credit** (38% gross-up, 15.0198% federal DTC) |
+| `canadian_eligible` — CA corp, ordinary or preferred | 0% | 0% | 0% withholding; **eligible for the dividend tax credit** (see Eligible Canadian dividends above) |
 | `trust_distribution` — CA REIT / income trust | **0%** (Canadian-source) | **0%** (Canadian-source) | **not modelled** — no DTC; other-income / capital-gain / return-of-capital mix; effective rate needs the component split |
 | `us` — US corp, ordinary or preferred | 15%, non-recoverable | 0% (treaty Art. XVIII) | 15%, recoverable as foreign tax credit |
 | `us` + `reit` — US REIT | **not modelled** | **not modelled** | **not modelled** |
@@ -148,14 +140,3 @@ For the Tax Strategist agent's prompt, this matrix helps determine optimal accou
 | Any stock, income generation for retirement | RRSP | Tax-deferred income, withdraw at lower rate in retirement |
 | Short-term trade (weeks) | Taxable | Keep TFSA/RRSP for long-term compounding; frequent TFSA trading risks CRA business income classification |
 
----
-
-# Maintenance notes
-
-This document should be reviewed annually (before January) for:
-
-- TFSA annual contribution limit changes
-- RRSP annual maximum changes
-- Capital gains inclusion rate changes (this has been politically contested)
-- Any changes to the Canada-US tax treaty
-- CRA guidance changes on TFSA day trading or other enforcement areas
