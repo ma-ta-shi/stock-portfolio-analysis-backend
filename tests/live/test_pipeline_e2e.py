@@ -22,7 +22,6 @@ from api.tables.recommendations import Recommendation  # noqa: F401
 from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile  # noqa: F401
 from data.pipeline import DataPipeline, StockNotFoundError
-from data.precompute.tax_metrics import build_tax_metrics_field
 from data.schemas.context import AnalysisContext
 
 pytestmark = pytest.mark.live
@@ -65,7 +64,6 @@ async def test_prepare_real_us_stock():
     assert bundle.data_freshness["get_price_history"]
     assert bundle.data_freshness["get_price_history:benchmark"]
     assert bundle.data_freshness["get_price_history:sector_etf"]
-    assert bundle.tax_metrics
     # Real gap caught on review: raw_price/benchmark_price were originally
     # fetched with only "1y" of history, but risk_metrics.py's own module
     # docstring requires >=3y for max_drawdown_3yr_pct/recovery_3yr_days to
@@ -73,12 +71,10 @@ async def test_prepare_real_us_stock():
     # this, only a real run against real data can.
     assert bundle.risk_metrics["max_drawdown_3yr_pct"] is not None
     assert bundle.risk_metrics["beta"] is not None
-    # Real item from the original ticket text: tax_metrics must match what a
-    # standalone call would produce for the same inputs. bundle itself
-    # duck-types build_tax_metrics_field()'s bundle param (it only ever
-    # reads company_info/dividend_history/price_info), so this is a
-    # meaningful check against real data, not circular.
-    assert build_tax_metrics_field("AAPL", "trading", bundle) == bundle.tax_metrics
+    # tax_metrics is no longer a DataBundle field (86bc8efvb) -- it's built
+    # fresh by pass2_tax_strategist.py per call now, not precomputed here;
+    # see tests/data/precompute/test_tax_metrics.py for real-reference
+    # coverage of build_tax_metrics_field() itself.
 
 
 async def test_prepare_real_ca_stock():
@@ -104,10 +100,8 @@ async def test_prepare_real_ca_stock():
     assert bundle.data_freshness["get_price_history"]
     assert bundle.data_freshness["get_price_history:benchmark"]
     assert bundle.data_freshness["get_price_history:sector_etf"]
-    assert bundle.tax_metrics
     assert bundle.risk_metrics["max_drawdown_3yr_pct"] is not None
     assert bundle.risk_metrics["beta"] is not None
-    assert build_tax_metrics_field("RY.TO", "tfsa", bundle) == bundle.tax_metrics
 
 
 async def test_prepare_benchmark_index_as_subject():

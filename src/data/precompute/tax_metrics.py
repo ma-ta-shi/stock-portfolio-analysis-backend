@@ -46,7 +46,7 @@ never part of this repo's history before).
 """
 
 import re
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Literal, TypedDict
 
 import structlog
@@ -275,6 +275,118 @@ CGAIN_BY_ACCOUNT: dict[str, str] = {
 }
 
 
+# Federal and Ontario 2026 marginal tax brackets — sourced and cross-checked against
+# CRA primary sources (T4127 Payroll Deductions Formulas, canada.ca current-year
+# rates pages), full sourcing/verification trail on ClickUp 86bc8efkg. Tuples of
+# (upper_threshold, rate_pct) ascending; the top bracket's threshold is None (no
+# ceiling) rather than a magic sentinel value.
+FEDERAL_BRACKETS_2026: tuple[tuple[float | None, float], ...] = (
+    (58_523.0, 14.0),
+    (117_045.0, 20.5),
+    (181_440.0, 26.0),
+    (258_482.0, 29.0),
+    (None, 33.0),
+)
+
+ONTARIO_BRACKETS_2026: tuple[tuple[float | None, float], ...] = (
+    (53_891.0, 5.05),
+    (107_785.0, 9.15),
+    (150_000.0, 11.16),
+    (220_000.0, 12.16),
+    (None, 13.16),
+)
+
+ONTARIO_BPA_2026 = 12_989.0
+ONTARIO_LOWEST_RATE_PCT = 5.05  # non-refundable credits apply at the lowest bracket rate
+
+# Ontario surtax (T4127's real V1 formula): 20% of basic Ontario tax over $5,818,
+# plus a further 36% (stacked, so 56% total) over $7,446. "Basic Ontario tax" in
+# the real formula nets out several credits (CPP contribution, CPP/EI premium,
+# dividend, labour-sponsored-fund, Basic Personal Amount) before surtax applies —
+# compute_marginal_tax_rate() below approximates this using the Basic Personal
+# Amount credit ONLY, a deliberate, accepted simplification (see that function's
+# own docstring and ticket 86bc8efvb for why): this system doesn't collect the
+# CPP/EI/dividend inputs a fuller calculation would need, and MARG only needs to
+# point RRSP-vs-TFSA/harvest decisions in the right direction, not match a real
+# Notice of Assessment.
+ONTARIO_SURTAX_THRESHOLD_1 = 5_818.0
+ONTARIO_SURTAX_THRESHOLD_2 = 7_446.0
+ONTARIO_SURTAX_RATE_1 = 0.20
+ONTARIO_SURTAX_RATE_2 = 0.36
+
+
+def _marginal_rate(income: float, brackets: tuple[tuple[float | None, float], ...]) -> float:
+    """The rate applying to the next dollar of `income`, per a (threshold, rate)
+    bracket table ordered ascending with a None sentinel on the top bracket."""
+    for threshold, rate in brackets:
+        if threshold is None or income <= threshold:
+            return rate
+    return brackets[-1][1]  # unreachable given the None sentinel; kept defensively
+
+
+def _bracket_tax(income: float, brackets: tuple[tuple[float | None, float], ...]) -> float:
+    """Real progressive tax on `income` — walks the bracket table from zero,
+    summing each bracket's own span at its own rate. NOT income * marginal_rate,
+    which would overstate tax on anyone above the first bracket."""
+    tax = 0.0
+    lower = 0.0
+    for threshold, rate in brackets:
+        if income <= lower:
+            break
+        upper = threshold if threshold is not None else income
+        span = min(income, upper) - lower
+        tax += span * rate / 100
+        lower = upper
+        if threshold is not None and income <= threshold:
+            break
+    return tax
+
+
+def compute_marginal_tax_rate(
+    province: str | None,
+    income_annual: float | None,
+    override_pct: float | None = None,
+) -> float | None:
+    """MARG: the combined federal+Ontario marginal rate on the NEXT DOLLAR of
+    ordinary income — not an average/effective rate. Use for RRSP contribution
+    deduction value, Trading-account after-tax yield, and tax-loss-harvest value.
+    Finalized spec: ClickUp 86bc8efkg.
+
+    Branches, all deliberate:
+    - `override_pct` set: used directly, brackets never consulted — the override
+      exists for someone who knows their real rate; the computed path is the
+      fallback, not a redundant check run alongside it.
+    - `province` is anything other than "ON" (including None): genuinely absent.
+      Real, current data only exists for Ontario (v1 scope, matches
+      UserProfile.province's own Literal["ON"] constraint) — this function
+      shouldn't silently apply Ontario brackets to an unexpected value if that
+      constraint ever loosens.
+    - `income_annual` is None: genuinely absent — nothing to compute against.
+
+    Ontario surtax is approximated using the Basic Personal Amount credit only —
+    see the module-level surtax constants' own comment for why."""
+    if override_pct is not None:
+        return override_pct
+    if province != "ON" or income_annual is None:
+        return None
+
+    federal_rate = _marginal_rate(income_annual, FEDERAL_BRACKETS_2026)
+    ontario_rate = _marginal_rate(income_annual, ONTARIO_BRACKETS_2026)
+
+    ontario_tax_before_credit = _bracket_tax(income_annual, ONTARIO_BRACKETS_2026)
+    bpa_credit = ONTARIO_BPA_2026 * ONTARIO_LOWEST_RATE_PCT / 100
+    t4_approx = ontario_tax_before_credit - bpa_credit
+
+    if t4_approx <= ONTARIO_SURTAX_THRESHOLD_1:
+        surtax_multiplier = 1.0
+    elif t4_approx <= ONTARIO_SURTAX_THRESHOLD_2:
+        surtax_multiplier = 1.0 + ONTARIO_SURTAX_RATE_1
+    else:
+        surtax_multiplier = 1.0 + ONTARIO_SURTAX_RATE_1 + ONTARIO_SURTAX_RATE_2
+
+    return round(federal_rate + ontario_rate * surtax_multiplier, 2)
+
+
 def is_canadian_dual_listed(ticker: str) -> bool:
     """Reuses ca_crosslisting.py::is_crosslisted() for the LOSS token's
     dual_listed flag - ticker-only, no user data needed, so unlike the
@@ -320,10 +432,54 @@ class AccountStateInput(TypedDict, total=False):
 
     tfsa_room_remaining_cents: int
     rrsp_room_remaining_cents: int
+    tfsa_room_as_of: datetime
+    rrsp_room_as_of: datetime
     trading_ytd_realized_gains_cents: int
     trading_ytd_realized_losses_cents: int
     superficial_loss_blocked: bool
     us_situs_aggregate_usd: float
+
+
+class UserTaxProfileInput(TypedDict, total=False):
+    """Input to compute_marginal_tax_rate()/the MARG token — a user's own tax
+    context (UserProfile.province/income_annual/marginal_tax_rate_override_pct,
+    ticket 86bc8efe7), not account-specific the way AccountStateInput is (MARG is
+    the same number regardless of which account is being analyzed). total=False:
+    a real UserProfile row may have any subset of these set."""
+
+    province: str
+    income_annual: float
+    marginal_tax_rate_override_pct: float
+
+
+_ROOM_STALE_DAYS = 400  # a year plus a grace month — TFSA/RRSP room realistically
+# only changes annually (new room each January) plus whenever the user actually
+# contributes/withdraws, so a real user updating their own profile ~once a year is
+# the expected normal case, not neglect. A shorter, generic-feeling threshold (e.g.
+# 90 days) would flag ordinary annual-cadence usage as stale for most of the year —
+# exactly the "redundant task every other month" friction this needs to avoid.
+# Known, accepted blind spot: a flat day-count can't see the January 1st
+# room-renewal boundary specifically (a value entered Dec 15 reads as fresh despite
+# already missing the new year's grant) — a calendar-aware check would be more
+# correct but replicates exactly the kind of mechanic-replication complexity this
+# system deliberately avoids elsewhere (see MARG's own BPA-only approximation).
+
+
+def _room_stale(as_of: datetime | None, now: datetime) -> tuple[bool, int | None]:
+    """(is_stale, age_days). `as_of` is None -> (False, None): a missing as_of
+    shouldn't itself manufacture a staleness caveat, the ROOM value's own
+    presence/absence already covers "no data at all". Normalizes naive/aware
+    datetimes defensively rather than assuming either convention -- this
+    codebase has hit a real naive/aware datetime bug in this exact area before
+    (86bbummwp Tier 2)."""
+    if as_of is None:
+        return False, None
+    if as_of.tzinfo is None and now.tzinfo is not None:
+        now = now.replace(tzinfo=None)
+    elif as_of.tzinfo is not None and now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    age_days = (now - as_of).days
+    return age_days > _ROOM_STALE_DAYS, age_days
 
 
 class TaxReferenceUnavailable(Exception):
@@ -396,11 +552,19 @@ def build_precomputed_tax_metrics(
     account_type: Literal["tfsa", "rrsp", "trading"],
     bundle: DataBundle,
     account_state: AccountStateInput | None = None,
+    user_tax_profile: UserTaxProfileInput | None = None,
     reference_last_verified: date | None = None,
+    now: datetime | None = None,
 ) -> str:
     """Top-level assembly - the ticket's own named function, signature
-    extended with two new optional parameters beyond the ticket's literal
+    extended with new optional parameters beyond the ticket's literal
     three-arg spec.
+
+    `user_tax_profile` drives the MARG token (86bc8efvb) - like account_state,
+    genuinely optional and user-profile-gated, not universally computable the
+    way DIVID/WHT are. `now` defaults to datetime.now(UTC) when not supplied;
+    exposed as an explicit param (not a bare internal call) so ROOM's staleness
+    check is deterministically testable.
 
     Pure function, no I/O: bundle.company_info, bundle.dividend_history,
     and bundle.price_info are all already-fetched inputs (DataBundle
@@ -425,6 +589,7 @@ def build_precomputed_tax_metrics(
         raise ValueError(
             f"build_precomputed_tax_metrics: unsupported account_type {account_type!r}"
         )
+    now = now or datetime.now(UTC)
 
     is_ca = ticker.upper().endswith(_CA_MARKET_SUFFIXES)
     company_info = bundle.company_info
@@ -484,15 +649,34 @@ def build_precomputed_tax_metrics(
             cgain_line += f"; YTD realized in Trading: ${ytd_gains_cents / 100:,.0f}"
     lines.append(cgain_line)
 
+    if user_tax_profile is not None:
+        marg = compute_marginal_tax_rate(
+            user_tax_profile.get("province"),
+            user_tax_profile.get("income_annual"),
+            user_tax_profile.get("marginal_tax_rate_override_pct"),
+        )
+        if marg is not None:
+            lines.append(
+                f"MARG: {marg:.2f}% combined federal+Ontario marginal rate on the "
+                f"next dollar of ordinary income (NOT average/effective) - use for "
+                f"RRSP contribution deduction value, Trading-account after-tax "
+                f"yield, and tax-loss-harvest value [source: REF federal/Ontario "
+                f"brackets]"
+            )
+
     if account_state is not None:
         if account_type == "tfsa":
             room = account_state.get("tfsa_room_remaining_cents")
             if room is not None:
-                lines.append(f"ROOM: TFSA remaining ${room / 100:,.0f}")
+                stale, age_days = _room_stale(account_state.get("tfsa_room_as_of"), now)
+                suffix = f" (stale, last updated {age_days} days ago)" if stale else ""
+                lines.append(f"ROOM: TFSA remaining ${room / 100:,.0f}{suffix}")
         elif account_type == "rrsp":
             room = account_state.get("rrsp_room_remaining_cents")
             if room is not None:
-                lines.append(f"ROOM: RRSP remaining ${room / 100:,.0f}")
+                stale, age_days = _room_stale(account_state.get("rrsp_room_as_of"), now)
+                suffix = f" (stale, last updated {age_days} days ago)" if stale else ""
+                lines.append(f"ROOM: RRSP remaining ${room / 100:,.0f}{suffix}")
         elif account_type == "trading":
             blocked = account_state.get("superficial_loss_blocked")
             ytd_losses_cents = account_state.get("trading_ytd_realized_losses_cents")
@@ -536,15 +720,21 @@ def build_tax_metrics_field(
     account_type: Literal["tfsa", "rrsp", "trading"],
     bundle: DataBundle,
     account_state: AccountStateInput | None = None,
+    user_tax_profile: UserTaxProfileInput | None = None,
     reference_path: str = "prompts/tax_strategist/canadian_tax_rules_reference.md",
+    now: datetime | None = None,
 ) -> str:
-    """Convenience entry point for DataPipeline.prepare() (not yet built, 86bawpty3): loads
-    the tax rules reference and builds the tax_metrics field in one call, instead of requiring
-    every caller to do both steps itself (86bbztxpj). Both TaxReferenceUnavailable (missing or
-    malformed reference file) and ValueError (invalid account_type, e.g. "general" — still
-    structurally possible per AnalysisContext.account_type's Literal, ClickUp 86bbzqud4) are
-    left to propagate uncaught, matching build_precomputed_tax_metrics()'s own fail-loud
-    posture: the "don't invoke this agent" decision belongs one level up, not here.
+    """Convenience entry point: loads the tax rules reference and builds the
+    tax_metrics field in one call, instead of requiring every caller to do both
+    steps itself (86bbztxpj). This is now the ONLY way the block is built — no
+    caller precomputes it and caches the result (86bc8efvb removed that path,
+    since it couldn't be correct once user_tax_profile/account_state carry real
+    per-user data DataBundle doesn't hold). Both TaxReferenceUnavailable (missing
+    or malformed reference file) and ValueError (invalid account_type, e.g.
+    "general" — still structurally possible per AnalysisContext.account_type's
+    Literal, ClickUp 86bbzqud4) are left to propagate uncaught, matching
+    build_precomputed_tax_metrics()'s own fail-loud posture: the "don't invoke
+    this agent" decision belongs one level up, not here.
 
     reference_path defaults to the same path load_tax_rules_reference() itself defaults to;
     exposed here (not hardcoded) so a caller can point at a different file, same as that
@@ -556,5 +746,7 @@ def build_tax_metrics_field(
         account_type,
         bundle,
         account_state=account_state,
+        user_tax_profile=user_tax_profile,
         reference_last_verified=reference_last_verified,
+        now=now,
     )

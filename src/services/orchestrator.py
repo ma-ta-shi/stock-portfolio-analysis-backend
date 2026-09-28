@@ -55,6 +55,7 @@ from agents.utils import (
     gate1_check,
     gate2_check,
 )
+from api.crud.user_profile import get_user_profile
 from api.tables.agent_outputs import AgentOutput
 from api.tables.analysis_runs import AnalysisRun, RunStatus
 from api.tables.llm_calls import LLMCall
@@ -62,8 +63,11 @@ from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
 from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
+from api.tables.user_profile import UserProfile
 from data.pipeline import DataPipeline
 from data.precompute.tax_metrics import (
+    AccountStateInput,
+    UserTaxProfileInput,
     classify_dividend,
     compute_effective_after_tax_yield,
     compute_trailing_dividend,
@@ -307,8 +311,9 @@ def _validate_tax_passthroughs(
     the same expected values directly from the real DataBundle instead
     (classify_dividend/compute_trailing_dividend/resolve_withholding/
     compute_effective_after_tax_yield, the exact same pure functions
-    pass2_tax_strategist.py's own bundle.tax_metrics was built from), rather
-    than re-parsing them back out of the rendered tax_metrics string.
+    pass2_tax_strategist.py's own tax_metrics block is built from -- see
+    that module's _tax_metrics_block(), 86bc8efvb), rather than re-parsing
+    them back out of the rendered tax_metrics string.
 
     Confirms Tax Strategist's dividend_yield_pct/withholding_tax_rate_pct/
     effective_after_tax_yield_pct are within tolerance of the orchestrator's
@@ -397,6 +402,49 @@ async def _run_contained(
     except Exception as exc:
         logger.error(f"{pass_label}_agent_failed", agent_id=agent_id, error=str(exc))
         return agent_id, None, [str(exc)], exc
+
+
+def _build_tax_inputs(
+    user_profile: UserProfile | None,
+) -> tuple[AccountStateInput | None, UserTaxProfileInput | None]:
+    """(account_state, user_tax_profile) from a real UserProfile row, or
+    (None, None) when there is no profile at all -- the same degrade-to-absent
+    behavior every other optional-data path in this codebase already uses, not
+    a new failure mode (86bc8efvb). Dollar->cents conversion happens here for
+    the room fields: UserProfile.tfsa_room_remaining/rrsp_room_remaining are
+    dollars, AccountStateInput's own fields are cents (existing convention in
+    tax_metrics.py, unchanged here). Builds the full account_state dict
+    regardless of account_type -- build_precomputed_tax_metrics()'s own
+    per-account_type branching already decides what actually renders, so this
+    doesn't need to know or care which account is being analyzed."""
+    if user_profile is None:
+        return None, None
+
+    account_state: AccountStateInput = {}
+    if user_profile.tfsa_room_remaining is not None:
+        account_state["tfsa_room_remaining_cents"] = round(user_profile.tfsa_room_remaining * 100)
+    if user_profile.tfsa_room_as_of is not None:
+        account_state["tfsa_room_as_of"] = user_profile.tfsa_room_as_of
+    if user_profile.rrsp_room_remaining is not None:
+        account_state["rrsp_room_remaining_cents"] = round(user_profile.rrsp_room_remaining * 100)
+    if user_profile.rrsp_room_as_of is not None:
+        account_state["rrsp_room_as_of"] = user_profile.rrsp_room_as_of
+
+    user_tax_profile: UserTaxProfileInput = {}
+    if user_profile.province is not None:
+        user_tax_profile["province"] = user_profile.province
+    if user_profile.income_annual is not None:
+        user_tax_profile["income_annual"] = user_profile.income_annual
+    if user_profile.marginal_tax_rate_override_pct is not None:
+        user_tax_profile["marginal_tax_rate_override_pct"] = (
+            user_profile.marginal_tax_rate_override_pct
+        )
+
+    # Empty dict -> None: a UserProfile row with every relevant field unset
+    # should read as genuinely absent, not as "present but empty" -- the
+    # downstream precompute functions already treat None as the absence
+    # signal, not {}.
+    return (account_state or None), (user_tax_profile or None)
 
 
 def _market_cap_bucket(market_cap: float | None) -> str | None:
@@ -930,10 +978,36 @@ class AnalysisOrchestrator:
         for r in runners.values():
             self._prime_runner(r)
 
+        # 86bc8efvb -- only the tax runner needs this; bull/bear/risk never
+        # have and still don't. Fetched here, before the asyncio.gather below,
+        # not concurrently with it: this is the ONLY db access anywhere in
+        # this method (none of the 4 runners' own .run() calls touch db at
+        # all), and AsyncSession isn't safe for concurrent use, so the
+        # ordering is load-bearing, not just style. A missing/unset profile
+        # degrades to (None, None) the same way every other optional-data
+        # path in this codebase already does -- not a new failure mode.
+        user_profile = await get_user_profile(db, run.user_id)
+        account_state, user_tax_profile = _build_tax_inputs(user_profile)
+
         async def _run_bull_bear_tax(agent_id: str, runner):
-            agent_id, result, errors, exc = await _run_contained(
-                "pass2", agent_id, runner.run(bundle, compressed, run.account_type)
-            )
+            # Bull/Bear's own runners don't accept account_state/
+            # user_tax_profile at all -- this branch is the only place tax
+            # data is threaded through, despite bull/bear/tax sharing this one
+            # dispatch helper. Confirmed neither pass2_bull_advocate.py nor
+            # pass2_bear_advocate.py reference tax_metrics anywhere; this
+            # helper's name describes shared execution mechanics (none of the
+            # 3 have a Stage A/B split, unlike risk), not a shared data path.
+            if agent_id == "tax":
+                coro = runner.run(
+                    bundle,
+                    compressed,
+                    run.account_type,
+                    account_state=account_state,
+                    user_tax_profile=user_tax_profile,
+                )
+            else:
+                coro = runner.run(bundle, compressed, run.account_type)
+            agent_id, result, errors, exc = await _run_contained("pass2", agent_id, coro)
             if agent_id == "tax" and exc is None and agent_completed(result):
                 # Isolated from _run_contained's own try/except on purpose:
                 # a bug in this SECONDARY check must not destroy a real,

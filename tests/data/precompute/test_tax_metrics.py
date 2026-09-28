@@ -14,6 +14,7 @@ from data.precompute.tax_metrics import (
     build_tax_rule_snapshot,
     classify_dividend,
     compute_effective_after_tax_yield,
+    compute_marginal_tax_rate,
     compute_trailing_dividend,
     is_canadian_dual_listed,
     load_tax_rules_reference,
@@ -325,9 +326,11 @@ def test_is_canadian_dual_listed_known_miss_for_us_side_of_real_pair(monkeypatch
 
 def test_load_tax_rules_reference_against_the_real_shipped_file():
     """Real call against the actual, already-committed reference file -
-    confirms the real header parses, not a fixture standing in for it."""
+    confirms the real header parses, not a fixture standing in for it.
+    Date updated 86bc8efkg (PR #73) -- real 2026 CRA data refresh, no longer
+    the stale 2026-03-01 placeholder."""
     text, last_verified = load_tax_rules_reference()
-    assert last_verified == date(2026, 3, 1)
+    assert last_verified == date(2026, 9, 28)
     assert "Withholding tax grid" in text
 
 
@@ -752,3 +755,169 @@ def test_build_tax_metrics_field_propagates_tax_reference_unavailable():
     bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
     with pytest.raises(TaxReferenceUnavailable):
         build_tax_metrics_field("AAPL", "trading", bundle, reference_path="does/not/exist.md")
+
+
+# --- compute_marginal_tax_rate / MARG (86bc8efvb) ---
+# Expected values hand-derived from the finalized 86bc8efkg formula (federal +
+# Ontario brackets, Ontario surtax approximated via the BPA credit only) —
+# see that ticket for the full sourcing/derivation. pytest.approx with a small
+# absolute tolerance, not exact float equality, since these are independently
+# hand-computed, not copy-pasted from the implementation.
+
+
+def test_compute_marginal_tax_rate_low_income_no_surtax():
+    # federal 14.0% (< $58,523) + ontario 5.05% (< $53,891), T4_approx well
+    # under the first surtax threshold -> multiplier 1.0
+    assert compute_marginal_tax_rate("ON", 30_000.0) == pytest.approx(19.05, abs=0.01)
+
+
+def test_compute_marginal_tax_rate_just_below_first_surtax_threshold():
+    assert compute_marginal_tax_rate("ON", 94_000.0) == pytest.approx(29.65, abs=0.01)
+
+
+def test_compute_marginal_tax_rate_just_above_first_surtax_threshold():
+    # Same brackets as the case just below, but T4_approx now crosses $5,818
+    # -> 20% surtax multiplier kicks in on the Ontario portion only.
+    assert compute_marginal_tax_rate("ON", 96_000.0) == pytest.approx(31.48, abs=0.01)
+
+
+def test_compute_marginal_tax_rate_past_second_surtax_threshold():
+    # federal 26.0% + ontario 11.16% x 1.56 (both surtax tiers stacked)
+    assert compute_marginal_tax_rate("ON", 150_000.0) == pytest.approx(43.41, abs=0.01)
+
+
+def test_compute_marginal_tax_rate_federal_bracket_boundary_inclusive():
+    """Exactly at a threshold reads the LOWER bracket's rate -- the same
+    inclusive-lower convention the 86bc8efkg bracket tables themselves use
+    ("$0-$58,523: 14%")."""
+    at_threshold = compute_marginal_tax_rate("ON", 58_523.0)
+    just_above = compute_marginal_tax_rate("ON", 58_524.0)
+    assert at_threshold < just_above  # federal rate ticks up crossing the boundary
+
+
+def test_compute_marginal_tax_rate_override_takes_precedence():
+    """Override wins even with a clearly-inconsistent income figure -- the
+    override exists specifically for someone who knows their real rate; the
+    bracket calculation is the fallback, never consulted when one is given."""
+    assert compute_marginal_tax_rate("ON", 999_999.0, override_pct=25.0) == 25.0
+
+
+def test_compute_marginal_tax_rate_override_works_with_no_province_or_income():
+    assert compute_marginal_tax_rate(None, None, override_pct=40.0) == 40.0
+
+
+def test_compute_marginal_tax_rate_none_for_non_ontario_province():
+    """Real, current data only exists for Ontario (v1 scope) -- a non-ON
+    province is genuinely absent, not silently computed against Ontario's
+    brackets."""
+    assert compute_marginal_tax_rate("BC", 95_000.0) is None
+
+
+def test_compute_marginal_tax_rate_none_when_province_missing():
+    assert compute_marginal_tax_rate(None, 95_000.0) is None
+
+
+def test_compute_marginal_tax_rate_none_when_income_missing():
+    assert compute_marginal_tax_rate("ON", None) is None
+
+
+# --- MARG token rendering (86bc8efvb) ---
+
+
+def test_build_precomputed_tax_metrics_marg_present_with_real_profile():
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    block = build_precomputed_tax_metrics(
+        "AAPL", "tfsa", bundle, user_tax_profile={"province": "ON", "income_annual": 95_000.0}
+    )
+    assert "MARG:" in block
+    assert "combined federal+Ontario marginal rate" in block
+
+
+def test_build_precomputed_tax_metrics_marg_absent_when_user_tax_profile_none():
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    block = build_precomputed_tax_metrics("AAPL", "tfsa", bundle)
+    assert "MARG:" not in block
+
+
+def test_build_precomputed_tax_metrics_marg_absent_when_profile_present_but_incomplete():
+    """user_tax_profile itself being supplied doesn't guarantee MARG renders
+    -- compute_marginal_tax_rate's own absence rules still apply (e.g. income
+    missing)."""
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    block = build_precomputed_tax_metrics(
+        "AAPL", "tfsa", bundle, user_tax_profile={"province": "ON"}
+    )
+    assert "MARG:" not in block
+
+
+def test_build_precomputed_tax_metrics_marg_uses_override():
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    block = build_precomputed_tax_metrics(
+        "AAPL", "tfsa", bundle, user_tax_profile={"marginal_tax_rate_override_pct": 33.5}
+    )
+    assert "MARG: 33.50%" in block
+
+
+# --- ROOM staleness (86bc8efvb) ---
+
+
+def test_build_precomputed_tax_metrics_room_fresh_no_staleness_suffix():
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    now = datetime(2026, 9, 28)
+    block = build_precomputed_tax_metrics(
+        "AAPL",
+        "tfsa",
+        bundle,
+        account_state={
+            "tfsa_room_remaining_cents": 750_000,
+            "tfsa_room_as_of": now - timedelta(days=30),
+        },
+        now=now,
+    )
+    assert "ROOM: TFSA remaining $7,500" in block
+    assert "(stale" not in block
+
+
+def test_build_precomputed_tax_metrics_room_stale_gets_suffix():
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    now = datetime(2026, 9, 28)
+    block = build_precomputed_tax_metrics(
+        "AAPL",
+        "tfsa",
+        bundle,
+        account_state={
+            "tfsa_room_remaining_cents": 750_000,
+            "tfsa_room_as_of": now - timedelta(days=430),
+        },
+        now=now,
+    )
+    assert "ROOM: TFSA remaining $7,500 (stale, last updated 430 days ago)" in block
+
+
+def test_build_precomputed_tax_metrics_room_missing_as_of_not_treated_as_stale():
+    """A missing as_of shouldn't itself manufacture a staleness caveat -- the
+    ROOM value's own presence/absence already covers "no data at all"."""
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    block = build_precomputed_tax_metrics(
+        "AAPL", "tfsa", bundle, account_state={"tfsa_room_remaining_cents": 750_000}
+    )
+    assert "ROOM: TFSA remaining $7,500" in block
+    assert "(stale" not in block
+
+
+def test_build_precomputed_tax_metrics_room_exactly_at_threshold_not_stale():
+    """age_days > _ROOM_STALE_DAYS (strictly greater), so exactly 400 days
+    reads as fresh, not stale -- the boundary itself, not an approximation."""
+    bundle = _fake_bundle(_company_info(name="Apple Inc.", country="US"), [], 332.0)
+    now = datetime(2026, 9, 28)
+    block = build_precomputed_tax_metrics(
+        "AAPL",
+        "rrsp",
+        bundle,
+        account_state={
+            "rrsp_room_remaining_cents": 3_000_000,
+            "rrsp_room_as_of": now - timedelta(days=400),
+        },
+        now=now,
+    )
+    assert "(stale" not in block

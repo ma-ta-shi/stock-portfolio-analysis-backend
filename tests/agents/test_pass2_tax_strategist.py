@@ -1,15 +1,23 @@
-"""Tests for agents/pass2_tax_strategist.py (86bbuhjup). No harness
+"""Tests for agents/pass2_tax_strategist.py (86bbuhjup, 86bc8efvb). No harness
 equivalent -- see test_pass1_stock_researcher.py's docstring for why.
 
-Focus: the real simplification this port makes (bundle.tax_metrics is
-already the fully-rendered block, not re-derived) and its one real wrinkle
-(an account_type override that differs from bundle.context.account_type must
-not silently use the wrong account's tax_metrics)."""
+Focus: _tax_metrics_block() always rebuilds fresh via build_tax_metrics_field()
+now (86bc8efvb removed the old bundle.tax_metrics fast path -- that field
+could never stay correct once account_state/user_tax_profile carry real
+per-user data DataBundle doesn't hold, so every test here controls the
+rendered text by mocking build_tax_metrics_field, not a bundle attribute),
+and the field-presence/material-absent gating this drives for MARG/ROOM."""
+import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from agents.pass2_tax_strategist import _tax_metrics_block, _validate_with_caveats, build_user_message
+from agents.pass2_tax_strategist import (
+    TaxStrategistRunner,
+    _tax_metrics_block,
+    _validate_with_caveats,
+    build_user_message,
+)
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -18,72 +26,87 @@ def _bundle(**overrides) -> SimpleNamespace:
         company_info={"name": "Royal Bank of Canada", "sector": "Financials"},
         context=SimpleNamespace(account_type="tfsa", timeline="medium_term"),
         data_vintage=datetime(2026, 9, 23, tzinfo=UTC),
-        tax_metrics="DIVID: 4.1% yield, 4 payments/yr\nWHT (this account, tfsa): 15.0%, ...",
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
 
-def test_uses_bundle_tax_metrics_directly_when_account_type_matches():
+def _mock_tax_metrics(text: str):
+    return patch("agents.pass2_tax_strategist.build_tax_metrics_field", return_value=text)
+
+
+def test_tax_metrics_block_always_calls_build_tax_metrics_field_fresh():
     bundle = _bundle()
-    result = _tax_metrics_block(bundle, "tfsa")
-    assert result == bundle.tax_metrics
+    with _mock_tax_metrics("DIVID: 4.1% yield, 4 payments/yr") as mock_build:
+        result = _tax_metrics_block(bundle, "tfsa")
+    mock_build.assert_called_once_with(
+        "RY.TO", "tfsa", bundle, account_state=None, user_tax_profile=None
+    )
+    assert result == "DIVID: 4.1% yield, 4 payments/yr"
 
 
-def test_rebuilds_fresh_when_account_type_override_differs():
-    """The real wrinkle: bundle.tax_metrics was built for 'tfsa'
-    (bundle.context.account_type) -- requesting 'rrsp' must not silently
-    reuse the tfsa-scoped string."""
-    bundle = _bundle()  # context.account_type == "tfsa", tax_metrics is tfsa-scoped
-    with patch("agents.pass2_tax_strategist.build_tax_metrics_field") as mock_build:
-        mock_build.return_value = "DIVID: 4.1% yield\nWHT (this account, rrsp): 0.0%, treaty exempt"
-        result = _tax_metrics_block(bundle, "rrsp")
-    mock_build.assert_called_once_with("RY.TO", "rrsp", bundle)
-    assert "rrsp" in result
-    assert result != bundle.tax_metrics
+def test_tax_metrics_block_threads_account_state_and_user_tax_profile_through():
+    bundle = _bundle()
+    account_state = {"tfsa_room_remaining_cents": 750_000}
+    user_tax_profile = {"province": "ON", "income_annual": 95_000.0}
+    with _mock_tax_metrics("ROOM: TFSA remaining $7,500") as mock_build:
+        _tax_metrics_block(bundle, "tfsa", account_state, user_tax_profile)
+    mock_build.assert_called_once_with(
+        "RY.TO", "tfsa", bundle, account_state=account_state, user_tax_profile=user_tax_profile
+    )
 
 
 def test_build_user_message_renders_real_tax_metrics_block():
     bundle = _bundle()
-    msg, _ = build_user_message(bundle, {}, "tfsa")
+    with _mock_tax_metrics(
+        "DIVID: 4.1% yield, 4 payments/yr\nWHT (this account, tfsa): 15.0%, ..."
+    ):
+        msg, _ = build_user_message(bundle, {}, "tfsa")
     assert "DIVID: 4.1% yield, 4 payments/yr" in msg
     assert "WHT (this account, tfsa): 15.0%" in msg
     assert "ANALYSIS TARGET ACCOUNT: TFSA" in msg
 
 
-def test_build_user_message_uses_fresh_block_for_override_account():
-    bundle = _bundle()
-    with patch("agents.pass2_tax_strategist.build_tax_metrics_field") as mock_build:
-        mock_build.return_value = "DIVID: 4.1%\nWHT (this account, rrsp): 0.0%, treaty exempt"
+def test_build_user_message_for_override_account_type():
+    bundle = _bundle()  # context.account_type == "tfsa"
+    with _mock_tax_metrics(
+        "DIVID: 4.1%\nWHT (this account, rrsp): 0.0%, treaty exempt"
+    ) as mock_build:
         msg, _ = build_user_message(bundle, {}, "rrsp")
+    mock_build.assert_called_once_with(
+        "RY.TO", "rrsp", bundle, account_state=None, user_tax_profile=None
+    )
     assert "WHT (this account, rrsp): 0.0%, treaty exempt" in msg
     assert "ANALYSIS TARGET ACCOUNT: RRSP" in msg
 
 
-# ---------- field_presence (86bbwachy Phase 4) ----------
+# ---------- field_presence (86bbwachy Phase 4, extended 86bc8efvb for marg/room) ----------
 
 
 def test_field_presence_true_for_both_when_dividend_and_wht_are_real():
     bundle = _bundle()  # DIVID has a real yield, WHT has a real 15.0% rate
-    _, presence = build_user_message(bundle, {}, "tfsa")
-    assert presence == {"divid": True, "wht": True}
+    with _mock_tax_metrics(
+        "DIVID: 4.1% yield, 4 payments/yr\nWHT (this account, tfsa): 15.0%, ..."
+    ):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence == {"divid": True, "wht": True, "marg": False, "room": False}
 
 
 def test_field_presence_divid_false_when_no_dividend_history():
-    bundle = _bundle(tax_metrics="DIVID: no dividend history\nWHT (this account, tfsa): 0.0%, no withholding")
-    _, presence = build_user_message(bundle, {}, "tfsa")
+    bundle = _bundle()
+    with _mock_tax_metrics(
+        "DIVID: no dividend history\nWHT (this account, tfsa): 0.0%, no withholding"
+    ):
+        _, presence = build_user_message(bundle, {}, "tfsa")
     assert presence["divid"] is False
 
 
 def test_field_presence_wht_false_when_not_modelled():
-    # account_type matches bundle.context.account_type ("tfsa") so
-    # _tax_metrics_block reads bundle.tax_metrics directly rather than
-    # taking the override path (which would need a real DataBundle's
-    # dividend_history/price_info to rebuild fresh).
-    bundle = _bundle(
-        tax_metrics="DIVID: 3.0% yield, 4 payments/yr\n"
+    bundle = _bundle()
+    with _mock_tax_metrics(
+        "DIVID: 3.0% yield, 4 payments/yr\n"
         "WHT (this account, tfsa): NOT MODELLED per REF withholding grid"
-    )
-    _, presence = build_user_message(bundle, {}, "tfsa")
+    ):
+        _, presence = build_user_message(bundle, {}, "tfsa")
     assert presence["wht"] is False
 
 
@@ -91,12 +114,97 @@ def test_field_presence_both_false_for_etf_branch():
     """The ETF early-return path renders neither a DIVID nor a WHT line at
     all -- both must read False, not raise a KeyError/crash on a missing
     substring."""
-    bundle = _bundle(
-        tax_metrics="DOM: not applicable - this precompute module covers individual "
+    bundle = _bundle()
+    with _mock_tax_metrics(
+        "DOM: not applicable - this precompute module covers individual "
         "equities and REITs/trusts only; XIU.TO is asset_type=etf"
+    ):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence["divid"] is False
+    assert presence["wht"] is False
+
+
+def test_field_presence_marg_true_when_line_present():
+    bundle = _bundle()
+    with _mock_tax_metrics(
+        "MARG: 31.15% combined federal+Ontario marginal rate on the next dollar"
+    ):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence["marg"] is True
+
+
+def test_field_presence_marg_false_when_absent():
+    bundle = _bundle()
+    with _mock_tax_metrics("DIVID: no dividend history"):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence["marg"] is False
+
+
+def test_field_presence_room_true_when_fresh():
+    bundle = _bundle()
+    with _mock_tax_metrics("ROOM: TFSA remaining $7,500"):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence["room"] is True
+
+
+def test_field_presence_room_false_when_stale_even_though_line_is_present():
+    """The real point of the stale-vs-absent distinction (86bc8efvb): a
+    present-but-stale ROOM line must read the same as fully absent for
+    material_absent/confidence-caveat gating -- staleness isn't left to the
+    LLM to notice on its own."""
+    bundle = _bundle()
+    with _mock_tax_metrics("ROOM: TFSA remaining $7,500 (stale, last updated 430 days ago)"):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence["room"] is False
+
+
+def test_field_presence_room_false_when_absent_entirely():
+    bundle = _bundle()
+    with _mock_tax_metrics("DIVID: no dividend history"):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence["room"] is False
+
+
+# ---------- TaxStrategistRunner.run() material_absent gating (86bc8efvb) ----------
+
+
+def _run_with_mocked_call(bundle, account_type, tax_metrics_text):
+    """Runs TaxStrategistRunner.run() with build_tax_metrics_field mocked and
+    call_with_validation short-circuited (no real LLM call) -- returns the
+    partial() handed to call_with_validation so tests can inspect exactly
+    what material_absent was computed as."""
+    runner = TaxStrategistRunner()
+    with (
+        _mock_tax_metrics(tax_metrics_text),
+        patch.object(runner, "call_with_validation") as mock_call,
+    ):
+
+        async def _fake_call(*_args, **_kwargs):
+            return {}, []
+
+        mock_call.side_effect = _fake_call
+        asyncio.run(runner.run(bundle, {}, account_type))
+    return mock_call.call_args[0][2]  # the partial(_validate_with_caveats, ...) positional arg
+
+
+def test_run_material_absent_excludes_room_for_trading_account():
+    """ROOM never renders for a Trading account at all (build_precomputed_tax_metrics's
+    own ROOM branch only handles tfsa/rrsp) -- architecturally correct absence,
+    not missing data, same treatment wht already gets for classifications
+    WHT_GRID has no entry for."""
+    bundle = _bundle(context=SimpleNamespace(account_type="trading", timeline="medium_term"))
+    validate_partial = _run_with_mocked_call(
+        bundle, "trading", "DIVID: 3.0% yield, 4 payments/yr\nCGAIN: ..."
     )
-    _, presence = build_user_message(bundle, {}, "tfsa")
-    assert presence == {"divid": False, "wht": False}
+    assert "room" not in validate_partial.keywords["material_absent"]
+
+
+def test_run_material_absent_includes_room_for_tfsa_when_genuinely_missing():
+    """The exclusion above is trading-specific, not a blanket permanent
+    exclusion -- for tfsa/rrsp, a genuinely-missing ROOM line still counts."""
+    bundle = _bundle(context=SimpleNamespace(account_type="tfsa", timeline="medium_term"))
+    validate_partial = _run_with_mocked_call(bundle, "tfsa", "DIVID: 3.0% yield, 4 payments/yr")
+    assert "room" in validate_partial.keywords["material_absent"]
 
 
 # ---------- _validate_with_caveats (86bbummwp follow-on -- new here, this agent
