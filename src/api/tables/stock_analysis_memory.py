@@ -17,7 +17,7 @@ class StockAnalysisMemory(Base):
     key_insights: Mapped[list] = mapped_column(JSON)  # [{insight, importance, sentiment}]
     recommendation: Mapped[Optional[str]] = mapped_column(String(10))  # For Pass 2/CIO agents
     confidence: Mapped[Optional[int]]
-    predicted_return_tier: Mapped[Optional[str]] = mapped_column(String(20))
+    predicted_return_tier: Mapped[Optional[str]] = mapped_column(String(20))  # strong_outperform|outperform|market_perform|underperform|strong_underperform
     outcome_summary: Mapped[Optional[str]] = mapped_column(Text)  # Filled later from feedback
     events_since: Mapped[Optional[list]] = mapped_column(JSON)  # Filled on next analysis: earnings, price changes, news
     created_at: Mapped[datetime] = mapped_column(default=func.now())

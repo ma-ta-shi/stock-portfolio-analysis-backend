@@ -22,7 +22,7 @@ class Recommendation(Base):
     bull_case_strength: Mapped[int]
     bear_case_strength: Mapped[int]
     # Expected return estimation (phased precision — see Feedback Learning doc)
-    expected_return_tier: Mapped[Optional[str]] = mapped_column(String(20))  # high|moderate|low|minimal (Phase 2)
+    expected_return_tier: Mapped[Optional[str]] = mapped_column(String(20))  # strong_outperform|outperform|market_perform|underperform|strong_underperform
     expected_return_pct: Mapped[Optional[float]]    # Point estimate (Phase 4)
     expected_return_low: Mapped[Optional[float]]    # 25th percentile (Phase 3)
     expected_return_high: Mapped[Optional[float]]   # 75th percentile (Phase 3)

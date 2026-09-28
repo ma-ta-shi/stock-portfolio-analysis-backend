@@ -3,7 +3,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from api.database import Base
 from uuid import UUID, uuid4
 from datetime import datetime
-from typing import Optional, Text
+from typing import Optional
 
 class Prediction(Base):
     __tablename__ = "predictions"
@@ -13,7 +13,7 @@ class Prediction(Base):
     price_at_recommendation: Mapped[float]
     benchmark_price_at_recommendation: Mapped[float]
     # Expected return estimation (phased precision — see Feedback Learning doc)
-    predicted_return_tier: Mapped[Optional[str]] = mapped_column(String(20))  # high|moderate|low|minimal (Phase 2)
+    predicted_return_tier: Mapped[Optional[str]] = mapped_column(String(20))  # strong_outperform|outperform|market_perform|underperform|strong_underperform
     predicted_return_pct: Mapped[Optional[float]]    # Point estimate (Phase 4, after calibration)
     predicted_return_low: Mapped[Optional[float]]    # 25th percentile (Phase 3)
     predicted_return_high: Mapped[Optional[float]]   # 75th percentile (Phase 3)

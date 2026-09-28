@@ -86,19 +86,6 @@ _PROMPT_VERSIONS = {
     "cio_stage_a": "v1", "cio_stage_b": "v1", "shadow_cio": "v1",
 }
 
-# Real 5-tier CIO value (relative-performance vocabulary) -> Recommendation's
-# stale 4-tier column (absolute-magnitude vocabulary, "high|moderate|low|
-# minimal", Phase 2). Deliberately lossy -- 86bbt1kpj's still-open vocabulary
-# mismatch, not fixed here (that's real, separate schema-design work per the
-# approved plan). An ordinal best-effort collapse, not a semantic equivalence.
-_RETURN_TIER_TO_RECOMMENDATION_VOCAB = {
-    "strong_outperform": "high",
-    "outperform": "moderate",
-    "market_perform": "low",
-    "underperform": "minimal",
-    "strong_underperform": "minimal",
-}
-
 # 86bbwachy Phase 5 -- which of the 12 real agent_names are structurally
 # excluded from _write_run_quality_summary's degenerate-output detection.
 # Confirmed live (real MSFT run, 2026-09-24), not assumed: without these
@@ -1101,17 +1088,19 @@ class AnalysisOrchestrator:
             )
             return
 
-        distance, _high_divergence = compute_outlook_distance(primary_outlook, shadow_outlook)
+        distance, high_divergence = compute_outlook_distance(primary_outlook, shadow_outlook)
         async with db.begin_nested():
             db.add(ShadowPrediction(
                 analysis_run_id=run_id,
                 primary_outlook_direction=primary_outlook,
                 primary_confidence=stage_a_result.get("confidence") or 0,
-                primary_projected_return_tier=stage_a_result.get("expected_return_tier"),
+                primary_expected_return_tier=stage_a_result.get("expected_return_tier"),
                 shadow_outlook_direction=shadow_outlook,
                 shadow_confidence=result.get("confidence") or 0,
-                shadow_projected_return_tier=result.get("expected_return_tier"),
+                shadow_expected_return_tier=result.get("expected_return_tier"),
                 divergence_magnitude=_divergence_magnitude(distance),
+                primary_cio_outlook_distance=distance,
+                high_divergence=high_divergence,
             ))
             await db.flush()
         await db.commit()
@@ -1157,9 +1146,7 @@ class AnalysisOrchestrator:
             dissenting_views=None,
             bull_case_strength=bull_conf,
             bear_case_strength=bear_conf,
-            expected_return_tier=_RETURN_TIER_TO_RECOMMENDATION_VOCAB.get(
-                stage_b_result.get("expected_return_tier")
-            ),
+            expected_return_tier=stage_b_result.get("expected_return_tier"),
         )
         db.add(recommendation)
         await db.commit()

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from api.database import Base
 from uuid import UUID, uuid4
 from datetime import datetime
-from typing import Optional, Text
+from typing import Optional
 
 class ShadowPrediction(Base):
     __tablename__ = "shadow_predictions"
@@ -11,11 +11,13 @@ class ShadowPrediction(Base):
     analysis_run_id: Mapped[UUID] = mapped_column(ForeignKey("analysis_runs.run_id"), index=True)
     primary_outlook_direction: Mapped[str] = mapped_column(String(20))
     primary_confidence: Mapped[int]
-    primary_projected_return_tier: Mapped[Optional[str]] = mapped_column(String(20))
+    primary_expected_return_tier: Mapped[Optional[str]] = mapped_column(String(20))  # strong_outperform|outperform|market_perform|underperform|strong_underperform
     shadow_outlook_direction: Mapped[str] = mapped_column(String(20))
     shadow_confidence: Mapped[int]
-    shadow_projected_return_tier: Mapped[Optional[str]] = mapped_column(String(20))
+    shadow_expected_return_tier: Mapped[Optional[str]] = mapped_column(String(20))  # strong_outperform|outperform|market_perform|underperform|strong_underperform
     divergence_magnitude: Mapped[str] = mapped_column(String(10))  # none | minor | moderate | major
+    primary_cio_outlook_distance: Mapped[Optional[int]]  # 0-4, |DIRECTION_MAP[primary] - DIRECTION_MAP[shadow]| (86bbt1kpj)
+    high_divergence: Mapped[Optional[bool]]  # True when primary_cio_outlook_distance > 2 (86bbt1kpj)
     primary_accuracy_at_checkpoint: Mapped[Optional[float]]
     shadow_accuracy_at_checkpoint: Mapped[Optional[float]]
     which_was_closer: Mapped[Optional[str]] = mapped_column(String(10))  # primary | shadow | tie
