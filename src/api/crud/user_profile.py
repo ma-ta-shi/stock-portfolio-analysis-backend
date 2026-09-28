@@ -1,26 +1,56 @@
-from sqlalchemy.orm import Session
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from api.tables.user_profile import UserProfile
-from api.schemas.user_profile import UserProfileCreate
+from api.schemas.user_profile import UserProfileCreate, UserProfileUpdate
 
 
-def create_user_profile(db: Session, user_profile: UserProfileCreate):
-    db_user = UserProfile(display_name=user_profile.display_name)
+def _dump_fields(data, *, exclude_unset: bool) -> dict:
+    """model_dump() in its default "python" mode, except for
+    time_sensitive_cash_needs: `date` isn't JSON-serializable, and the JSON
+    column needs a plain, storable value. The other fields (floats, real
+    datetimes for direct column assignment) go through the default mode
+    unaffected. Shared by create and update -- both accept the same
+    personalization fields (see _UserProfileFields)."""
+    dumped = data.model_dump(exclude_unset=exclude_unset)
+    if dumped.get("time_sensitive_cash_needs") is not None:
+        dumped["time_sensitive_cash_needs"] = [
+            need.model_dump(mode="json") for need in data.time_sensitive_cash_needs
+        ]
+    return dumped
+
+
+async def create_user_profile(db: AsyncSession, user_profile: UserProfileCreate) -> UserProfile:
+    db_user = UserProfile(**_dump_fields(user_profile, exclude_unset=False))
     db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
+    await db.commit()
+    await db.refresh(db_user)
     return db_user
 
 
-def get_users(db: Session):
-    return db.query(UserProfile).all()
+async def get_users(db: AsyncSession) -> list[UserProfile]:
+    result = await db.execute(select(UserProfile))
+    return list(result.scalars().all())
 
 
-def get_user_profile(db: Session, user_id):
-    return db.query(UserProfile).filter(UserProfile.user_id == user_id).first()
+async def get_user_profile(db: AsyncSession, user_id) -> UserProfile | None:
+    result = await db.execute(select(UserProfile).where(UserProfile.user_id == user_id))
+    return result.scalar_one_or_none()
 
-def delete_user(db: Session, user_id):
-    user = get_user_profile(db, user_id)
-    if user:
-        db.delete(user)
-        db.commit()
+
+async def update_user_profile(db: AsyncSession, user_id, updates: UserProfileUpdate) -> UserProfile | None:
+    user = await get_user_profile(db, user_id)
+    if user is None:
+        return None
+    for field, value in _dump_fields(updates, exclude_unset=True).items():
+        setattr(user, field, value)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def delete_user(db: AsyncSession, user_id) -> UserProfile | None:
+    user = await get_user_profile(db, user_id)
+    if user is not None:
+        await db.delete(user)
+        await db.commit()
     return user
