@@ -500,7 +500,13 @@ def _valid_tax_output() -> dict:
             "withholding_tax_rate_pct": 15.0,
             "effective_after_tax_yield_pct": 1.53,
             "is_eligible_canadian_dividend": False,
+            # 86bc8eg3j: the real schema field is capital_gains_treatment_summary
+            # (prompts/tax_strategist/v1.txt Step 5/Rule 8), not capital_gains_treatment
+            # -- this fixture's own field name predates that and was never checked by
+            # anything, so the mismatch went unnoticed until a real validator check
+            # (added here) started requiring the real field name.
             "capital_gains_treatment": "Tax-free in TFSA — all capital gains are completely exempt from Canadian tax.",
+            "capital_gains_treatment_summary": "Tax-free in TFSA — all capital gains are completely exempt from Canadian tax.",
             "loss_risk_assessment": "Capital losses in TFSA permanently reduce available TFSA room and cannot be used to offset gains elsewhere.",
             "cross_account_recommendation": None,
             "recommended_account": "current_account_is_optimal",
@@ -581,6 +587,24 @@ class TestTaxStrategist:
         passed, errors = validate_tax_strategist(out)
         assert not passed
         assert any("dividend_classification" in e for e in errors)
+
+    def test_missing_capital_gains_treatment_summary_fails(self):
+        """86bc8eg3j: requested by the prompt's Output Schema (Step 5/Rule 8) but
+        never enforced until now -- added once this field started flowing into
+        the CIO's own Stage B input, to hold it to the same reliability bar as
+        tax_optimization_actions."""
+        out = _valid_tax_output()
+        del out["tax_profile"]["capital_gains_treatment_summary"]
+        passed, errors = validate_tax_strategist(out)
+        assert not passed
+        assert any("capital_gains_treatment_summary" in e for e in errors)
+
+    def test_empty_capital_gains_treatment_summary_fails(self):
+        out = _valid_tax_output()
+        out["tax_profile"]["capital_gains_treatment_summary"] = "   "
+        passed, errors = validate_tax_strategist(out)
+        assert not passed
+        assert any("capital_gains_treatment_summary" in e for e in errors)
 
     def test_valid_dividend_classification_passes(self):
         out = _valid_tax_output()
