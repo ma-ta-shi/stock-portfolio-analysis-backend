@@ -555,3 +555,39 @@ async def test_get_ratios_ttm_returns_first_record(provider):
 async def test_out_of_scope_methods_raise_not_implemented(provider, method, args):
     with pytest.raises(NotImplementedError):
         await getattr(provider, method)(*args)
+
+
+# --- degradation reporting (86bc997wr): a "no" that does not raise must be recorded ---
+
+
+async def test_402_is_reported_as_not_covered_per_endpoint_and_changes_nothing(provider, collector):
+    _wire(provider, FakeResponse(402, text_data="Premium Query Parameter: not available"))
+
+    with structlog.testing.capture_logs() as logs:
+        data = await provider._request("analyst-estimates", {"symbol": "KO"})
+
+    assert data is None  # unchanged
+    assert any(log["event"] == "fmp_symbol_not_available" for log in logs)  # log unchanged
+    events = collector.drain()
+    assert [e.key for e in events] == [("fmp", "analyst-estimates", "not_covered")]
+    assert "apikey" not in events[0].message and "test-key" not in events[0].message
+
+
+async def test_an_empty_profile_is_reported_but_other_empty_lists_are_not(provider, collector):
+    """Empty /profile is FMP's paywalled-symbol signal; an empty earnings list can just be empty."""
+    _wire(provider, FakeResponse(200, json_data=[]))
+    assert await provider._request("profile", {"symbol": "SPY"}) is None
+    assert await provider._request("earnings", {"symbol": "SPY"}) is None
+
+    assert [e.key for e in collector.drain()] == [("fmp", "profile", "not_covered")]
+
+
+async def test_a_successful_request_reports_nothing(provider, collector):
+    _wire(provider, FakeResponse(200, json_data=[{"symbol": "AAPL"}]))
+    assert await provider._request("profile", {"symbol": "AAPL"}) == [{"symbol": "AAPL"}]
+    assert collector.drain() == []
+
+
+async def test_the_same_402_without_a_collector_behaves_identically(provider):
+    _wire(provider, FakeResponse(402, text_data="Premium Query Parameter: not available"))
+    assert await provider._request("quote", {"symbol": "KO"}) is None  # no collector: still fine

@@ -938,3 +938,42 @@ async def test_get_peers_not_implemented(provider):
 async def test_get_analyst_recommendation_trends_not_implemented(provider):
     with pytest.raises(NotImplementedError):
         await provider.get_analyst_recommendation_trends(ticker="SHOP")
+
+
+# ---------- degradation reporting (86bc997wr) ----------
+
+
+@pytest.mark.asyncio
+async def test_a_filings_openbb_error_is_reported_per_tier_and_changes_nothing(
+    provider, mock_obb, parity
+):
+    mock_obb.equity.fundamental.filings.side_effect = OpenBBError("1 validations error(s)")
+
+    plain, with_collector, events = await parity(lambda: provider.get_filings(ticker="SU.TO"))
+
+    assert plain == with_collector == []  # unchanged
+    assert [(e.key, e.count) for e in events] == [
+        (("openbb_tmx", "get_filings", "fetch_failed"), 2)  # narrow and wide window both failed
+    ]
+    assert "SU" in events[0].message
+
+
+@pytest.mark.asyncio
+async def test_a_clean_filings_call_reports_nothing(provider, mock_obb, collector):
+    mock_obb.equity.fundamental.filings.return_value = make_obb_result(
+        _filings_df(
+            [
+                {
+                    "filing_date": "2026-08-01",
+                    "report_type": "MD&A",
+                    "report_url": "u",
+                    "description": "d",
+                }
+            ]
+        )
+    )
+
+    result = await provider.get_filings(ticker="RY.TO")
+
+    assert len(result) == 1
+    assert collector.drain() == []

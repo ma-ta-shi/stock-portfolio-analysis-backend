@@ -69,6 +69,8 @@ from typing import Literal
 import pandas as pd
 import structlog
 
+from data.degradation import FETCH_FAILED
+from data.degradation import report as report_degradation
 from data.providers.boc import BOCMacroDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fred import FredMacroDataProvider
@@ -447,8 +449,9 @@ async def _fetch_cb_commentary(
     cutoff = as_of - timedelta(days=window_days)
     try:
         raw_articles = await finnhub.get_general_news(category="general")
-    except Exception:
+    except Exception as exc:
         logger.warning("macro_sources_cb_commentary_fetch_failed", exc_info=True)
+        report_degradation("finnhub", "get_general_news", FETCH_FAILED, str(exc), exc=exc)
         return []
     items = []
     for article in raw_articles:
@@ -503,8 +506,10 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
         retail = await stats_canada.get_retail_sales_yoy()
         cpi_national = await stats_canada.get_cpi_national()
         gdp_index = await stats_canada.get_real_gdp_index()
-    except Exception:
+    except Exception as exc:
         logger.warning("macro_sources_statcan_fetch_failed", exc_info=True)
+        # One failed call nulls all five StatCan values.
+        report_degradation("statcan", "macro_fetch", FETCH_FAILED, str(exc), exc=exc)
         unemployment = housing = retail = cpi_national = gdp_index = None
 
     # statcan_age_days is one field, not one per statcan_* value — no doc

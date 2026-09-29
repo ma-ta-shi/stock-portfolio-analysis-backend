@@ -130,3 +130,51 @@ async def test_get_exchange_rates_returns_not_supported_status(provider):
 
     assert result["pair"] == "CADUSD"
     assert "Bank of Canada Valet" in result["status"] or "boc.py" in result["status"]
+
+
+# --- degradation reporting (86bc997wr): FRED swallows its own failures ---
+
+
+async def test_failed_series_are_reported_once_with_a_count_and_change_nothing(
+    provider, monkeypatch, parity
+):
+    def flaky(series_id):
+        if series_id in ("BAD1", "BAD2"):
+            raise ValueError("no such series")
+        return _series([1.0])
+
+    monkeypatch.setattr(provider._client, "get_series", flaky)
+
+    def call():
+        async def go():
+            result = await provider.get_macro_data(["FEDFUNDS", "BAD1", "BAD2"])
+            return {k: list(v) for k, v in result.items()}
+
+        return go()
+
+    plain, with_collector, events = await parity(call)
+
+    assert plain == with_collector == {"FEDFUNDS": [1.0], "BAD1": [], "BAD2": []}
+    assert [(e.key, e.count) for e in events] == [(("fred", "get_macro_data", "fetch_failed"), 2)]
+    assert events[0].message.startswith("BAD1:")
+
+
+async def test_a_failed_rate_is_reported_and_stays_none(provider, monkeypatch, collector):
+    def flaky(series_id):
+        if series_id == "DGS10":
+            raise ValueError("upstream error")
+        return _series([5.0])
+
+    monkeypatch.setattr(provider._client, "get_series", flaky)
+
+    rates = await provider.get_interest_rates()
+
+    assert rates["treasury_10yr"] is None
+    assert [e.key for e in collector.drain()] == [("fred", "get_interest_rates", "fetch_failed")]
+
+
+async def test_healthy_fred_calls_report_nothing(provider, monkeypatch, collector):
+    monkeypatch.setattr(provider._client, "get_series", lambda series_id: _series([1.0, 2.0]))
+    await provider.get_macro_data(["FEDFUNDS"])
+    await provider.get_interest_rates()
+    assert collector.drain() == []

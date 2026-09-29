@@ -2,6 +2,9 @@ import aiohttp
 import pandas as pd
 import structlog
 
+from data.degradation import DATA_MISSING
+from data.degradation import report as report_degradation
+
 logger = structlog.get_logger(__name__)
 
 BASE_URL = "https://www150.statcan.gc.ca/t1/wds/rest"
@@ -155,12 +158,18 @@ class StatsCanadaProvider:
         row = data[0]
         if row.get("status") != "SUCCESS":
             logger.warning("statcan_unemployment_missing")
+            report_degradation(
+                "statcan", "get_unemployment_rate", DATA_MISSING, "series status was not SUCCESS"
+            )
             return None
         points = {
             p["refPer"]: p for p in row["object"]["vectorDataPoint"] if p.get("value") is not None
         }
         if not points:
             logger.warning("statcan_unemployment_missing")
+            report_degradation(
+                "statcan", "get_unemployment_rate", DATA_MISSING, "series returned no data points"
+            )
             return None
         latest_period = max(points)
         latest_value = self._scaled_value(points[latest_period])
@@ -186,6 +195,9 @@ class StatsCanadaProvider:
         point = self._latest_point(data[0])
         if point is None:
             logger.warning("statcan_housing_starts_missing")
+            report_degradation(
+                "statcan", "get_housing_starts", DATA_MISSING, "series returned no usable point"
+            )
             return None
         return {
             "value": self._scaled_value(point),
@@ -208,12 +220,18 @@ class StatsCanadaProvider:
         row = data[0]
         if row.get("status") != "SUCCESS":
             logger.warning("statcan_retail_sales_missing")
+            report_degradation(
+                "statcan", "get_retail_sales_yoy", DATA_MISSING, "series status was not SUCCESS"
+            )
             return None
         points = {
             p["refPer"]: p for p in row["object"]["vectorDataPoint"] if p.get("value") is not None
         }
         if not points:
             logger.warning("statcan_retail_sales_missing")
+            report_degradation(
+                "statcan", "get_retail_sales_yoy", DATA_MISSING, "series returned no data points"
+            )
             return None
         latest_period = max(points)
         latest = points[latest_period]
@@ -221,6 +239,13 @@ class StatsCanadaProvider:
         prior = points.get(prior_period)
         if prior is None:
             logger.warning("statcan_retail_sales_no_prior_year", latest_period=latest_period)
+            # Unlike the other no_prior_* cases this returns None: the whole value is lost.
+            report_degradation(
+                "statcan",
+                "get_retail_sales_yoy",
+                DATA_MISSING,
+                f"no prior-year point for {latest_period}, so no YoY value",
+            )
             return None
         current_value = self._scaled_value(latest)
         prior_value = self._scaled_value(prior)
@@ -280,12 +305,18 @@ class StatsCanadaProvider:
         row = data[0]
         if row.get("status") != "SUCCESS":
             logger.warning("statcan_cpi_national_missing")
+            report_degradation(
+                "statcan", "get_cpi_national", DATA_MISSING, "series status was not SUCCESS"
+            )
             return None
         points = {
             p["refPer"]: p for p in row["object"]["vectorDataPoint"] if p.get("value") is not None
         }
         if not points:
             logger.warning("statcan_cpi_national_missing")
+            report_degradation(
+                "statcan", "get_cpi_national", DATA_MISSING, "series returned no data points"
+            )
             return None
         latest_period = max(points)
         latest = points[latest_period]
@@ -335,12 +366,18 @@ class StatsCanadaProvider:
         row = data[0]
         if row.get("status") != "SUCCESS":
             logger.warning("statcan_gdp_index_missing")
+            report_degradation(
+                "statcan", "get_real_gdp_index", DATA_MISSING, "series status was not SUCCESS"
+            )
             return None
         points = {
             p["refPer"]: p for p in row["object"]["vectorDataPoint"] if p.get("value") is not None
         }
         if not points:
             logger.warning("statcan_gdp_index_missing")
+            report_degradation(
+                "statcan", "get_real_gdp_index", DATA_MISSING, "series returned no data points"
+            )
             return None
         latest_period = max(points)
         latest = points[latest_period]

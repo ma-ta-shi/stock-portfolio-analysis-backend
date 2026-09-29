@@ -3,6 +3,8 @@ import pandas as pd
 import structlog
 from datetime import datetime, timedelta, timezone
 import pandas_datareader.data as web
+from data.degradation import DATA_MISSING, FETCH_FAILED
+from data.degradation import report as report_degradation
 from data.providers.base import (
     StockDataProvider,
     NewsProvider,
@@ -384,8 +386,9 @@ class YFinanceDataProvider(StockDataProvider):
         stock = yf.Ticker(ticker)
         try:
             info = stock.info
-        except Exception:
+        except Exception as exc:
             logger.warning("yfinance_analyst_ratings_no_info", ticker=ticker)
+            report_degradation("yfinance", "get_analyst_ratings", FETCH_FAILED, str(exc), exc=exc)
             info = {}
 
         target_mean = _safe_float(info.get("targetMeanPrice"))
@@ -443,8 +446,9 @@ class YFinanceDataProvider(StockDataProvider):
         stock = yf.Ticker(ticker)
         try:
             info = stock.info
-        except Exception:
+        except Exception as exc:
             logger.warning("yfinance_short_interest_no_info", ticker=ticker)
+            report_degradation("yfinance", "get_short_interest", FETCH_FAILED, str(exc), exc=exc)
             return {}
 
         shares_short = _safe_int(info.get("sharesShort"))
@@ -550,6 +554,12 @@ class YFinanceDataProvider(StockDataProvider):
             # records with no date, so the router falls back to openbb_tmx
             # instead of silently serving malformed rows.
             logger.warning("yfinance_insider_trading_no_date_column", ticker=ticker)
+            report_degradation(
+                "yfinance",
+                "get_insider_trading",
+                DATA_MISSING,
+                "insider table has no Start Date or Date column",
+            )
             return []
         df_insider[date_col] = pd.to_datetime(df_insider[date_col])
         cutoff_date = datetime.now() - timedelta(days=days)
@@ -622,6 +632,7 @@ class YFinanceDataProvider(StockDataProvider):
             return peer_list
         except Exception as e:
             print(f"Error retrieving peer data: {e}")
+            report_degradation("yfinance", "get_peers", FETCH_FAILED, str(e), exc=e)
             return []
 
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
@@ -727,7 +738,9 @@ class YFinanceDataProvider(StockDataProvider):
         try:
             fi = stock.fast_info
             price = fi.get("lastPrice")
-        except Exception:
+        except Exception as exc:
+            # No log here today; the report is the only trace of this failure.
+            report_degradation("yfinance", "get_quote", FETCH_FAILED, f"{ticker}: {exc!r}", exc=exc)
             return {}
         if price is None:
             return {}

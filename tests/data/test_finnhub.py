@@ -420,3 +420,30 @@ async def test_get_earnings_calendar_no_data_returns_empty_list(provider):
     result = await provider.get_earnings_calendar("UBER")
 
     assert result == []
+
+
+# --- degradation reporting (86bc997wr) ---
+
+
+async def test_403_is_reported_as_not_covered_and_changes_nothing(provider, collector):
+    _wire(provider, FakeResponse(403, text_data='{"error": "You don\'t have access."}'))
+
+    data = await provider._request("news-sentiment", {"symbol": "AAPL"})
+
+    assert data is None  # unchanged
+    assert [e.key for e in collector.drain()] == [("finnhub", "news-sentiment", "not_covered")]
+
+
+async def test_a_successful_finnhub_request_reports_nothing(provider, collector):
+    _wire(provider, FakeResponse(200, json_data=[{"headline": "x"}]))
+    assert await provider._request("company-news", {"symbol": "AAPL"}) == [{"headline": "x"}]
+    assert collector.drain() == []
+
+
+async def test_a_429_that_recovers_reports_nothing(provider, collector, monkeypatch):
+    """A retried rate limit recovers on its own; recording it would be noise."""
+    responses = [FakeResponse(429, text_data="slow down"), FakeResponse(200, json_data=[1])]
+    _wire(provider, responses)
+    monkeypatch.setattr("data.providers.finnhub.asyncio.sleep", lambda *_: _noop())
+    assert await provider._request("company-news", {"symbol": "AAPL"}) == [1]
+    assert collector.drain() == []

@@ -113,3 +113,75 @@ async def test_get_exchange_rates_unaffected_by_signature_fix(provider, monkeypa
 
     assert result["pair"] == "USDCAD"
     assert result["rate"] == 1.35
+
+
+# --- degradation reporting (86bc997wr): BoC swallows its own failures ---
+
+
+async def test_a_series_that_raises_is_reported_as_fetch_failed(provider, monkeypatch, parity):
+    async def flaky(url, params=None):
+        if "BADSERIES" in url:
+            raise ValueError("no such series")
+        return _observations("FXUSDCAD", ["1.35"])
+
+    monkeypatch.setattr(provider, "_fetch_json", flaky)
+
+    def call():
+        async def go():
+            result = await provider.get_macro_data(["FXUSDCAD", "BADSERIES"])
+            return {k: list(v) for k, v in result.items()}
+
+        return go()
+
+    plain, with_collector, events = await parity(call)
+
+    assert plain == with_collector == {"FXUSDCAD": [1.35]}
+    assert [e.key for e in events] == [("boc", "get_macro_data", "fetch_failed")]
+
+
+async def test_a_series_with_no_valid_observations_is_reported_as_data_missing(
+    provider, monkeypatch, collector
+):
+    async def empty_values(url, params=None):
+        return _observations("V39079", [""])  # a blank value is skipped, leaving no data
+
+    monkeypatch.setattr(provider, "_fetch_json", empty_values)
+
+    result = await provider.get_macro_data(["V39079"])
+
+    assert result == {}  # unchanged
+    assert [e.key for e in collector.drain()] == [("boc", "get_macro_data", "data_missing")]
+
+
+async def test_interest_rates_and_exchange_rates_failures_are_reported(
+    provider, monkeypatch, collector
+):
+    async def broken(url, params=None):
+        raise ValueError("valet is down")
+
+    monkeypatch.setattr(provider, "_fetch_json", broken)
+
+    assert await provider.get_interest_rates() == {}  # unchanged
+    assert await provider.get_exchange_rates("CADUSD") == {
+        "pair": "CADUSD",
+        "rate": None,
+        "date": None,
+    }  # unchanged
+    assert [e.key for e in collector.drain()] == [
+        ("boc", "get_interest_rates", "fetch_failed"),
+        ("boc", "get_exchange_rates", "fetch_failed"),
+    ]
+
+
+async def test_healthy_boc_calls_report_nothing(provider, monkeypatch, collector):
+    async def ok(url, params=None):
+        if "V39079" in url or "V80691311" in url:
+            series = "V39079" if "V39079" in url else "V80691311"
+            return _observations(series, ["3.5"])
+        return _observations("FXUSDCAD", ["1.35"])
+
+    monkeypatch.setattr(provider, "_fetch_json", ok)
+    await provider.get_macro_data(["FXUSDCAD"])
+    await provider.get_interest_rates()
+    await provider.get_exchange_rates("CADUSD")
+    assert collector.drain() == []

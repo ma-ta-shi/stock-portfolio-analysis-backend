@@ -6,6 +6,8 @@ import pandas as pd
 import structlog
 from edgar import Company, set_identity
 
+from data.degradation import DATA_MISSING, FETCH_FAILED
+from data.degradation import report as report_degradation
 from data.providers.base import (
     NormalizedFilingSection,
     NormalizedFinancials,
@@ -422,6 +424,12 @@ class EdgarToolsDataProvider(StockDataProvider):
             logger.warning(
                 "edgar_financials_missing", ticker=ticker, statement=statement, period=period
             )
+            report_degradation(
+                "edgartools",
+                "get_financials",
+                DATA_MISSING,
+                f"no {period} financials container for {ticker}",
+            )
             return pd.DataFrame()
 
         statement_fn = STATEMENT_MAP[key](financials)
@@ -477,8 +485,11 @@ class EdgarToolsDataProvider(StockDataProvider):
         try:
             accessor = STATEMENT_MAP[key](financials)
             df = await asyncio.to_thread(lambda: accessor().to_dataframe())
-        except Exception:
+        except Exception as exc:
             logger.warning("edgar_statement_df_failed", statement=key, exc_info=True)
+            report_degradation(
+                "edgartools", "statement_df", FETCH_FAILED, f"{key}: {exc}", exc=exc
+            )
             return pd.DataFrame()
         return df if df is not None else pd.DataFrame()
 
@@ -494,8 +505,9 @@ class EdgarToolsDataProvider(StockDataProvider):
             cf = await asyncio.to_thread(
                 lambda: company.cashflow_statement(periods=8, period="annual", as_dataframe=True)
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("edgar_highlevel_annual_failed", exc_info=True)
+            report_degradation("edgartools", "highlevel_annual", FETCH_FAILED, str(exc), exc=exc)
             return None, None
         return inc, cf
 
@@ -527,12 +539,19 @@ class EdgarToolsDataProvider(StockDataProvider):
             try:
                 form4 = await asyncio.to_thread(filing.obj)
                 df = await asyncio.to_thread(form4.to_dataframe)
-            except Exception:
+            except Exception as exc:
                 logger.warning(
                     "edgar_form4_parse_failed",
                     ticker=ticker,
                     accession=filing.accession_no,
                     exc_info=True,
+                )
+                report_degradation(
+                    "edgartools",
+                    "get_insider_trading",
+                    FETCH_FAILED,
+                    f"Form 4 {filing.accession_no}: {exc}",
+                    exc=exc,
                 )
                 continue
             if df is None or df.empty or "Date" not in df.columns:

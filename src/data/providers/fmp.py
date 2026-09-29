@@ -4,6 +4,8 @@ import aiohttp
 import pandas as pd
 import structlog
 
+from data.degradation import NOT_COVERED
+from data.degradation import report as report_degradation
 from data.providers.base import (
     NewsProvider,
     NormalizedAnalystEstimates,
@@ -116,6 +118,9 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
                 logger.warning(
                     "fmp_symbol_not_available", path=path, params=params, body=body[:200]
                 )
+                report_degradation(
+                    "fmp", path, NOT_COVERED, f"HTTP 402: {body[:200]}", context={"path": path}
+                )
                 return None
             if response.status == 401:
                 body = await response.text()
@@ -124,6 +129,17 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
             data = await response.json()
             if isinstance(data, list) and not data:
                 logger.warning("fmp_empty_response", path=path, params=params)
+                # An empty /profile is how FMP reports a paywalled symbol (ETFs,
+                # dual-class shares); an empty list from other endpoints can be a
+                # genuinely empty result, so only /profile is reported.
+                if path == "profile":
+                    report_degradation(
+                        "fmp",
+                        path,
+                        NOT_COVERED,
+                        "empty /profile (FMP's signal for a symbol it will not serve)",
+                        context={"path": path},
+                    )
                 return None
             return data
 
