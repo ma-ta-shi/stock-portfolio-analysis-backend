@@ -23,6 +23,7 @@ from sqlalchemy.orm import configure_mappers
 from api.database import Base
 from api.tables.analysis_runs import AnalysisRun, RunStatus  # noqa: F401
 from api.tables.agent_outputs import AgentOutput  # noqa: F401
+from api.tables.error_records import ErrorRecord  # noqa: F401
 from api.tables.llm_calls import LLMCall  # noqa: F401
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: F401
 from api.tables.predictions import Prediction  # noqa: F401
@@ -51,10 +52,11 @@ _EXPECTED_TABLES = {
     "shadow_predictions",
     "llm_calls",
     "run_quality_summary",
+    "error_records",  # 86bc997wr
 }
 
 
-def test_all_ten_real_tables_are_registered():
+def test_all_eleven_real_tables_are_registered():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(bind=engine)
     tables = set(inspect(engine).get_table_names())

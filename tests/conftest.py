@@ -41,6 +41,7 @@ sys.path.insert(0, str(src_path))
 # deliberately imported" distinction (see main.py's own comment on this).
 from api.tables.agent_outputs import AgentOutput  # noqa: E402, F401
 from api.tables.analysis_runs import AnalysisRun  # noqa: E402, F401
+from api.tables.error_records import ErrorRecord  # noqa: E402, F401
 from api.tables.llm_calls import LLMCall  # noqa: E402, F401
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: E402, F401
 from api.tables.predictions import Prediction  # noqa: E402, F401

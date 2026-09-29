@@ -76,6 +76,29 @@ async def _run_trace(run_id: UUID) -> int:
 
         print(f"=== {ticker} | {run.account_type} / {run.timeline} | run_id={run_id} ===")
         print(f"status: {run.status} | triggered: {run.triggered_at} | completed: {_fmt(run.completed_at)}")
+        # Why the run failed (86bc997wr). Before this, a failed run printed only
+        # "status: failed" here and the reader had to go to the database.
+        for entry in run.error_log or []:
+            print(f"ERROR [{_fmt(entry.get('stage'))}]: {_fmt(entry.get('error'))}")
+        if run.status not in ("completed", "queued") or run.error_log:
+            print(f"(more on why: python scripts/diagnose_run.py {run_id})")
+
+        # Agents that failed outright (no usable output). Their fields are empty
+        # because they never produced anything, not because the answer was thin,
+        # so they are reported as failures below and kept out of the "empty"
+        # lists -- which older run_quality_summary rows still include them in.
+        failed_agents = {
+            name
+            for (name,) in (
+                await session.execute(
+                    select(AgentOutput.agent_name).where(
+                        AgentOutput.run_id == run_id, AgentOutput.status == "failed"
+                    )
+                )
+            ).all()
+        }
+        if failed_agents:
+            print(f"failed agents (no usable output): {sorted(failed_agents)}")
 
         summary = (
             await session.execute(select(RunQualitySummary).where(RunQualitySummary.run_id == run_id))
@@ -94,12 +117,14 @@ async def _run_trace(run_id: UUID) -> int:
             print(f"gate1: {_fmt(summary.gate1_passed)} ({_fmt(summary.gate1_reason, '')}) | "
                   f"gate2: {_fmt(summary.gate2_passed)} ({_fmt(summary.gate2_reason, '')})")
             print(f"outlook: {_fmt(summary.stock_outlook)} | confidence: {_fmt(summary.overall_confidence)}")
-            if summary.agents_with_empty_key_factors:
-                print(f"empty key_factors: {summary.agents_with_empty_key_factors}")
-            if summary.agents_with_empty_risks:
-                print(f"empty risks: {summary.agents_with_empty_risks}")
-            if summary.agents_with_empty_narrative:
-                print(f"empty narrative: {summary.agents_with_empty_narrative}")
+            for label, names in (
+                ("empty key_factors", summary.agents_with_empty_key_factors),
+                ("empty risks", summary.agents_with_empty_risks),
+                ("empty narrative", summary.agents_with_empty_narrative),
+            ):
+                shown = [n for n in (names or []) if n not in failed_agents]
+                if shown:
+                    print(f"{label}: {shown}")
             if summary.human_quality_rating or summary.human_quality_note:
                 print(f"human rating: {_fmt(summary.human_quality_rating)} -- {_fmt(summary.human_quality_note, '')}")
 
