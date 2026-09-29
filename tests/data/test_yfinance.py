@@ -1123,3 +1123,75 @@ async def test_get_short_interest_no_data_returns_empty_dict(provider, monkeypat
 )
 def test_canonical_rating(raw, expected):
     assert canonical_rating(raw) == expected
+
+
+# --- degradation reporting (86bc997wr): yfinance swallows these failures ---
+
+
+class _InfoRaises:
+    """A yf.Ticker whose .info raises, as Yahoo does when it throttles or is down."""
+
+    recommendations = pd.DataFrame()
+
+    @property
+    def info(self):
+        raise RuntimeError("yahoo is down")
+
+
+async def test_a_failed_info_lookup_is_reported_for_ratings_and_short_interest(
+    provider, monkeypatch, collector
+):
+    _patch_ticker(monkeypatch, lambda ticker: _InfoRaises())
+
+    assert await provider.get_analyst_ratings("KO") == {}  # unchanged
+    assert await provider.get_short_interest("KO") == {}  # unchanged
+
+    assert [e.key for e in collector.drain()] == [
+        ("yfinance", "get_analyst_ratings", "fetch_failed"),
+        ("yfinance", "get_short_interest", "fetch_failed"),
+    ]
+
+
+async def test_a_failed_quote_is_reported_and_stays_empty(provider, monkeypatch, parity):
+    """This except had no log at all, so the report is the only trace of the failure."""
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(raises_on_fast_info=True))
+
+    plain, with_collector, events = await parity(lambda: provider.get_quote("KO"))
+
+    assert plain == with_collector == {}  # unchanged
+    assert [e.key for e in events] == [("yfinance", "get_quote", "fetch_failed")]
+    assert "KO" in events[0].message
+
+
+async def test_a_failed_peer_lookup_is_reported_and_returns_empty(provider, monkeypatch, parity):
+    def boom(ticker):
+        raise RuntimeError("yahoo is down")
+
+    _patch_ticker(monkeypatch, boom)
+
+    plain, with_collector, events = await parity(lambda: provider.get_peers("KO"))
+
+    assert plain == with_collector == []  # unchanged
+    assert [e.key for e in events] == [("yfinance", "get_peers", "fetch_failed")]
+
+
+async def test_an_insider_table_with_no_date_column_is_reported_as_data_missing(
+    provider, monkeypatch, collector
+):
+    df = pd.DataFrame({"Insider": ["Jane Doe"], "Shares": [100]})
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(insider_transactions=df))
+
+    assert await provider.get_insider_trading("AAPL") == []  # unchanged
+    assert [e.key for e in collector.drain()] == [("yfinance", "get_insider_trading", "data_missing")]
+
+
+async def test_a_healthy_quote_reports_nothing(provider, monkeypatch, collector):
+    _patch_ticker(
+        monkeypatch,
+        lambda ticker: FakeTicker(fast_info={"lastPrice": 100.0, "currency": "USD"}),
+    )
+
+    quote = await provider.get_quote("KO")
+
+    assert quote["current_price"] == 100.0
+    assert collector.drain() == []

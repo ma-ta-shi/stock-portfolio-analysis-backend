@@ -9,9 +9,11 @@ pipeline runs end-to-end, which was this session's stated goal. Real-time
 push is a UX layer on top of a working orchestrator, not a precondition for
 one -- flagged, not silently dropped.
 """
+import re
+
 import structlog
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from uuid import UUID, uuid4
@@ -22,6 +24,7 @@ from api.schemas.analysis import (
     AgentOutputSummary,
     AnalysisCreate,
     AnalysisCreateResponse,
+    AnalysisFailure,
     AnalysisProgress,
     AnalysisResultResponse,
     AnalysisStatusResponse,
@@ -31,7 +34,9 @@ from api.tables.analysis_runs import AnalysisRun, RunStatus
 from api.tables.recommendations import Recommendation
 from api.tables.stock import Stock
 from data.providers.router import Router
+from services.error_recorder import safe_text
 from services.orchestrator import AnalysisOrchestrator
+from services.run_liveness import TERMINAL_STATUSES, end_run_if_stale
 
 logger = structlog.get_logger(__name__)
 
@@ -155,6 +160,78 @@ async def resolve_or_create_stock(ticker: str, db: AsyncSession) -> Stock:
     return stock
 
 
+# Local filesystem paths in an exception message (a FileNotFoundError, say) are
+# not something an API caller should see.
+# A single drive letter NOT preceded by another word character: without that,
+# the `s:` at the end of `https:` looks like a drive and swallows the whole URL.
+_WINDOWS_PATH = re.compile(r"(?<!\w)[A-Za-z]:[\\/][^\s'\"<>|]+")
+# Not preceded by a word character, dot, colon, dash or slash: that keeps the
+# path part of a URL (https://host/v3/x) from being mistaken for a file path.
+_UNIX_PATH = re.compile(r"(?<![\w.:/-])/(?:[\w.@+-]+/)+[\w.@+-]*")
+
+
+def _failure_from(run: AnalysisRun, external_status: str) -> AnalysisFailure | None:
+    """The sanitized reason a failed run stopped, from analysis_runs.error_log.
+
+    None unless the run failed. A stage name and a short single-line message:
+    credentials redacted (safe_text), local paths removed, whitespace collapsed
+    (so a multi-line message can't smuggle a traceback), capped at 300 chars.
+    """
+    if external_status != "failed":
+        return None
+    entries = [e for e in (run.error_log or []) if isinstance(e, dict)]
+    entry = entries[0] if entries else {}
+    stage = " ".join(str(entry.get("stage") or "unknown").split())[:50]
+    message = " ".join(safe_text(entry.get("error") or "no reason recorded", 1000).split())
+    message = _UNIX_PATH.sub("[path]", _WINDOWS_PATH.sub("[path]", message))[:300]
+    return AnalysisFailure(stage=stage, message=message)
+
+
+async def _end_if_stale(db: AsyncSession, run: AnalysisRun) -> None:
+    """A client polling a run whose process died would otherwise see "running"
+    forever. If the run is stale, end it (idempotent conditional UPDATE, see
+    services/run_liveness.py) and reload it, so the response says "failed"."""
+    if run.status not in TERMINAL_STATUSES and await end_run_if_stale(db.bind, run.run_id):
+        await db.refresh(run)
+
+
+async def _fail_run_if_still_active(run_id: UUID, exc: BaseException) -> None:
+    """Safety net (86bc997wr): an exception that escaped the orchestrator
+    without one of its own handled branches marking the run FAILED (a bug in a
+    pass, an unguarded recommendation/prediction write) leaves the run stuck in
+    a non-terminal status forever -- the real database already holds two such
+    orphans. Marks it FAILED.
+
+    A conditional UPDATE, not an ORM write: it only touches a run that is still
+    non-terminal, so it can never overwrite a `completed` run or clobber the
+    error_log a handled failure already wrote. Runs in its own fresh session,
+    because the orchestrator's may be mid-rollback. Status only -- the error
+    row for this same exception is already written by AnalysisOrchestrator.run()
+    (its catch-all), so recording it again here would double-count it.
+
+    Never raises: a failure here is logged, not allowed to mask the original.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(
+                update(AnalysisRun)
+                .where(
+                    AnalysisRun.run_id == run_id,
+                    AnalysisRun.status.not_in([RunStatus.COMPLETED.value, RunStatus.FAILED.value]),
+                )
+                .values(
+                    status=RunStatus.FAILED.value,
+                    error_log=[{
+                        "stage": "unhandled",
+                        "error": f"{type(exc).__name__}: {safe_text(exc)}",
+                    }],
+                )
+            )
+            await db.commit()
+    except Exception:
+        logger.exception("background_run_status_repair_failed", run_id=str(run_id))
+
+
 async def _run_analysis_background(run_id: UUID) -> None:
     """Own, independent AsyncSession -- deliberately NOT the request-scoped
     session FastAPI's `Depends(get_async_db)` yields. BackgroundTasks run
@@ -169,14 +246,16 @@ async def _run_analysis_background(run_id: UUID) -> None:
         ).scalar_one()
         try:
             await AnalysisOrchestrator().run(run, db)
-        except Exception:
+        except Exception as exc:
             # AnalysisOrchestrator.run() already sets run.status=FAILED and
             # commits on every caught failure path before re-raising -- this
-            # catch exists only so the exception is actually logged.
-            # FastAPI/Starlette otherwise swallows a background task's
-            # exception silently, which would be a real observability gap
-            # for a run that's already the ONE thing running unattended.
+            # catch exists so the exception is actually logged (FastAPI/
+            # Starlette otherwise swallows a background task's exception
+            # silently, a real observability gap for a run that's already the
+            # ONE thing running unattended), and so a run that an UNHANDLED
+            # exception left non-terminal still ends FAILED.
             logger.exception("background_analysis_failed", run_id=str(run_id))
+            await _fail_run_if_still_active(run_id, exc)
 
 
 @router.post("/", response_model=AnalysisCreateResponse, status_code=202)
@@ -195,6 +274,12 @@ async def create_analysis(
             )
         )
     ).scalars().first()
+    # A run whose process died stays non-terminal forever and would block this
+    # ticker for good. If the blocker is provably stale (no activity for far
+    # longer than any real run can be silent -- see services/run_liveness.py),
+    # end it and carry on; a run that is actually working still gets the 409.
+    if in_progress is not None and await end_run_if_stale(db.bind, in_progress.run_id):
+        in_progress = None
     if in_progress is not None:
         raise HTTPException(
             status_code=409,
@@ -266,6 +351,7 @@ async def get_analysis_status(analysis_id: UUID, db: AsyncSession = Depends(get_
     if run is None:
         raise _not_found("ANALYSIS_NOT_FOUND", f"No analysis found for id {analysis_id}", analysis_id=str(analysis_id))
 
+    await _end_if_stale(db, run)
     external_status, pass_num = _external_status(run.status)
     progress = None
     if pass_num is not None:
@@ -280,7 +366,9 @@ async def get_analysis_status(analysis_id: UUID, db: AsyncSession = Depends(get_
         ).scalar_one()
         progress = AnalysisProgress(pass_=pass_num, agents_complete=agents_complete)
 
-    return AnalysisStatusResponse(status=external_status, progress=progress)
+    return AnalysisStatusResponse(
+        status=external_status, progress=progress, failure=_failure_from(run, external_status)
+    )
 
 
 @router.get("/{analysis_id}", response_model=AnalysisResultResponse)
@@ -291,6 +379,7 @@ async def get_analysis_result(analysis_id: UUID, db: AsyncSession = Depends(get_
     if run is None:
         raise _not_found("ANALYSIS_NOT_FOUND", f"No analysis found for id {analysis_id}", analysis_id=str(analysis_id))
 
+    await _end_if_stale(db, run)
     external_status, _pass_num = _external_status(run.status)
     recommendation = (
         await db.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))
@@ -305,6 +394,7 @@ async def get_analysis_result(analysis_id: UUID, db: AsyncSession = Depends(get_
         disagreement_score=run.disagreement_score,
         disagreement_class=run.disagreement_class,
         agent_outputs=[AgentOutputSummary.model_validate(row) for row in agent_outputs],
+        failure=_failure_from(run, external_status),
     )
     if recommendation is not None:
         result.stock_outlook_direction = recommendation.stock_outlook_direction

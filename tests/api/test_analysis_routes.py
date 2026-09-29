@@ -7,11 +7,13 @@ design -- see that function's own docstring), which would touch the real
 app.db if actually run during a route test.
 """
 import asyncio
-from unittest.mock import AsyncMock, patch
-from uuid import uuid4
+from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import structlog
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -19,9 +21,11 @@ from sqlalchemy.pool import StaticPool
 
 from api.database import Base
 from api.main import app
+from api.routes import analysis as analysis_routes
 from api.routes.analysis import get_async_db
 from api.tables.agent_outputs import AgentOutput  # noqa: F401
 from api.tables.analysis_runs import AnalysisRun, RunStatus
+from api.tables.error_records import ErrorRecord
 from api.tables.prediction_checkpoints import PredictionCheckpoint  # noqa: F401
 from api.tables.predictions import Prediction  # noqa: F401
 from api.tables.recommendations import Recommendation
@@ -318,3 +322,287 @@ def test_result_endpoint_returns_recommendation_fields_when_completed(client, te
 def test_result_endpoint_404s_on_unknown_id(client):
     resp = client.get(f"/api/analysis/{uuid4()}")
     assert resp.status_code == 404
+
+
+# --- background safety net (86bc997wr) ----------------------------------------
+# An exception that escapes the orchestrator without one of its own handled
+# branches marking the run FAILED must not leave the run stuck non-terminal.
+# These run the REAL _run_analysis_background against the test DB (its own
+# AsyncSessionLocal patched to the test session factory), with the orchestrator
+# replaced by one that misbehaves in a chosen way.
+
+
+def _seed_run(test_db, status, triggered_at=None, error_log=None) -> UUID:
+    run_id = uuid4()
+
+    async def _seed():
+        async with test_db() as db:
+            stock = Stock(stock_id=uuid4(), canonical_ticker="AAPL", company_name="Apple",
+                           primary_exchange="NASDAQ", currency="USD")
+            db.add(stock)
+            await db.commit()
+            extra = {"triggered_at": triggered_at} if triggered_at is not None else {}
+            if error_log is not None:
+                extra["error_log"] = error_log
+            db.add(AnalysisRun(
+                run_id=run_id, user_id=uuid4(), stock_id=stock.stock_id,
+                account_type="trading", timeline="medium_term", triggered_by="manual",
+                status=status, llm_config={}, **extra,
+            ))
+            await db.commit()
+
+    asyncio.run(_seed())
+    return run_id
+
+
+def _run_background(test_db, run_id, orchestrator_run) -> None:
+    class _FakeOrchestrator:
+        async def run(self, run, db):
+            await orchestrator_run(run, db)
+
+    with (
+        patch("api.routes.analysis.AsyncSessionLocal", test_db),
+        patch("api.routes.analysis.AnalysisOrchestrator", _FakeOrchestrator),
+    ):
+        asyncio.run(analysis_routes._run_analysis_background(run_id))
+
+
+def _reload(test_db, run_id) -> AnalysisRun:
+    async def _load():
+        async with test_db() as db:
+            return (await db.execute(select(AnalysisRun).where(AnalysisRun.run_id == run_id))).scalar_one()
+
+    return asyncio.run(_load())
+
+
+def _error_record_count(test_db) -> int:
+    async def _count():
+        async with test_db() as db:
+            return len((await db.execute(select(ErrorRecord))).scalars().all())
+
+    return asyncio.run(_count())
+
+
+def test_background_failure_marks_a_stuck_run_failed(test_db):
+    run_id = _seed_run(test_db, RunStatus.SYNTHESIS_RUNNING)
+
+    async def _blows_up(run, db):
+        raise RuntimeError("prediction blew up")
+
+    _run_background(test_db, run_id, _blows_up)  # must not raise
+
+    run = _reload(test_db, run_id)
+    assert run.status == RunStatus.FAILED
+    assert run.error_log == [{"stage": "unhandled", "error": "RuntimeError: prediction blew up"}]
+    # Status only: the error row for this exception comes from
+    # AnalysisOrchestrator.run() itself, so the net must not add a second one.
+    assert _error_record_count(test_db) == 0
+
+
+def test_background_failure_does_not_store_credentials_in_the_error_log(test_db):
+    run_id = _seed_run(test_db, RunStatus.PASS1_RUNNING)
+
+    async def _leaky(run, db):
+        raise RuntimeError("GET https://example.test/v3/profile?apikey=SECRET123&x=1 failed")
+
+    _run_background(test_db, run_id, _leaky)
+
+    error = _reload(test_db, run_id).error_log[0]["error"]
+    assert "SECRET123" not in error and "apikey=[REDACTED]" in error
+
+
+def test_background_failure_leaves_an_already_failed_run_alone(test_db):
+    run_id = _seed_run(test_db, RunStatus.PASS2_RUNNING)
+    handled = [{"stage": "pass2", "error": "Ollama unavailable"}]
+
+    async def _fails_then_raises(run, db):
+        run.status = RunStatus.FAILED
+        run.error_log = handled
+        await db.commit()
+        raise RuntimeError("re-raised after the handled failure was recorded")
+
+    _run_background(test_db, run_id, _fails_then_raises)
+
+    run = _reload(test_db, run_id)
+    assert run.status == RunStatus.FAILED
+    assert run.error_log == handled  # the specific error is not clobbered by the generic one
+
+
+def test_background_failure_never_overwrites_a_completed_run(test_db):
+    run_id = _seed_run(test_db, RunStatus.SYNTHESIS_RUNNING)
+
+    async def _completes_then_raises(run, db):
+        run.status = RunStatus.COMPLETED
+        await db.commit()
+        raise RuntimeError("blew up after completing")
+
+    _run_background(test_db, run_id, _completes_then_raises)
+
+    run = _reload(test_db, run_id)
+    assert run.status == RunStatus.COMPLETED and run.error_log is None
+
+
+def test_background_status_repair_failure_is_swallowed_and_logged(test_db):
+    """The repair itself failing (here: no session can be opened) must not mask
+    the original exception or escape the background task."""
+    run_id = _seed_run(test_db, RunStatus.SYNTHESIS_RUNNING)
+
+    async def _blows_up(run, db):
+        raise RuntimeError("original failure")
+
+    class _FakeOrchestrator:
+        async def run(self, run, db):
+            await _blows_up(run, db)
+
+    # First call loads the run; the second (the repair's) cannot open a session.
+    sessions = MagicMock(side_effect=[test_db(), RuntimeError("db gone")])
+    with (
+        patch("api.routes.analysis.AsyncSessionLocal", sessions),
+        patch("api.routes.analysis.AnalysisOrchestrator", _FakeOrchestrator),
+        structlog.testing.capture_logs() as logs,
+    ):
+        asyncio.run(analysis_routes._run_analysis_background(run_id))
+
+    events = [log["event"] for log in logs]
+    assert "background_analysis_failed" in events
+    assert "background_run_status_repair_failed" in events
+    assert _reload(test_db, run_id).status == RunStatus.SYNTHESIS_RUNNING  # untouched
+
+
+# --- stale runs are ended where someone would notice (86bc997wr) ----------------
+# A run whose process died stays non-terminal forever: it blocks its ticker and a
+# polling client sees "running" indefinitely. The rule that decides "stale" is
+# tested in tests/services/test_run_liveness.py; these prove the API applies it.
+
+_LONG_AGO = datetime(2020, 1, 1)  # naive UTC, like everything SQLite returns
+
+
+def _now_naive() -> datetime:
+    return datetime.now(UTC).replace(tzinfo=None)
+
+
+_NEW_REQUEST = {
+    "ticker": "AAPL", "account_type": "trading", "timeline": "medium_term",
+}
+
+
+def test_a_stale_run_blocking_a_ticker_is_ended_and_the_new_request_is_accepted(client, test_db):
+    stale = _seed_run(test_db, RunStatus.PASS2_RUNNING, triggered_at=_LONG_AGO)
+
+    with patch("api.routes.analysis.Router") as MockRouter:
+        resp = client.post("/api/analysis/", json={**_NEW_REQUEST, "user_id": str(uuid4())})
+        MockRouter.assert_not_called()  # the stock already exists
+
+    assert resp.status_code == 202
+    assert resp.json()["analysis_id"] != str(stale)
+    ended = _reload(test_db, stale)
+    assert ended.status == RunStatus.FAILED and ended.error_log[0]["stage"] == "orphaned"
+    assert _error_record_count(test_db) == 1  # the run_orphaned row
+
+
+def test_a_run_that_is_still_working_still_blocks_its_ticker(client, test_db):
+    active = _seed_run(test_db, RunStatus.PASS1_RUNNING, triggered_at=_now_naive())
+
+    with patch("api.routes.analysis.Router"):
+        resp = client.post("/api/analysis/", json={**_NEW_REQUEST, "user_id": str(uuid4())})
+
+    assert resp.status_code == 409
+    error = resp.json()["detail"]["error"]
+    assert error["code"] == "ANALYSIS_IN_PROGRESS"
+    assert error["details"]["analysis_id"] == str(active)
+    assert _reload(test_db, active).status == "pass1_running"  # untouched
+
+
+def test_polling_a_stale_run_reports_failed_instead_of_running_forever(client, test_db):
+    run_id = _seed_run(test_db, RunStatus.PASS2_RUNNING, triggered_at=_LONG_AGO)
+
+    status = client.get(f"/api/analysis/{run_id}/status")
+    assert status.status_code == 200 and status.json()["status"] == "failed"
+    assert _reload(test_db, run_id).status == RunStatus.FAILED
+
+    # The full result agrees, and asking again is harmless (idempotent).
+    result = client.get(f"/api/analysis/{run_id}")
+    assert result.status_code == 200 and result.json()["status"] == "failed"
+    assert _error_record_count(test_db) == 1
+
+
+def test_polling_a_run_that_is_working_still_says_running(client, test_db):
+    run_id = _seed_run(test_db, RunStatus.PASS1_RUNNING, triggered_at=_now_naive())
+
+    status = client.get(f"/api/analysis/{run_id}/status")
+
+    assert status.status_code == 200 and status.json()["status"] == "running"
+    assert _reload(test_db, run_id).status == "pass1_running"
+    assert _error_record_count(test_db) == 0
+
+
+# --- the API says why a run failed (86bc997wr) ------------------------------------------
+
+
+def test_a_failed_run_says_why_on_both_the_status_and_the_result(client, test_db):
+    run_id = _seed_run(
+        test_db, RunStatus.FAILED,
+        error_log=[{"stage": "data_pipeline", "error": "cannot reindex on an axis with duplicate labels"}],
+    )
+
+    status = client.get(f"/api/analysis/{run_id}/status").json()
+    result = client.get(f"/api/analysis/{run_id}").json()
+
+    expected = {
+        "stage": "data_pipeline",
+        "message": "cannot reindex on an axis with duplicate labels",
+    }
+    assert status["status"] == "failed" and status["failure"] == expected
+    assert result["status"] == "failed" and result["failure"] == expected
+
+
+@pytest.mark.parametrize(
+    "run_status", [RunStatus.COMPLETED, RunStatus.PASS1_RUNNING, RunStatus.QUEUED]
+)
+def test_a_run_that_has_not_failed_has_no_failure(client, test_db, run_status):
+    run_id = _seed_run(
+        test_db, run_status, triggered_at=_now_naive(),
+        error_log=[{"stage": "old", "error": "left over from a retry"}],
+    )
+
+    assert client.get(f"/api/analysis/{run_id}/status").json()["failure"] is None
+    assert client.get(f"/api/analysis/{run_id}").json()["failure"] is None
+
+
+def test_the_reason_never_carries_a_credential_a_local_path_or_a_traceback(client, test_db):
+    leaky = (
+        "GET https://example.test/v3/profile?apikey=S3CRET&x=1 failed\n"
+        'Traceback (most recent call last):\n  File "C:\\Users\\dbann\\Documents\\app\\src\\x.py", line 3\n'
+        "FileNotFoundError: /home/user/project/var/data.csv"
+    )
+    run_id = _seed_run(test_db, RunStatus.FAILED, error_log=[{"stage": "pass1", "error": leaky}])
+
+    failure = client.get(f"/api/analysis/{run_id}/status").json()["failure"]
+
+    message = failure["message"]
+    assert "S3CRET" not in message and "apikey=[REDACTED]" in message
+    # A URL is left readable; only filesystem paths are removed.
+    assert "https://example.test/v3/profile?apikey=[REDACTED]&x=1 failed" in message
+    assert "C:\\Users" not in message and "dbann" not in message
+    assert "/home/user" not in message and "data.csv" not in message
+    assert "[path]" in message
+    assert "\n" not in message  # collapsed to one line
+
+
+def test_the_reason_is_capped(client, test_db):
+    run_id = _seed_run(
+        test_db, RunStatus.FAILED, error_log=[{"stage": "x" * 200, "error": "e" * 5000}]
+    )
+
+    failure = client.get(f"/api/analysis/{run_id}/status").json()["failure"]
+
+    assert len(failure["message"]) == 300 and len(failure["stage"]) == 50
+
+
+@pytest.mark.parametrize("error_log", [None, [], ["a bare string", 7, None]])
+def test_a_failed_run_with_no_usable_reason_still_says_so(client, test_db, error_log):
+    run_id = _seed_run(test_db, RunStatus.FAILED, error_log=error_log)
+
+    failure = client.get(f"/api/analysis/{run_id}/status").json()["failure"]
+
+    assert failure == {"stage": "unknown", "message": "no reason recorded"}

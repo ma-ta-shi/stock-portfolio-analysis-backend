@@ -40,6 +40,8 @@ import pandas as pd
 import structlog
 from openbb import obb
 from openbb_core.app.model.abstract.error import OpenBBError
+from data.degradation import FETCH_FAILED
+from data.degradation import report as report_degradation
 from data.providers.base import (
     StockDataProvider,
     NewsProvider,
@@ -424,6 +426,9 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
             except OpenBBError as e:
                 logger.warning(
                     "get_filings_openbb_error", ticker=ticker, symbol=bare_symbol, error=str(e)
+                )
+                report_degradation(
+                    "openbb_tmx", "get_filings", FETCH_FAILED, f"{bare_symbol}: {e}", exc=e
                 )
                 return pd.DataFrame()
             if not result.results:

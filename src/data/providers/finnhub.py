@@ -6,6 +6,8 @@ import aiohttp
 import pandas as pd
 import structlog
 
+from data.degradation import NOT_COVERED
+from data.degradation import report as report_degradation
 from data.providers.base import NewsProvider
 
 logger = structlog.get_logger(__name__)
@@ -119,6 +121,9 @@ class FinnhubDataProvider(NewsProvider):
             if response.status == 403:
                 body = await response.text()
                 logger.warning("finnhub_forbidden", path=path, params=params, body=body[:200])
+                report_degradation(
+                    "finnhub", path, NOT_COVERED, f"HTTP 403: {body[:200]}", context={"path": path}
+                )
                 return None
             if response.status == 429:
                 if _retried:

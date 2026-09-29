@@ -6,6 +6,7 @@ tests are about SEQUENCING and PERSISTENCE, not LLM call mechanics.
 DataPipeline.prepare() and the benchmark Router fetch are also mocked -- no
 network calls, no real Ollama.
 """
+import asyncio
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -13,15 +14,19 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from agents.base import OllamaUnavailable
 from api.database import Base
+from data.degradation import LINK_FAILED, LLM_REQUEST_FAILED, current_collector
+from data.degradation import report as report_degradation
 # PredictionCheckpoint/UserProfile mapper-reachability (neither is used
 # directly in this file) is handled once, globally, by tests/conftest.py --
 # see its own comment for why.
 from api.tables.agent_outputs import AgentOutput
 from api.tables.analysis_runs import AnalysisRun, RunStatus
+from api.tables.error_records import ErrorRecord
 from api.tables.llm_calls import LLMCall
 from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
@@ -35,7 +40,7 @@ from services.orchestrator import (
     _build_tax_inputs,
     _market_cap_bucket,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 
 async def _make_session():
@@ -1300,9 +1305,21 @@ async def test_run_quality_summary_degenerate_output_flags():
     assert "RSRCH" not in summary.agents_with_empty_key_factors
     assert "RSRCH" not in summary.agents_with_empty_risks
     assert "RSRCH" not in summary.agents_with_empty_narrative
-    assert set(summary.agents_with_empty_key_factors) >= {"FUND", "TECH", "SENT", "MACRO"}
-    assert set(summary.agents_with_empty_risks) >= {"FUND", "TECH", "SENT", "MACRO"}
-    assert set(summary.agents_with_empty_narrative) >= {"FUND", "TECH", "SENT", "MACRO"}
+    # FUND (no fields at all) and TECH (explicitly empty) COMPLETED with thin
+    # output: flagged by name.
+    assert set(summary.agents_with_empty_key_factors) >= {"FUND", "TECH"}
+    assert set(summary.agents_with_empty_risks) >= {"FUND", "TECH"}
+    assert set(summary.agents_with_empty_narrative) >= {"FUND", "TECH"}
+    # SENT and MACRO FAILED outright (no output at all). This test originally
+    # asserted they were listed here too, which described a failure as thin
+    # output; a failed agent is reported as a failure (error_log / error_records)
+    # and kept out of these lists (86bc997wr).
+    for empties in (
+        summary.agents_with_empty_key_factors,
+        summary.agents_with_empty_risks,
+        summary.agents_with_empty_narrative,
+    ):
+        assert not {"SENT", "MACRO"} & set(empties)
 
 
 @pytest.mark.asyncio
@@ -1360,3 +1377,842 @@ async def test_run_quality_summary_llm_execution_stats_reflect_real_llm_calls():
     assert summary.truncated_calls == 1  # finish_reason == "length"
     assert summary.empty_content_calls == 1  # finish_reason == "empty_content"
     assert summary.validator_failures == 1  # validator_passed is False (not None)
+
+
+# --- error_records (86bc997wr) ------------------------------------------------
+# Every failure the orchestrator handles queues a note; run() flushes them once,
+# at the very end, into error_records. These drive REAL run() end to end (same
+# stubbing as the tests above) and read error_records back.
+
+_CIO_A = dict(
+    stock_outlook="neutral", expected_return_tier="market_perform",
+    thesis_summary="t", key_decision_factors=[],
+)
+_CIO_B = {
+    "synthesis_narrative": "n", "position_sizing_recommendation": "1-2%",
+    "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
+}
+
+
+def _default_stubs() -> dict:
+    """Every runner completing cleanly. Tests override just the one under test."""
+    return {
+        "StockResearcherRunner": _StubRunner(_completed()),
+        "FundamentalAnalystRunner": _StubRunner(_completed()),
+        "TechnicalAnalystRunner": _StubRunner(_completed()),
+        "SentimentAnalystRunner": _StubRunner(_completed()),
+        "MacroEconomistRunner": _StubRunner(_completed()),
+        "BullAdvocateRunner": _StubRunner(_completed(recommendation="bullish")),
+        "BearAdvocateRunner": _StubRunner(_completed(recommendation="bearish")),
+        "TaxStrategistRunner": _StubRunner(_completed(tax_profile={})),
+        "RiskAdvisorRunner": _StubRunner(_completed(risk_profile={})),
+        "CIORunner": _StubRunner(_completed(**_CIO_A), stage_b_result=_CIO_B),
+        "ShadowCIORunner": _StubRunner(
+            _completed(stock_outlook="somewhat_bearish", expected_return_tier="underperform")
+        ),
+    }
+
+
+async def _run_with(session, run, stubs=None, *, prepare=None, quote=None) -> None:
+    """Runs the real AnalysisOrchestrator.run() with the given runner stubs
+    layered over _default_stubs(). Lets the caller's own exception propagate."""
+    merged = {**_default_stubs(), **(stubs or {})}
+    with ExitStack() as stack:
+        MockPipeline = stack.enter_context(patch("services.orchestrator.DataPipeline"))
+        for name, stub in merged.items():
+            stack.enter_context(patch(f"services.orchestrator.{name}", stub))
+        MockRouter = stack.enter_context(patch("services.orchestrator.Router"))
+        MockPipeline.return_value.prepare = prepare or AsyncMock(return_value=_fake_bundle())
+        router_instance = AsyncMock()
+        router_instance.get_quote = quote or AsyncMock(return_value={"current_price": 5800.0})
+        MockRouter.return_value.__aenter__ = AsyncMock(return_value=router_instance)
+        MockRouter.return_value.__aexit__ = AsyncMock(return_value=False)
+        await AnalysisOrchestrator().run(run, session)
+
+
+async def _error_rows(session) -> list[ErrorRecord]:
+    return list((await session.execute(select(ErrorRecord))).scalars())
+
+
+def _kinds(rows) -> list[tuple]:
+    """(component, error_type, agent_name, dedup_subtype), sorted -- what each
+    row says, independent of the order they were flushed in."""
+    return sorted(
+        (r.component, r.error_type, r.agent_name or "", r.dedup_subtype or "") for r in rows
+    )
+
+
+class _RaisingShadowRunner(_StubRunner):
+    async def run(self, *a, **kw):
+        raise RuntimeError("shadow blew up")
+
+
+@pytest.mark.asyncio
+async def test_error_records_a_clean_run_writes_nothing():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run)
+
+    assert run.status == RunStatus.COMPLETED
+    assert await _error_rows(session) == []
+
+
+@pytest.mark.asyncio
+async def test_error_records_data_pipeline_failure_has_ticker_context_and_traceback():
+    """The most common real failure happens BEFORE any DataBundle exists, so the
+    ticker has to come from the Stock row, not the bundle. Exactly one row: the
+    exception re-raises out of _run_pipeline, and run()'s catch-all must not
+    record it a second time."""
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with pytest.raises(ValueError):
+        await _run_with(session, run, prepare=AsyncMock(side_effect=ValueError("no data")))
+
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("data_pipeline", "prepare_exception", "", "ValueError@services/orchestrator.py:_run_pipeline")
+    ]
+    row = rows[0]
+    assert row.severity == "high" and row.status == "open"
+    assert row.stock_ticker == "AAPL"
+    assert row.run_id == run.run_id and row.user_id == run.user_id
+    assert row.message == "ValueError: no data"
+    assert "ValueError: no data" in row.stack_trace
+    assert row.context_json == {
+        "account_type": "trading", "timeline": "medium_term", "stage": "data_pipeline",
+    }
+    # The existing per-run record is untouched.
+    assert run.status == RunStatus.FAILED
+    assert run.error_log == [{"stage": "data_pipeline", "error": "no data"}]
+
+
+@pytest.mark.asyncio
+async def test_error_records_ollama_down_in_pass1_is_one_row_not_one_per_agent():
+    session = await _make_session()
+    run = await _make_run(session)
+    down = OllamaUnavailable("Cannot reach Ollama at http://localhost:19999")
+
+    with pytest.raises(OllamaUnavailable):
+        await _run_with(session, run, {
+            "StockResearcherRunner": _StubRunner(raises=down),
+            "FundamentalAnalystRunner": _StubRunner(raises=down),
+            "TechnicalAnalystRunner": _StubRunner(raises=down),
+        })
+
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [("llm", "ollama_connection_failed", "", "pass1")]
+    assert rows[0].severity == "critical"
+    assert "localhost:19999" in rows[0].message
+    assert run.status == RunStatus.FAILED and run.error_log[0]["stage"] == "pass1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stubs, stage",
+    [
+        ({"BullAdvocateRunner": _StubRunner(raises=OllamaUnavailable("down"))}, "pass2"),
+        ({"CIORunner": _StubRunner(raises=OllamaUnavailable("down"))}, "cio_stage_a"),
+        (
+            {"CIORunner": _StubRunner(_completed(**_CIO_A), stage_b_raises=OllamaUnavailable("down"))},
+            "cio_stage_b",
+        ),
+    ],
+)
+async def test_error_records_ollama_down_after_pass1_names_the_stage(stubs, stage):
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with pytest.raises(OllamaUnavailable):
+        await _run_with(session, run, stubs)
+
+    assert _kinds(await _error_rows(session)) == [("llm", "ollama_connection_failed", "", stage)]
+
+
+@pytest.mark.asyncio
+async def test_error_records_gate1_failure_records_each_failed_agent_and_the_gate():
+    session = await _make_session()
+    run = await _make_run(session)
+    dead = {
+        n: _StubRunner(None, ["failed"])
+        for n in (
+            "StockResearcherRunner", "FundamentalAnalystRunner", "TechnicalAnalystRunner",
+            "SentimentAnalystRunner", "MacroEconomistRunner",
+        )
+    }
+
+    await _run_with(session, run, dead)
+
+    assert run.status == RunStatus.FAILED and run.error_log[0]["stage"] == "gate1"
+    kinds = _kinds(await _error_rows(session))
+    assert ("orchestrator", "gate_failed", "", "gate1") in kinds
+    agent_rows = [k for k in kinds if k[0] == "agent"]
+    assert sorted(k[2] for k in agent_rows) == ["FUND", "MACRO", "RSRCH", "SENT", "TECH"]
+    assert all(k[1] == "all_retries_exhausted" for k in agent_rows)
+    assert len(kinds) == 6
+
+
+@pytest.mark.asyncio
+async def test_error_records_gate2_failure_records_the_failed_advocate_and_the_gate():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {"BullAdvocateRunner": _StubRunner(None, ["bull failed"])})
+
+    assert run.status == RunStatus.FAILED and run.error_log[0]["stage"] == "gate2"
+    assert _kinds(await _error_rows(session)) == [
+        ("agent", "all_retries_exhausted", "bull", "bull:bull failed"),
+        ("orchestrator", "gate_failed", "", "gate2"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_error_records_an_agent_exception_is_recorded_with_its_traceback():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {"StockResearcherRunner": _StubRunner(raises=ValueError("boom"))})
+
+    assert run.status == RunStatus.COMPLETED  # one Pass 1 agent failing does not fail the run
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("agent", "agent_exception", "RSRCH", "ValueError@services/orchestrator.py:_run_contained")
+    ]
+    assert rows[0].severity == "high" and "boom" in rows[0].stack_trace
+
+
+@pytest.mark.asyncio
+async def test_error_records_cio_stage_a_that_never_completes():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {"CIORunner": _StubRunner(None, ["stage a never validated"])})
+
+    assert run.status == RunStatus.FAILED
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("agent", "all_retries_exhausted", "cio_stage_a", "cio_stage_a:stage a never validated")
+    ]
+    assert "stage a never validated" in rows[0].message
+
+
+@pytest.mark.asyncio
+async def test_error_records_cio_stage_b_that_never_completes():
+    session = await _make_session()
+    run = await _make_run(session)
+    cio = _StubRunner(_completed(**_CIO_A), stage_b_result=None, stage_b_errors=["b never validated"])
+
+    await _run_with(session, run, {"CIORunner": cio})
+
+    assert run.status == RunStatus.FAILED
+    assert _kinds(await _error_rows(session)) == [
+        ("agent", "all_retries_exhausted", "cio_stage_b", "cio_stage_b:b never validated")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_error_records_cio_output_missing_required_fields():
+    session = await _make_session()
+    run = await _make_run(session)
+    # agent_completed() is satisfied by any non-None field, but Recommendation
+    # needs stock_outlook -- the run fails loudly instead of a bare KeyError.
+    cio = _StubRunner(_completed(thesis_summary="t"), stage_b_result=_CIO_B)
+
+    await _run_with(session, run, {"CIORunner": cio})
+
+    assert run.status == RunStatus.FAILED and run.error_log[0]["stage"] == "recommendation"
+    assert _kinds(await _error_rows(session)) == [
+        ("agent", "output_validation_failed", "", "missing:stock_outlook")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_error_records_shadow_exception_is_non_blocking_but_recorded():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {"ShadowCIORunner": _RaisingShadowRunner()})
+
+    assert run.status == RunStatus.COMPLETED
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("agent", "agent_exception", "shadow_cio", "RuntimeError@services/orchestrator.py:_run_shadow_cio")
+    ]
+    assert rows[0].severity == "medium" and "shadow blew up" in rows[0].stack_trace
+
+
+@pytest.mark.asyncio
+async def test_error_records_shadow_that_does_not_complete():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {"ShadowCIORunner": _StubRunner(None, ["shadow failed"])})
+
+    assert run.status == RunStatus.COMPLETED
+    assert _kinds(await _error_rows(session)) == [
+        ("agent", "all_retries_exhausted", "shadow_cio", "did_not_complete")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_error_records_shadow_with_no_outlook_to_compare():
+    session = await _make_session()
+    run = await _make_run(session)
+    # Completed by agent_completed()'s standard, but no stock_outlook.
+    shadow = _StubRunner(_completed(expected_return_tier="underperform"))
+
+    await _run_with(session, run, {"ShadowCIORunner": shadow})
+
+    assert run.status == RunStatus.COMPLETED
+    assert _kinds(await _error_rows(session)) == [
+        ("agent", "output_validation_failed", "shadow_cio", "missing_outlook")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_error_records_risk_stage_b_exception_from_inside_the_gather():
+    """Recorded from inside an asyncio.gather coroutine, where an AsyncSession
+    must never be written to -- which is exactly why notes are queued, not
+    written, at the point of failure."""
+    session = await _make_session()
+    run = await _make_run(session)
+    risk = _StubRunner(
+        _completed(risk_profile={}), stage_b_result={"x": 1},
+        stage_b_raises=RuntimeError("stage b bug"),
+    )
+
+    await _run_with(session, run, {"RiskAdvisorRunner": risk})
+
+    assert run.status == RunStatus.COMPLETED
+    assert _kinds(await _error_rows(session)) == [
+        ("agent", "agent_exception", "risk", "RuntimeError@services/orchestrator.py:_run_risk")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_error_records_tax_passthrough_check_crash():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with patch(
+        "services.orchestrator._validate_tax_passthroughs", side_effect=KeyError("dividend_yield")
+    ):
+        await _run_with(session, run)
+
+    assert run.status == RunStatus.COMPLETED
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("agent", "agent_exception", "tax", "KeyError@services/orchestrator.py:_run_bull_bear_tax")
+    ]
+    assert rows[0].severity == "low"
+
+
+@pytest.mark.asyncio
+async def test_error_records_run_quality_summary_write_failure():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with patch(
+        "services.orchestrator.AnalysisOrchestrator._write_run_quality_summary",
+        AsyncMock(side_effect=RuntimeError("summary write bug")),
+    ):
+        await _run_with(session, run)
+
+    assert run.status == RunStatus.COMPLETED
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("orchestrator", "pipeline_exception", "", "RuntimeError@services/orchestrator.py:_run_guarded")
+    ]
+    assert rows[0].context_json["stage"] == "quality_summary"
+    assert rows[0].severity == "low"
+
+
+@pytest.mark.asyncio
+async def test_error_records_an_unhandled_exception_is_recorded_once_and_reraises():
+    """An unguarded write (_create_prediction) raising leaves the run
+    non-terminal -- run() records it, once, but does not itself fix the status
+    (the background task's safety net does; tested in test_analysis_routes)."""
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with patch(
+        "services.orchestrator.AnalysisOrchestrator._create_prediction",
+        AsyncMock(side_effect=RuntimeError("prediction blew up")),
+    ):
+        with pytest.raises(RuntimeError, match="prediction blew up"):
+            await _run_with(session, run)
+
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("orchestrator", "pipeline_exception", "", "RuntimeError@services/orchestrator.py:_run_pipeline")
+    ]
+    assert rows[0].severity == "critical" and "prediction blew up" in rows[0].stack_trace
+    assert run.status == RunStatus.SYNTHESIS_RUNNING
+
+
+@pytest.mark.asyncio
+async def test_error_records_write_failure_changes_nothing_about_the_run():
+    """The table is genuinely gone, so the flush really fails. The run's status,
+    its error_log, and the exception it raises must all be exactly what they
+    are when recording works -- the original error is never masked."""
+    session = await _make_session()
+    run = await _make_run(session)
+    await session.execute(text("DROP TABLE error_records"))
+    await session.commit()
+
+    with structlog.testing.capture_logs() as logs:
+        with pytest.raises(ValueError, match="no data"):
+            await _run_with(session, run, prepare=AsyncMock(side_effect=ValueError("no data")))
+
+    assert run.status == RunStatus.FAILED
+    assert run.error_log == [{"stage": "data_pipeline", "error": "no data"}]
+    assert any(log["event"] == "error_record_write_failed" for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_error_records_note_survives_a_poisoned_run_session():
+    """Same real IntegrityError trick as the shadow write-failure test above:
+    the run session's transaction is genuinely broken mid-run. The note for it
+    is queued with plain values and flushed through an independent session,
+    so it still lands and the run still finishes."""
+    session = await _make_session()
+    run = await _make_run(session)
+    real_add = session.add
+
+    def _corrupt_shadow_prediction_on_add(obj):
+        if isinstance(obj, ShadowPrediction):
+            obj.primary_confidence = None
+        return real_add(obj)
+
+    session.add = _corrupt_shadow_prediction_on_add
+
+    await _run_with(session, run)
+
+    assert run.status == RunStatus.COMPLETED
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("agent", "agent_exception", "shadow_cio", "IntegrityError@services/orchestrator.py:_run_shadow_cio")
+    ]
+
+
+# --- run context on log lines; failed agents; error_log redaction (86bc997wr) ---
+
+
+@pytest.mark.asyncio
+async def test_run_binds_its_context_to_logging_and_unbinds_afterward():
+    """Every log line emitted during a run -- from any layer -- must carry the
+    run's identity, and nothing may leak into the next run served by the same
+    process. Asserted on structlog's contextvars directly: capture_logs()
+    replaces the processor chain, so it cannot show merged context."""
+    session = await _make_session()
+    run = await _make_run(session)
+    seen: list[dict] = []
+
+    class _ContextCapturingRunner(_StubRunner):
+        async def run(self, *a, **kw):
+            seen.append(dict(structlog.contextvars.get_contextvars()))
+            return await super().run(*a, **kw)
+
+    await _run_with(session, run, {"StockResearcherRunner": _ContextCapturingRunner(_completed())})
+
+    assert seen, "the stubbed agent never ran"
+    assert seen[0] == {
+        "run_id": str(run.run_id), "account_type": "trading",
+        "timeline": "medium_term", "ticker": "AAPL",
+    }
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+@pytest.mark.asyncio
+async def test_run_unbinds_its_logging_context_even_when_the_run_fails():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with pytest.raises(ValueError):
+        await _run_with(session, run, prepare=AsyncMock(side_effect=ValueError("no data")))
+
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+@pytest.mark.asyncio
+async def test_quality_summary_does_not_list_a_failed_agent_as_having_empty_fields():
+    """A failed agent has empty fields because it never produced anything, not
+    because its answer was thin. A real failed run (Ollama down) used to show
+    all five Pass 1 agents 'with empty key_factors', which read like a
+    data-quality problem instead of the failure it was."""
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {"FundamentalAnalystRunner": _StubRunner(None, ["failed"])})
+
+    summary = await _summary_for(session, run)
+    listed = set(summary.agents_with_empty_key_factors or [])
+    assert "FUND" not in listed  # it failed: reported as a failure, not as "empty"
+    assert "RSRCH" in listed  # it completed without key_factors: still flagged
+
+
+@pytest.mark.asyncio
+async def test_a_run_where_every_pass1_agent_failed_has_no_empty_field_noise():
+    session = await _make_session()
+    run = await _make_run(session)
+    dead = {
+        n: _StubRunner(None, ["failed"])
+        for n in (
+            "StockResearcherRunner", "FundamentalAnalystRunner", "TechnicalAnalystRunner",
+            "SentimentAnalystRunner", "MacroEconomistRunner",
+        )
+    }
+
+    await _run_with(session, run, dead)
+
+    summary = await _summary_for(session, run)
+    assert summary.agents_with_empty_key_factors is None
+    assert summary.agents_with_empty_risks is None
+    assert summary.agents_with_empty_narrative is None
+
+
+@pytest.mark.asyncio
+async def test_error_log_never_stores_a_credential_from_an_exception():
+    """analysis_runs.error_log is persisted. A provider exception can carry a
+    request URL with an API key in it (open ticket 86bbq7dmj)."""
+    session = await _make_session()
+    run = await _make_run(session)
+    leaky = ValueError("GET https://example.test/v3/profile/AAPL?apikey=SECRET123&x=1 failed")
+
+    with pytest.raises(ValueError):
+        await _run_with(session, run, prepare=AsyncMock(side_effect=leaky))
+
+    stored = run.error_log[0]["error"]
+    assert "SECRET123" not in stored
+    assert "apikey=[REDACTED]" in stored and "x=1" in stored
+
+
+@pytest.mark.asyncio
+async def test_error_log_redacts_agent_error_strings_for_cio_failures():
+    session = await _make_session()
+    run = await _make_run(session)
+    leaky_errors = ["upstream call failed: https://example.test/x?token=HUNTER2 returned 500"]
+
+    await _run_with(session, run, {"CIORunner": _StubRunner(None, leaky_errors)})
+
+    assert run.status == RunStatus.FAILED and run.error_log[0]["stage"] == "cio_stage_a"
+    assert "HUNTER2" not in run.error_log[0]["error"]
+    assert "token=[REDACTED]" in run.error_log[0]["error"]
+
+
+# --- self-contained error rows: attempts + evidence pointers (86bc997wr) --------
+
+
+def _attempt(seq: int, attempt: int, call_site: str = "agent:fund", **extra) -> dict:
+    """A runner.call_log entry as BaseRunner writes it (the fields
+    LLMCall.from_call_log_entry needs, plus what a diagnosis needs)."""
+    slug = call_site.replace(":", "-")
+    return {
+        "seq": seq, "attempt": attempt, "call_site": call_site, "model": "gpt-oss:20b",
+        "total_duration_s": 8.27, "prompt_eval_count": 2143, "eval_count": 380,
+        "finish_reason": "stop", "parsed_ok": True, "validator_passed": False,
+        "validator_errors": ["narrative: too long (1913 chars, max 1080)"],
+        "prompt_path": f"2026-09-29\\AAPL_abcd1234\\{seq}_{slug}.{attempt}.prompt.txt",
+        "response_path": f"2026-09-29\\AAPL_abcd1234\\{seq}_{slug}.{attempt}.response.json",
+        **extra,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failed_agents_error_row_carries_its_attempts_and_evidence_pointers():
+    """The row must be enough to start fixing from: which attempt failed and how,
+    the validator's own words, and where the raw prompt and response were saved.
+    The matching agent_outputs row is run_id + agent_name, so no id is needed."""
+    session = await _make_session()
+    run = await _make_run(session)
+    fund = _StubRunner(None, ["narrative: too long (1913 chars, max 1080)"])
+    fund.call_log = [
+        _attempt(1, 1),
+        _attempt(
+            2, 2, validator_errors=["upstream https://example.test/x?apikey=SECRET123 returned 500"]
+        ),
+    ]
+
+    await _run_with(session, run, {"FundamentalAnalystRunner": fund})
+
+    assert run.status == RunStatus.COMPLETED  # one Pass 1 agent failing does not fail the run
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("agent", "all_retries_exhausted", "FUND", "FUND:narrative: too long (# chars, max #)")
+    ]
+    context = rows[0].context_json
+    assert context["stage"] == "pass1"
+    assert context["call_site"] == "agent:fund"
+    assert context["artifact_dir"] == "2026-09-29/AAPL_abcd1234"
+    assert [c["attempt"] for c in context["calls"]] == [1, 2]
+    assert context["calls"][0]["validator_errors"] == ["narrative: too long (1913 chars, max 1080)"]
+    assert context["calls"][1]["prompt_path"].endswith("2_agent-fund.2.prompt.txt")
+    assert context["calls"][1]["response_path"].endswith("2_agent-fund.2.response.json")
+    assert "SECRET123" not in str(context)
+    # The run's own account/timeline context is still there.
+    assert context["account_type"] == "trading" and context["timeline"] == "medium_term"
+
+
+@pytest.mark.asyncio
+async def test_two_agents_failing_the_same_rule_are_two_fingerprints_not_one():
+    """Grouping keys on the agent as well as the rule, so FUND's problem and
+    TECH's problem are never merged into one recurring failure."""
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {
+        "FundamentalAnalystRunner": _StubRunner(None, ["narrative: too long (1913 chars, max 1080)"]),
+        "TechnicalAnalystRunner": _StubRunner(None, ["narrative: too long (1351 chars, max 1080)"]),
+    })
+
+    assert _kinds(await _error_rows(session)) == [
+        ("agent", "all_retries_exhausted", "FUND", "FUND:narrative: too long (# chars, max #)"),
+        ("agent", "all_retries_exhausted", "TECH", "TECH:narrative: too long (# chars, max #)"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_cio_failure_row_carries_the_cio_attempts_too():
+    session = await _make_session()
+    run = await _make_run(session)
+    cio = _StubRunner(None, ["stage a never validated"])
+    cio.call_log = [_attempt(9, 1, call_site="agent:cio_stage_a", validator_errors=["thesis_summary: too long"])]
+
+    await _run_with(session, run, {"CIORunner": cio})
+
+    rows = await _error_rows(session)
+    assert run.status == RunStatus.FAILED and len(rows) == 1
+    assert rows[0].context_json["call_site"] == "agent:cio_stage_a"
+    assert rows[0].context_json["calls"][0]["validator_errors"] == ["thesis_summary: too long"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_agent_with_no_recorded_calls_still_gets_a_row_without_call_detail():
+    """Connection errors and timeouts happen before any call is logged, so a
+    failed agent can legitimately have an empty call_log."""
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, {"MacroEconomistRunner": _StubRunner(None, ["timed out"])})
+
+    rows = await _error_rows(session)
+    assert len(rows) == 1
+    assert "calls" not in rows[0].context_json and "artifact_dir" not in rows[0].context_json
+    assert rows[0].context_json["errors"] == ["timed out"]
+
+
+# --- a cancelled run must not be left stuck (86bc997wr) --------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_is_ended_and_recorded_and_the_cancellation_still_propagates():
+    """Ctrl+C or a server restart cancels the task mid-run. CancelledError is a
+    BaseException, so none of the `except Exception` handlers saw it and the run
+    stayed non-terminal forever, blocking its ticker (two real ones did)."""
+    session = await _make_session()
+    run = await _make_run(session)
+    started = asyncio.Event()
+
+    class _HangingRunner(_StubRunner):
+        async def run(self, *a, **kw):
+            started.set()
+            await asyncio.sleep(3600)
+
+    task = asyncio.create_task(
+        _run_with(session, run, {"StockResearcherRunner": _HangingRunner(_completed())})
+    )
+    await asyncio.wait_for(started.wait(), timeout=10)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):  # never swallowed
+        await task
+
+    await session.refresh(run)
+    assert run.status == RunStatus.FAILED
+    assert run.error_log[0]["stage"] == "cancelled"
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [("orchestrator", "run_cancelled", "", "cancelled")]
+    assert rows[0].stock_ticker == "AAPL" and rows[0].run_id == run.run_id
+    assert structlog.contextvars.get_contextvars() == {}
+
+
+async def _make_file_session(tmp_path):
+    """Like _make_session, but an on-disk SQLite FILE. An in-memory database is one
+    shared connection, so a second 'independent' session can never contend with
+    the run's own session for the write lock; a file can, and that is the case
+    that matters on a real machine."""
+    engine = create_async_engine(f"sqlite+aiosqlite:///{(tmp_path / 'run.db').as_posix()}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return async_sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
+
+
+@pytest.mark.asyncio
+async def test_a_run_cancelled_while_its_own_session_holds_a_write_lock_is_still_ended(tmp_path):
+    """Regression for a real review finding. The cancel handler writes from a
+    SECOND connection. If the run's own session still holds a write transaction
+    when it is cancelled (it was mid-write), that second connection would wait
+    out SQLite's lock timeout and fail, leaving the run stuck non-terminal and
+    the cancel note lost. The handler must release the run's session first.
+
+    The stub also leaves an uncommitted status change on the run: if that were
+    ever committed afterward it would overwrite the FAILED the handler wrote."""
+    session = await _make_file_session(tmp_path)
+    run = await _make_run(session)
+    run_id = run.run_id  # read now: after the rollback every attribute on `run` is expired
+    started = asyncio.Event()
+
+    class _LockHoldingRunner(_StubRunner):
+        async def run(self, *a, **kw):
+            run.status = RunStatus.PASS2_RUNNING  # dirty, never committed
+            await session.execute(text("UPDATE analysis_runs SET triggered_by = 'x'"))
+            started.set()  # the run's own session now holds the write lock
+            await asyncio.sleep(3600)
+
+    task = asyncio.create_task(
+        _run_with(session, run, {"StockResearcherRunner": _LockHoldingRunner(_completed())})
+    )
+    await asyncio.wait_for(started.wait(), timeout=10)
+    began = asyncio.get_running_loop().time()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=30)
+    elapsed = asyncio.get_running_loop().time() - began
+
+    # Not held up by SQLite's ~5s lock wait, which is what the bug looked like.
+    assert elapsed < 4, f"cancel cleanup took {elapsed:.1f}s: it waited on a lock"
+    fresh = async_sessionmaker(bind=session.bind, expire_on_commit=False)()
+    stored = (
+        await fresh.execute(select(AnalysisRun).where(AnalysisRun.run_id == run_id))
+    ).scalar_one()
+    assert stored.status == RunStatus.FAILED  # and the dirty PASS2_RUNNING did not win
+    assert stored.error_log[0]["stage"] == "cancelled"
+    assert stored.triggered_by == "manual"  # the uncommitted write was rolled back
+    rows = (await fresh.execute(select(ErrorRecord))).scalars().all()
+    assert _kinds(rows) == [("orchestrator", "run_cancelled", "", "cancelled")]
+    await fresh.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_does_not_attempt_a_quality_summary():
+    """Its counters are incomplete and its session was just rolled back; the run
+    is already recorded as cancelled, with a reason."""
+    session = await _make_session()
+    run = await _make_run(session)
+    started = asyncio.Event()
+
+    class _HangingRunner(_StubRunner):
+        async def run(self, *a, **kw):
+            started.set()
+            await asyncio.sleep(3600)
+
+    task = asyncio.create_task(
+        _run_with(session, run, {"StockResearcherRunner": _HangingRunner(_completed())})
+    )
+    await asyncio.wait_for(started.wait(), timeout=10)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert (await session.execute(select(RunQualitySummary))).scalars().all() == []
+
+
+# --- degradation events reach error_records (86bc997wr, step 6) ------------------------------
+
+
+async def _prepare_that_reports(*_args, **_kwargs):
+    """A prepare() during which the data layer quietly skipped a failed provider
+    (twice) and an LLM sub-call got no answer, then returned a normal bundle."""
+    report_degradation("yfinance", "get_price_history", LINK_FAILED, "boom", exc=RuntimeError("boom"))
+    report_degradation("yfinance", "get_price_history", LINK_FAILED, "boom again")
+    report_degradation("ollama", "sentiment_score", LLM_REQUEST_FAILED, "timed out")
+    return _fake_bundle()
+
+
+@pytest.mark.asyncio
+async def test_degradation_reported_during_prepare_becomes_error_rows_with_counts():
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, prepare=_prepare_that_reports)
+
+    assert run.status == RunStatus.COMPLETED  # the run carried on, as designed
+    rows = await _error_rows(session)
+    assert _kinds(rows) == [
+        ("data_pipeline", "link_failed", "", "data:yfinance:get_price_history:link_failed"),
+        ("data_pipeline", "llm_request_failed", "", "data:ollama:sentiment_score:llm_request_failed"),
+    ]
+    by_type = {r.error_type: r for r in rows}
+    link = by_type["link_failed"]
+    assert link.occurrence_count == 2  # one row, counted, not two rows
+    assert link.severity == "low" and link.stock_ticker == "AAPL"
+    assert link.message == "boom"  # the first occurrence's message
+    assert link.context_json["stage"] == "data"
+    assert link.context_json["provider"] == "yfinance"
+    assert link.context_json["op"] == "get_price_history"
+    assert link.context_json["exc_type"] == "RuntimeError"
+    assert link.context_json["account_type"] == "trading"
+    assert by_type["llm_request_failed"].occurrence_count == 1
+
+
+@pytest.mark.asyncio
+async def test_degradation_reported_before_prepare_raises_is_still_recorded():
+    async def prepare_that_reports_then_fails(*_a, **_k):
+        report_degradation("fmp", "get_quote", LINK_FAILED, "fmp down")
+        raise ValueError("no data")
+
+    session = await _make_session()
+    run = await _make_run(session)
+
+    with pytest.raises(ValueError):
+        await _run_with(session, run, prepare=prepare_that_reports_then_fails)
+
+    rows = await _error_rows(session)
+    assert sorted(r.error_type for r in rows) == ["link_failed", "prepare_exception"]
+
+
+@pytest.mark.asyncio
+async def test_degradation_reported_after_prepare_returned_is_recorded_too():
+    """The benchmark quote for the prediction is fetched long after prepare()."""
+
+    async def quote_that_falls_back(*_a, **_k):
+        report_degradation("yfinance", "get_quote", LINK_FAILED, "benchmark quote failed once")
+        return {"current_price": 5800.0}
+
+    session = await _make_session()
+    run = await _make_run(session)
+
+    await _run_with(session, run, quote=quote_that_falls_back)
+
+    assert run.status == RunStatus.COMPLETED
+    assert _kinds(await _error_rows(session)) == [
+        ("data_pipeline", "link_failed", "", "data:yfinance:get_quote:link_failed")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_collector_is_unset_after_a_run_whether_it_succeeds_or_fails():
+    session = await _make_session()
+    run = await _make_run(session)
+    await _run_with(session, run)
+    assert current_collector() is None
+
+    session2 = await _make_session()
+    run2 = await _make_run(session2)
+    with pytest.raises(ValueError):
+        await _run_with(session2, run2, prepare=AsyncMock(side_effect=ValueError("no data")))
+    assert current_collector() is None
+
+
+@pytest.mark.asyncio
+async def test_one_runs_degradation_never_leaks_into_the_next_runs_rows():
+    session = await _make_session()
+    run = await _make_run(session)
+    await _run_with(session, run, prepare=_prepare_that_reports)
+
+    session2 = await _make_session()
+    run2 = await _make_run(session2)
+    await _run_with(session2, run2)  # a clean run
+
+    assert await _error_rows(session2) == []

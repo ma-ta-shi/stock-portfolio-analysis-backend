@@ -63,7 +63,9 @@ from api.tables.predictions import Prediction
 from api.tables.recommendations import Recommendation
 from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
+from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile
+from data.degradation import DegradationCollector, reset_collector, set_collector
 from data.pipeline import DataPipeline
 from data.precompute.tax_metrics import (
     AccountStateInput,
@@ -76,6 +78,15 @@ from data.precompute.tax_metrics import (
 from data.providers.router import Router
 from data.schemas.context import AnalysisContext
 from data.schemas.data_bundle import DataBundle
+from services.error_recorder import (
+    build_error_note,
+    describe_exception,
+    rule_slug,
+    safe_text,
+    summarize_call_log,
+    write_error_notes,
+)
+from services.run_liveness import end_run_now
 
 logger = structlog.get_logger(__name__)
 
@@ -398,10 +409,10 @@ async def _run_contained(
         # after every agent in the gather has been accounted for and
         # closed. See _run_pass1's own docstring for the full reasoning.
         logger.error(f"{pass_label}_agent_ollama_unavailable", agent_id=agent_id)
-        return agent_id, None, [str(exc)], exc
+        return agent_id, None, [safe_text(exc, 4000)], exc
     except Exception as exc:
-        logger.error(f"{pass_label}_agent_failed", agent_id=agent_id, error=str(exc))
-        return agent_id, None, [str(exc)], exc
+        logger.error(f"{pass_label}_agent_failed", agent_id=agent_id, error=safe_text(exc, 4000))
+        return agent_id, None, [safe_text(exc, 4000)], exc
 
 
 def _build_tax_inputs(
@@ -503,6 +514,206 @@ class AnalysisOrchestrator:
     the user immediately without waiting for this to complete.
     """
 
+    # 86bc997wr -- plain values for error notes, set in run() before anything
+    # can fail. Class-level defaults (immutable) so _note_error() can never hit
+    # an AttributeError, even for a method exercised without going through run().
+    _user_id = None
+    _bind = None
+    _run_context: dict | None = None
+    _failure_noted = False
+    _cancelled = False
+    _degradation: DegradationCollector | None = None
+
+    def _note_error(
+        self,
+        component: str,
+        error_type: str,
+        severity: str,
+        message: object,
+        *,
+        agent_name: str | None = None,
+        dedup_subtype: str | None = None,
+        exc: BaseException | None = None,
+        context: dict | None = None,
+        terminal: bool = False,
+        occurrence_count: int = 1,
+    ) -> None:
+        """Queue one failure for error_records (86bc997wr). Synchronous, does no
+        I/O, touches no ORM object, and never raises -- so it is safe to call
+        anywhere in a run: inside an except block, inside an asyncio.gather
+        coroutine (an AsyncSession must never be written to from one), and on a
+        session poisoned by a failed flush (where even reading run.run_id can
+        raise -- see the comments in _run_pipeline). Nothing is written until
+        _flush_error_notes() runs once, at the very end of run().
+
+        `terminal=True` marks the branch that ends the run, so run()'s own
+        catch-all doesn't record the same failure a second time when the
+        exception propagates out.
+        """
+        try:
+            self.__dict__.setdefault("_error_notes", []).append(
+                build_error_note(
+                    component,
+                    error_type,
+                    severity,
+                    message,
+                    run_id=getattr(self, "_run_id", None),
+                    user_id=self._user_id,
+                    stock_ticker=getattr(self, "_ticker", None),
+                    agent_name=agent_name,
+                    dedup_subtype=dedup_subtype,
+                    exc=exc,
+                    context={**(self._run_context or {}), **(context or {})},
+                    occurrence_count=occurrence_count,
+                )
+            )
+            if terminal:
+                self._failure_noted = True
+        except Exception:
+            logger.warning("error_note_build_failed")
+
+    def _note_agent_failure(
+        self,
+        stage: str,
+        agent_id: str,
+        errors: list[str],
+        exc: Exception | None,
+        runner=None,
+    ) -> None:
+        """One agent ended with no usable output. Soft validation failures on an
+        agent that still completed are deliberately NOT recorded here -- they
+        already live in agent_outputs.error_detail, and recording them too would
+        flood this table. OllamaUnavailable is also not recorded per agent: it
+        aborts the run and is noted once at the run level instead.
+
+        Self-contained by design: the runner's last few attempts (how each one
+        failed, and where its raw prompt and response were saved) go into the
+        note, so diagnosing this failure never needs a join. The matching
+        agent_outputs row is run_id + agent_name (they are the same string).
+
+        Fingerprint: an exception is fingerprinted by where it was raised
+        (build_error_note does that when dedup_subtype is None); a failure with
+        no exception (the retries just ran out) by the agent plus the rule that
+        kept failing, so two agents' failures never look like one problem.
+        """
+        first_error = errors[0] if errors else ""
+        self._note_error(
+            "agent",
+            "agent_exception" if exc is not None else "all_retries_exhausted",
+            "high",
+            "; ".join(errors) or "agent returned no usable output",
+            agent_name=agent_id,
+            dedup_subtype=(
+                None
+                if exc is not None
+                else f"{agent_id}:{rule_slug(first_error) if first_error else stage}"
+            ),
+            exc=exc,
+            context={
+                "stage": stage,
+                "errors": [safe_text(e, 300) for e in errors[:10]],
+                **summarize_call_log(getattr(runner, "call_log", None)),
+            },
+        )
+
+    async def _release_session(self, db: AsyncSession) -> None:
+        """Roll the run's own session back, quietly. It never raises, so it is safe
+        inside an except/finally (a failing rollback must not replace the real
+        error), and it is bounded, so a session left broken by a cancelled
+        statement cannot hang the cleanup. Frees any write lock the session holds
+        so the independent-session writes that follow are not blocked by it."""
+        try:
+            await asyncio.wait_for(db.rollback(), timeout=5)
+        except Exception:
+            pass
+
+    def _drain_degradation(self) -> None:
+        """Turn what the data layer collected during this run (a provider that
+        raised and was skipped, an LLM sub-call that got no answer, articles left
+        unscored) into error notes. Called after prepare() returns OR raises, and
+        again at the very end (the benchmark quote and other late fetches report
+        too). Draining empties the collector, so nothing is noted twice. These are
+        never terminal: the run carried on, on worse data, which is the point."""
+        collector = self._degradation
+        if collector is None:
+            return
+        try:
+            for event in collector.drain():
+                self._note_error(
+                    "data_pipeline",
+                    event.kind,
+                    event.severity,
+                    event.message or event.kind,
+                    dedup_subtype=event.fingerprint,
+                    context={
+                        "stage": "data",
+                        "provider": event.provider,
+                        "op": event.op,
+                        "exc_type": event.exc_type,
+                        **event.context,
+                    },
+                    occurrence_count=event.count,
+                )
+        except Exception:
+            logger.warning("degradation_drain_failed")
+
+    def _note_ollama_unavailable(self, stage: str, exc: BaseException) -> None:
+        """Environment-level failure that aborts the run. Noted once per run, at
+        the handler, not once per agent (up to 9 agents can raise it in one
+        pass -- see the OllamaUnavailable skip in _note_agent_failure's callers)."""
+        self._note_error(
+            "llm",
+            "ollama_connection_failed",
+            "critical",
+            safe_text(exc, 4000) or "Ollama unavailable",
+            dedup_subtype=stage,
+            exc=exc,
+            context={"stage": stage},
+            terminal=True,
+        )
+
+    def _note_gate_failure(self, gate: str, reason: str | None) -> None:
+        self._note_error(
+            "orchestrator",
+            "gate_failed",
+            "high",
+            reason or f"{gate} failed",
+            dedup_subtype=gate,
+            context={"stage": gate},
+            terminal=True,
+        )
+
+    def _note_cio_incomplete(self, stage: str, errors: list[str], runner=None) -> None:
+        first_error = errors[0] if errors else ""
+        self._note_error(
+            "agent",
+            "all_retries_exhausted",
+            "high",
+            "; ".join(errors) or f"{stage} produced no usable output",
+            agent_name=stage,
+            dedup_subtype=f"{stage}:{rule_slug(first_error)}" if first_error else stage,
+            context={
+                "stage": stage,
+                "errors": [safe_text(e, 300) for e in errors[:10]],
+                **summarize_call_log(getattr(runner, "call_log", None)),
+            },
+            terminal=True,
+        )
+
+    async def _flush_error_notes(self) -> None:
+        """Write every queued note in one independent session (never the run's
+        own, which may be mid-rollback). Called once, from run()'s outermost
+        `finally`, after the run session has committed or rolled back -- which
+        is why none of the note sites has to care about session state."""
+        try:
+            notes = self.__dict__.get("_error_notes")
+            if not notes or self._bind is None:
+                return
+            self._error_notes = []
+            await write_error_notes(self._bind, notes)
+        except Exception:
+            logger.warning("error_notes_flush_failed")
+
     async def run(self, run: AnalysisRun, db: AsyncSession) -> None:
         """Public entry point -- a thin wrapper around _run_pipeline() so a
         run_quality_summary row (86bbwachy Phase 5) gets written exactly
@@ -526,16 +737,142 @@ class AnalysisOrchestrator:
         # _write_run_quality_summary reads these unconditionally.
         self._gate1_passed = self._gate1_reason = None
         self._gate2_passed = self._gate2_reason = None
+        # 86bc997wr -- plain values for error notes, read here while the run is
+        # freshly loaded and the session is known clean, never from a failure
+        # handler. Notes are queued through the run and flushed once, below.
+        self._error_notes = []
+        self._failure_noted = False
+        self._degradation = DegradationCollector()
+        self._run_id = run.run_id
+        self._user_id = run.user_id
+        self._bind = db.bind
+        self._run_context = {"account_type": run.account_type, "timeline": run.timeline}
+        # The ticker for error notes and log lines, resolved up front from the
+        # Stock row (one small query on a session that is still clean) rather
+        # than from the DataBundle, which doesn't exist yet when the most
+        # common failure -- DataPipeline.prepare() -- happens. Overwritten with
+        # bundle.stock.ticker once a real bundle exists.
+        self._ticker = await self._lookup_ticker(run, db)
+        # Every log line emitted while this run executes -- from any layer,
+        # including the data providers and Router, with no call-site changes --
+        # carries these fields. structlog's default processors already include
+        # merge_contextvars, and asyncio tasks spawned in here inherit the
+        # context. bound_contextvars unbinds on exit, so nothing leaks into the
+        # next run served by the same process.
+        log_context = {
+            "run_id": str(run.run_id),
+            "account_type": run.account_type,
+            "timeline": run.timeline,
+        }
+        if self._ticker:
+            log_context["ticker"] = self._ticker
+        with structlog.contextvars.bound_contextvars(**log_context):
+            await self._run_guarded(run, db)
+
+    async def _lookup_ticker(self, run: AnalysisRun, db: AsyncSession) -> str | None:
+        """Best effort: a missing ticker only costs notes and log lines their
+        ticker field, never the run."""
         try:
-            await self._run_pipeline(run, db)
-        finally:
-            try:
-                await self._write_run_quality_summary(run, db)
-            except Exception as exc:
-                await db.rollback()
-                logger.warning(
-                    "run_quality_summary_write_failed", run_id=str(run.run_id), error=str(exc)
+            return (
+                await db.execute(
+                    select(Stock.canonical_ticker).where(Stock.stock_id == run.stock_id)
                 )
+            ).scalar_one_or_none()
+        except Exception:
+            return None
+
+    async def _run_guarded(self, run: AnalysisRun, db: AsyncSession) -> None:
+        """run()'s body: the pipeline, then the run_quality_summary write, then
+        the single error-notes flush, each guarded so a failure in a later step
+        never masks an earlier one."""
+        # The data layer reports degradations (a provider that raised and was
+        # skipped, an LLM sub-call that got no answer) to whichever collector is
+        # current, so nothing below had to change signature. Reset in finally, so
+        # it never leaks into the next run served by this process.
+        collector_token = set_collector(self._degradation)
+        try:
+            try:
+                await self._run_pipeline(run, db)
+            except asyncio.CancelledError:
+                # Ctrl+C, a server restart or a shutdown cancels the task
+                # mid-run. CancelledError is a BaseException, so the handlers
+                # below never see it, and before this the run stayed
+                # non-terminal forever (blocking its ticker). Best effort, in a
+                # separate session (this one may be mid-operation), and always
+                # re-raised: cancellation must still propagate.
+                self._cancelled = True
+                self._note_error(
+                    "orchestrator",
+                    "run_cancelled",
+                    "medium",
+                    "Run cancelled while in progress (the process was stopping or interrupted).",
+                    dedup_subtype="cancelled",
+                    context={"stage": "cancelled"},
+                    terminal=True,
+                )
+                # Release whatever write lock the run's own session still holds
+                # BEFORE writing from a second connection. On an on-disk SQLite
+                # file a held write transaction makes the cleanup below wait out
+                # the lock timeout and fail, leaving the run stuck (an in-memory
+                # test database hides this: it is one shared connection).
+                await self._release_session(db)
+                await end_run_now(
+                    self._bind,
+                    self._run_id,
+                    stage="cancelled",
+                    message="Run cancelled while in progress (the process was stopping or interrupted).",
+                )
+                raise
+            except Exception as exc:
+                # Anything that escapes _run_pipeline without one of its own
+                # handled branches having recorded it first (a bug in a pass,
+                # an unguarded recommendation/prediction write, ...).
+                if not self._failure_noted:
+                    self._note_error(
+                        "orchestrator",
+                        "pipeline_exception",
+                        "critical",
+                        describe_exception(exc),
+                        exc=exc,
+                        context={"stage": "run"},
+                        terminal=True,
+                    )
+                raise
+            finally:
+                # A cancelled run's counters are incomplete and its session was
+                # just rolled back (every attribute on `run` is now expired, and
+                # reading one from async code raises MissingGreenlet), so no
+                # summary is written for it: the run is already recorded as
+                # cancelled, with a reason.
+                if not self._cancelled:
+                    try:
+                        await self._write_run_quality_summary(run, db)
+                    except Exception as exc:
+                        # Noted first: the rollback below can itself fail.
+                        self._note_error(
+                            "orchestrator",
+                            "pipeline_exception",
+                            "low",
+                            f"run_quality_summary write failed: {describe_exception(exc)}",
+                            exc=exc,
+                            context={"stage": "quality_summary"},
+                        )
+                        await self._release_session(db)
+                        # self._run_id, not run.run_id: after a rollback every
+                        # attribute on `run` is expired, and reading one here is
+                        # the MissingGreenlet that would replace the real error.
+                        logger.warning(
+                            "run_quality_summary_write_failed",
+                            run_id=str(self._run_id),
+                            error=safe_text(exc),
+                        )
+        finally:
+            # Outermost, so it runs even if the summary block's own rollback()
+            # raised, and only after the run session has committed or rolled
+            # back. A failure here is swallowed inside (see error_recorder).
+            self._drain_degradation()  # anything reported after prepare() returned
+            reset_collector(collector_token)
+            await self._flush_error_notes()
 
     async def _run_pipeline(self, run: AnalysisRun, db: AsyncSession) -> None:
         # Captured once, as a plain UUID, and used in every log call below
@@ -578,9 +915,20 @@ class AnalysisOrchestrator:
                 run.stock_id, context, db, run_id=run_id, seq_counter=self._seq_counter
             )
         except Exception as exc:
-            logger.error("data_pipeline_failed", run_id=str(run_id), error=str(exc))
+            self._note_error(
+                "data_pipeline",
+                "prepare_exception",
+                "high",
+                describe_exception(exc),
+                exc=exc,
+                context={"stage": "data_pipeline"},
+                terminal=True,
+            )
+            logger.error("data_pipeline_failed", run_id=str(run_id), error=safe_text(exc, 4000))
             run.status = RunStatus.FAILED
-            run.error_log = [{"stage": "data_pipeline", "error": str(exc)}]
+            # safe_text: a provider exception can carry a request URL with an
+            # API key in it (open ticket 86bbq7dmj), and this is stored.
+            run.error_log = [{"stage": "data_pipeline", "error": safe_text(exc)}]
             await db.commit()
             raise
 
@@ -603,7 +951,8 @@ class AnalysisOrchestrator:
 
         try:
             pass1_outputs, mechanical_quality = await self._run_pass1(run, bundle, db)
-        except OllamaUnavailable:
+        except OllamaUnavailable as exc:
+            self._note_ollama_unavailable("pass1", exc)
             # Environment-level failure (Ollama down / model not pulled) --
             # abort the whole run rather than contain it agent-by-agent, per
             # agents/base.py's own _retry_loop docstring: this is exactly
@@ -622,6 +971,7 @@ class AnalysisOrchestrator:
         gate1_passed, gate1_reason = gate1_check(pass1_outputs)
         self._gate1_passed, self._gate1_reason = gate1_passed, gate1_reason
         if not gate1_passed:
+            self._note_gate_failure("gate1", gate1_reason)
             logger.warning("gate1_failed", run_id=str(run_id), reason=gate1_reason)
             run.status = RunStatus.FAILED
             run.error_log = [{"stage": "gate1", "error": gate1_reason}]
@@ -637,7 +987,8 @@ class AnalysisOrchestrator:
 
         try:
             pass2_outputs = await self._run_pass2(run, bundle, compressed, db)
-        except OllamaUnavailable:
+        except OllamaUnavailable as exc:
+            self._note_ollama_unavailable("pass2", exc)
             run.status = RunStatus.FAILED
             run.error_log = [{"stage": "pass2", "error": "Ollama unavailable"}]
             await db.commit()
@@ -650,6 +1001,7 @@ class AnalysisOrchestrator:
         gate2_passed, gate2_reason = gate2_check(pass2_outputs)
         self._gate2_passed, self._gate2_reason = gate2_passed, gate2_reason
         if not gate2_passed:
+            self._note_gate_failure("gate2", gate2_reason)
             logger.warning("gate2_failed", run_id=str(run_id), reason=gate2_reason)
             run.status = RunStatus.FAILED
             run.error_log = [{"stage": "gate2", "error": gate2_reason}]
@@ -702,16 +1054,20 @@ class AnalysisOrchestrator:
                 stage_a_result, stage_a_errors = await self._run_cio_stage_a(
                     run, bundle, compressed, pass2_outputs, cio_runner, db
                 )
-            except OllamaUnavailable:
+            except OllamaUnavailable as exc:
+                self._note_ollama_unavailable("cio_stage_a", exc)
                 run.status = RunStatus.FAILED
                 run.error_log = [{"stage": "cio_stage_a", "error": "Ollama unavailable"}]
                 await db.commit()
                 raise
 
             if not agent_completed(stage_a_result):
+                self._note_cio_incomplete("cio_stage_a", stage_a_errors, cio_runner)
                 logger.error("cio_stage_a_failed", run_id=str(run_id), errors=stage_a_errors)
                 run.status = RunStatus.FAILED
-                run.error_log = [{"stage": "cio_stage_a", "error": "; ".join(stage_a_errors)}]
+                run.error_log = [
+                    {"stage": "cio_stage_a", "error": safe_text("; ".join(stage_a_errors), 1000)}
+                ]
                 await db.commit()
                 return
 
@@ -719,7 +1075,8 @@ class AnalysisOrchestrator:
                 stage_b_result, stage_b_errors = await cio_runner.run_stage_b(
                     bundle, stage_a_result, pass2_outputs.get("tax"), None, run.account_type
                 )
-            except OllamaUnavailable:
+            except OllamaUnavailable as exc:
+                self._note_ollama_unavailable("cio_stage_b", exc)
                 run.status = RunStatus.FAILED
                 run.error_log = [{"stage": "cio_stage_b", "error": "Ollama unavailable"}]
                 await db.commit()
@@ -752,9 +1109,12 @@ class AnalysisOrchestrator:
             await _close_runner(cio_runner)
 
         if not agent_completed(stage_b_result):
+            self._note_cio_incomplete("cio_stage_b", stage_b_errors, cio_runner)
             logger.error("cio_stage_b_failed", run_id=str(run_id), errors=stage_b_errors)
             run.status = RunStatus.FAILED
-            run.error_log = [{"stage": "cio_stage_b", "error": "; ".join(stage_b_errors)}]
+            run.error_log = [
+                {"stage": "cio_stage_b", "error": safe_text("; ".join(stage_b_errors), 1000)}
+            ]
             await db.commit()
             return
 
@@ -770,6 +1130,15 @@ class AnalysisOrchestrator:
             if stage_b_result.get(f) is None
         ]
         if missing:
+            self._note_error(
+                "agent",
+                "output_validation_failed",
+                "high",
+                f"CIO output missing required fields: {missing}",
+                dedup_subtype="missing:" + ",".join(missing),
+                context={"stage": "recommendation", "missing": missing},
+                terminal=True,
+            )
             logger.error("cio_output_missing_required_fields", run_id=str(run_id), missing=missing)
             run.status = RunStatus.FAILED
             run.error_log = [{"stage": "recommendation", "error": f"CIO output missing: {missing}"}]
@@ -788,6 +1157,15 @@ class AnalysisOrchestrator:
                 run, bundle, compressed, pass2_outputs, stage_a_result, db
             )
         except Exception as exc:
+            self._note_error(
+                "agent",
+                "agent_exception",
+                "medium",
+                describe_exception(exc),
+                agent_name="shadow_cio",
+                exc=exc,
+                context={"stage": "shadow_cio"},
+            )
             # rollback() FIRST, before anything else touches this session --
             # including the log line right below. Confirmed live: with the
             # log line first (reading run.run_id), SQLAlchemy's default
@@ -800,7 +1178,9 @@ class AnalysisOrchestrator:
             # this whole except block exists to prevent, just moved one line
             # earlier and self-inflicted by the fix itself.
             await db.rollback()
-            logger.warning("shadow_cio_failed_non_blocking", run_id=str(run_id), error=str(exc))
+            logger.warning(
+                "shadow_cio_failed_non_blocking", run_id=str(run_id), error=safe_text(exc, 4000)
+            )
 
         run.status = RunStatus.COMPLETED
         run.completed_at = datetime.now(UTC)
@@ -841,16 +1221,25 @@ class AnalysisOrchestrator:
         ).scalars().all()
         # See the module-level _NO_*_EXPECTED sets' own comment for why
         # these exclusions exist and how each was confirmed.
+        #
+        # An agent that FAILED (status="failed": no usable output at all) is
+        # excluded from all three lists (86bc997wr). Its fields are empty
+        # because it never produced anything, not because it produced a thin
+        # answer, and listing it here made a run that died before reaching
+        # these agents read like a data-quality problem (a real failed run
+        # showed all five Pass 1 agents "with empty key_factors"). The failure
+        # itself is reported as a failure -- run.error_log / error_records.
+        produced = [a for a in agent_outputs if a.status != "failed"]
         agents_with_empty_key_factors = [
-            a.agent_name for a in agent_outputs
+            a.agent_name for a in produced
             if a.agent_name not in _NO_KEY_FACTORS_EXPECTED and not a.key_factors
         ]
         agents_with_empty_risks = [
-            a.agent_name for a in agent_outputs
+            a.agent_name for a in produced
             if a.agent_name not in _NO_RISKS_EXPECTED and not a.risks
         ]
         agents_with_empty_narrative = [
-            a.agent_name for a in agent_outputs
+            a.agent_name for a in produced
             if a.agent_name not in _NO_NARRATIVE_EXPECTED and not a.narrative
         ]
 
@@ -955,6 +1344,8 @@ class AnalysisOrchestrator:
         for agent_id, result, errors, exc in results:
             _add_agent_output_and_calls(db, run, agent_id, "pass1", result, errors, runners[agent_id])
             outputs[agent_id] = result
+            if not agent_completed(result) and not isinstance(exc, OllamaUnavailable):
+                self._note_agent_failure("pass1", agent_id, errors, exc, runners[agent_id])
             quality = getattr(runners[agent_id], "last_data_quality_assessment", None)
             if quality is not None:
                 mechanical_quality[agent_id] = quality
@@ -1021,7 +1412,18 @@ class AnalysisOrchestrator:
                     if not passthrough_ok:
                         errors = [*errors, *passthrough_errors]
                 except Exception as passthrough_exc:
-                    logger.error("tax_passthrough_check_crashed", error=str(passthrough_exc))
+                    logger.error(
+                        "tax_passthrough_check_crashed", error=safe_text(passthrough_exc, 4000)
+                    )
+                    self._note_error(
+                        "agent",
+                        "agent_exception",
+                        "low",
+                        f"tax passthrough check crashed: {describe_exception(passthrough_exc)}",
+                        agent_name="tax",
+                        exc=passthrough_exc,
+                        context={"stage": "tax_passthrough"},
+                    )
             return agent_id, result, errors, exc
 
         async def _run_risk(runner):
@@ -1061,8 +1463,21 @@ class AnalysisOrchestrator:
                     # a total agent failure. Only records the error and
                     # leaves result["stage_b"] absent; never erases result
                     # itself the way the pre-fix single try/except did.
-                    logger.error("pass2_agent_failed", agent_id="risk", error=str(stage_b_exc))
-                    errors = [*errors, str(stage_b_exc)]
+                    logger.error(
+                        "pass2_agent_failed", agent_id="risk", error=safe_text(stage_b_exc, 4000)
+                    )
+                    # Runs inside asyncio.gather: _note_error only appends to a
+                    # list, never touches the session, so it is safe here.
+                    self._note_error(
+                        "agent",
+                        "agent_exception",
+                        "medium",
+                        describe_exception(stage_b_exc),
+                        agent_name="risk",
+                        exc=stage_b_exc,
+                        context={"stage": "risk_stage_b"},
+                    )
+                    errors = [*errors, safe_text(stage_b_exc, 4000)]
             return "risk", result, errors, exc
 
         results = await asyncio.gather(
@@ -1077,6 +1492,8 @@ class AnalysisOrchestrator:
         for agent_id, result, errors, exc in results:
             _add_agent_output_and_calls(db, run, agent_id, "pass2", result, errors, runners[agent_id])
             outputs[agent_id] = result
+            if not agent_completed(result) and not isinstance(exc, OllamaUnavailable):
+                self._note_agent_failure("pass2", agent_id, errors, exc, runners[agent_id])
             if isinstance(exc, OllamaUnavailable):
                 ollama_unavailable = exc
         await db.commit()
@@ -1146,6 +1563,19 @@ class AnalysisOrchestrator:
         await _close_runner(runner)
 
         if not agent_completed(result):
+            self._note_error(
+                "agent",
+                "all_retries_exhausted",
+                "medium",
+                "; ".join(errors) or "Shadow CIO produced no usable output",
+                agent_name="shadow_cio",
+                dedup_subtype="did_not_complete",
+                context={
+                    "stage": "shadow_cio",
+                    "errors": [safe_text(e, 300) for e in errors[:10]],
+                    **summarize_call_log(getattr(runner, "call_log", None)),
+                },
+            )
             logger.warning("shadow_cio_did_not_complete", run_id=str(run_id), errors=errors)
             return
 
@@ -1157,6 +1587,15 @@ class AnalysisOrchestrator:
             # result could be missing it. No divergence to compute without
             # both real outlooks; skip rather than raise inside this
             # already-non-blocking path.
+            self._note_error(
+                "agent",
+                "output_validation_failed",
+                "medium",
+                "Shadow CIO or primary CIO outlook missing; no divergence computed",
+                agent_name="shadow_cio",
+                dedup_subtype="missing_outlook",
+                context={"stage": "shadow_cio"},
+            )
             logger.warning(
                 "shadow_cio_missing_outlook_for_divergence", run_id=str(run_id)
             )

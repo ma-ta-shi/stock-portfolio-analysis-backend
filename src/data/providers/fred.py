@@ -5,6 +5,8 @@ import pandas as pd
 import structlog
 from fredapi import Fred
 
+from data.degradation import FETCH_FAILED
+from data.degradation import report as report_degradation
 from data.providers.base import MacroDataProvider
 
 logger = structlog.get_logger(__name__)
@@ -59,8 +61,11 @@ class FredMacroDataProvider(MacroDataProvider):
             clean_id = series_id.strip().upper()
             try:
                 result[clean_id] = await asyncio.to_thread(self._client.get_series, clean_id)
-            except Exception:
+            except Exception as exc:
                 logger.warning("fred_series_fetch_failed", series_id=clean_id, exc_info=True)
+                report_degradation(
+                    "fred", "get_macro_data", FETCH_FAILED, f"{clean_id}: {exc}", exc=exc
+                )
                 result[clean_id] = pd.Series(dtype="float64")
         return result
 
@@ -72,8 +77,11 @@ class FredMacroDataProvider(MacroDataProvider):
                 series = await asyncio.to_thread(self._client.get_series, series_id)
                 series = series.dropna()
                 rates[name] = round(float(series.iloc[-1]), 2) if not series.empty else None
-            except Exception:
+            except Exception as exc:
                 logger.warning("fred_rate_fetch_failed", series_id=series_id, exc_info=True)
+                report_degradation(
+                    "fred", "get_interest_rates", FETCH_FAILED, f"{series_id}: {exc}", exc=exc
+                )
                 rates[name] = None
         return rates
 

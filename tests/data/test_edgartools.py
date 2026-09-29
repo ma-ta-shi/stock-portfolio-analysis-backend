@@ -788,3 +788,80 @@ async def test_get_financials_across_market_caps(provider, monkeypatch, ticker, 
 async def test_out_of_scope_methods_raise_not_implemented(provider, method, args):
     with pytest.raises(NotImplementedError):
         await getattr(provider, method)(*args)
+
+
+# --- degradation reporting (86bc997wr) ---
+
+
+async def test_missing_financials_are_reported_as_data_missing_and_change_nothing(
+    provider, monkeypatch, parity
+):
+    fake = FakeCompany(annual=None)
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    plain, with_collector, events = await parity(
+        lambda: provider.get_financials("NODATA", "income", "annual")
+    )
+
+    assert plain.empty and with_collector.empty  # unchanged
+    assert [e.key for e in events] == [("edgartools", "get_financials", "data_missing")]
+
+
+async def test_a_statement_that_raises_is_reported_as_fetch_failed(provider, collector):
+    class _RaisingFinancials:
+        def income_statement(self):
+            raise ValueError("XBRL parse error")
+
+    df = await provider._statement_df(_RaisingFinancials(), "income")
+
+    assert df.empty  # unchanged
+    events = collector.drain()
+    assert [e.key for e in events] == [("edgartools", "statement_df", "fetch_failed")]
+    assert "income" in events[0].message
+
+
+async def test_a_failed_highlevel_annual_call_is_reported_as_fetch_failed(provider, collector):
+    class _RaisingCompany:
+        def income_statement(self, periods=4, period="annual", as_dataframe=False):
+            raise RuntimeError("edgar is down")
+
+    assert await provider._highlevel_annual(_RaisingCompany()) == (None, None)  # unchanged
+    assert [e.key for e in collector.drain()] == [("edgartools", "highlevel_annual", "fetch_failed")]
+
+
+async def test_unparseable_form4_filings_are_reported_once_with_a_count(
+    provider, monkeypatch, parity
+):
+    good_row = {
+        "Date": pd.Timestamp.now(),
+        "Shares": 50,
+        "Price": 10.0,
+        "Insider": "Good Filing",
+        "Transaction Type": "Sale",
+        "Code": "S",
+    }
+    fake = FakeCompany(
+        filings=[
+            FakeFiling("0001-broken", raises=True),
+            FakeFiling("0002-broken", raises=True),
+            FakeFiling("0001-good", form4_df=_form4_df([good_row])),
+        ]
+    )
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    plain, with_collector, events = await parity(lambda: provider.get_insider_trading("AAPL", 90))
+
+    assert plain == with_collector and len(plain) == 1  # unchanged
+    assert [(e.key, e.count) for e in events] == [
+        (("edgartools", "get_insider_trading", "fetch_failed"), 2)
+    ]
+
+
+async def test_healthy_edgar_calls_report_nothing(provider, monkeypatch, collector):
+    fake = FakeCompany(annual=FakeFinancials(income_df=_income_df(FULL_INCOME_CONCEPTS)))
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    df = await provider.get_financials("AAPL", "income", "annual")
+
+    assert not df.empty
+    assert collector.drain() == []

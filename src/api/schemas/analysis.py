@@ -30,9 +30,24 @@ class AnalysisProgress(BaseModel):
     agents_complete: int
 
 
+class AnalysisFailure(BaseModel):
+    """Why a run failed, for a caller that sees status "failed" (86bc997wr).
+
+    Deliberately small and sanitized: the stage it stopped at and a short,
+    credential-redacted reason. Never a traceback, a file path, or model output;
+    the full picture (traceback, evidence files) stays server-side, in
+    error_records and scripts/diagnose_run.py.
+    """
+
+    stage: str
+    message: str
+
+
 class AnalysisStatusResponse(BaseModel):
     status: str
     progress: AnalysisProgress | None = None
+    # Null unless the run failed. Optional, so existing clients are unaffected.
+    failure: AnalysisFailure | None = None
 
 
 class AgentOutputSummary(BaseModel):
@@ -63,3 +78,4 @@ class AnalysisResultResponse(BaseModel):
     disagreement_score: int | None = None
     disagreement_class: str | None = None
     agent_outputs: list[AgentOutputSummary] = []
+    failure: AnalysisFailure | None = None

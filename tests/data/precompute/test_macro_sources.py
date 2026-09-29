@@ -746,3 +746,44 @@ async def test_naive_as_of_does_not_crash_the_cb_commentary_fetch():
         as_of=naive_as_of,
     )
     assert bundle.cb_stance_note == "Fed holds rates steady"
+
+
+# ---------- degradation reporting (86bc997wr) ----------
+
+
+@pytest.mark.asyncio
+async def test_a_statcan_outage_is_reported_once_naming_statcan(parity):
+    class _BrokenStatsCanada:
+        async def get_unemployment_rate(self):
+            raise RuntimeError("statcan is down")
+
+    async def call():
+        bundle = await _compute(is_canadian_stock=True, stats_canada=_BrokenStatsCanada())
+        return bundle.statcan_unemployment_ca
+
+    plain, with_collector, events = await parity(call)
+
+    assert plain is None and with_collector is None  # unchanged
+    assert [e.key for e in events] == [("statcan", "macro_fetch", "fetch_failed")]
+    assert "statcan is down" in events[0].message
+
+
+@pytest.mark.asyncio
+async def test_a_cb_commentary_failure_is_reported_as_a_finnhub_failure(collector):
+    class _BrokenFinnhub:
+        async def get_general_news(self, category="general"):
+            raise RuntimeError("finnhub is down")
+
+    bundle = await _compute(finnhub=_BrokenFinnhub())
+
+    assert bundle.cb_commentary_count == 0  # unchanged
+    assert [e.key for e in collector.drain()] == [("finnhub", "get_general_news", "fetch_failed")]
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_macro_computation_reports_nothing(collector):
+    stats_canada = _FakeStatsCanada(
+        unemployment={"value": 6.8, "delta_6m_pp": 0.3, "released": "2026-07-04"}
+    )
+    await _compute(is_canadian_stock=True, stats_canada=stats_canada)
+    assert collector.drain() == []

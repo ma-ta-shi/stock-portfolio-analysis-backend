@@ -36,6 +36,11 @@ degrade gracefully), and this script is a second real entry point missing
 that same baseline setup -- found live via a real MSFT run whose pipeline
 failure was exactly this bug.
 
+Every run ends with a RUN SUMMARY (86bc997wr): the verdict, one line per problem
+(errors, failed agents, agents that were rejected and retried), and the
+`diagnose_run` command, so a run that completed on degraded data does not look
+clean. To run several tickers and get one combined report, use run_batch.py.
+
 Usage: python scripts/analyze.py <ticker> --account {tfsa,rrsp,trading}
        --timeline {short_term,medium_term,long_term} --user-id <uuid>
 """
@@ -82,12 +87,28 @@ from api.tables.stock import Stock  # noqa: E402, F401
 from api.tables.user_profile import UserProfile  # noqa: E402, F401
 from fastapi import HTTPException  # noqa: E402
 from services.orchestrator import AnalysisOrchestrator  # noqa: E402
+from services.error_report import diagnose_run, format_run_summary  # noqa: E402
+from services.run_liveness import end_run_if_stale  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 from sqlalchemy.exc import IntegrityError  # noqa: E402
 
 # Imported here, not duplicated -- see its own updated docstring for why it's
 # no longer module-private to api/routes/analysis.py.
 from api.routes.analysis import resolve_or_create_stock  # noqa: E402
+
+
+async def _print_run_summary(run_id: UUID) -> None:
+    """The closing block for every run, from a fresh session (the run's own may be
+    mid-rollback after a failure). A run can complete on degraded data and still
+    print a clean-looking outlook; this says so. Never raises: a summary problem
+    must not change the run's exit code."""
+    try:
+        async with AsyncSessionLocal() as session:
+            diagnosis = await diagnose_run(session, run_id)
+        if diagnosis is not None:
+            print("\n" + format_run_summary(diagnosis))
+    except Exception as exc:
+        print(f"\n(run summary unavailable: {exc}; try scripts/diagnose_run.py {run_id})")
 
 
 def _print_in_progress(ticker: str, run_id: UUID | None = None, status: str | None = None) -> None:
@@ -130,6 +151,13 @@ async def _analyze(ticker: str, account_type: str, timeline: str, user_id: UUID)
             .scalars()
             .first()
         )
+        # A run whose process died stays non-terminal forever and would block
+        # this ticker for good. If the blocker is stale (no activity for far
+        # longer than any real run is silent), end it and carry on. A run that
+        # is actually working still blocks, as before.
+        if in_progress is not None and await end_run_if_stale(db.bind, in_progress.run_id):
+            print(f"Ended a stale earlier run for {ticker} (run_id={in_progress.run_id}); continuing.")
+            in_progress = None
         if in_progress is not None:
             _print_in_progress(ticker, in_progress.run_id, in_progress.status)
             return 1
@@ -157,6 +185,7 @@ async def _analyze(ticker: str, account_type: str, timeline: str, user_id: UUID)
             return 1
         await db.commit()
         await db.refresh(run)
+        run_id = run.run_id  # read once: a failed session may leave `run` expired
 
         print(
             f"Starting analysis: {ticker} | account={account_type} | timeline={timeline} | run_id={run.run_id}"
@@ -171,6 +200,7 @@ async def _analyze(ticker: str, account_type: str, timeline: str, user_id: UUID)
             # not here). This catch exists only so the CLI prints something
             # useful instead of a raw traceback.
             print(f"Pipeline failed: {e} (run_id={run.run_id}, status={run.status})")
+            await _print_run_summary(run_id)
             return 1
 
         recommendation = (
@@ -190,7 +220,8 @@ async def _analyze(ticker: str, account_type: str, timeline: str, user_id: UUID)
                 f"outlook: {recommendation.stock_outlook_direction} | confidence: {recommendation.overall_confidence}"
             )
             print(f"narrative: {recommendation.synthesis_narrative}")
-        print(f"\nFull trace: python scripts/run_trace.py {run.run_id}")
+        await _print_run_summary(run_id)
+        print(f"Full trace: python scripts/run_trace.py {run.run_id}")
         return 0 if run.status == RunStatus.COMPLETED else 1
 
 

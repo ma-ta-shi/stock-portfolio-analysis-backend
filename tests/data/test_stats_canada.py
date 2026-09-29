@@ -419,3 +419,76 @@ async def test_context_manager_does_not_close_externally_provided_session():
         pass
 
     assert external.closed is False
+
+
+# --- degradation reporting (86bc997wr): a series that comes back unusable ---
+
+_STATCAN_METHODS = [
+    "get_unemployment_rate",
+    "get_housing_starts",
+    "get_retail_sales_yoy",
+    "get_cpi_national",
+    "get_real_gdp_index",
+]
+
+
+def _always(monkeypatch, provider, rows):
+    async def fake_fetch_vectors(vector_ids, latest_n=1):
+        return rows
+
+    monkeypatch.setattr(provider, "_fetch_vectors", fake_fetch_vectors)
+
+
+@pytest.mark.parametrize("method", _STATCAN_METHODS)
+async def test_a_failed_series_is_reported_as_data_missing_and_still_returns_none(
+    provider, monkeypatch, parity, method
+):
+    _always(monkeypatch, provider, [_failed_row()])
+
+    plain, with_collector, events = await parity(lambda: getattr(provider, method)())
+
+    assert plain is None and with_collector is None  # unchanged
+    assert [e.key for e in events] == [("statcan", method, "data_missing")]
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["get_unemployment_rate", "get_retail_sales_yoy", "get_cpi_national", "get_real_gdp_index"],
+)
+async def test_a_series_with_no_data_points_is_reported_as_data_missing(
+    provider, monkeypatch, collector, method
+):
+    _always(monkeypatch, provider, [_success_row(_point("2026-05-01", None))])
+
+    assert await getattr(provider, method)() is None
+    assert [e.key for e in collector.drain()] == [("statcan", method, "data_missing")]
+
+
+async def test_retail_sales_with_no_prior_year_loses_the_whole_value_and_is_reported(
+    provider, monkeypatch, collector
+):
+    _always(monkeypatch, provider, [_success_row(_point("2026-05-01", 110_000.0))])
+
+    assert await provider.get_retail_sales_yoy() is None
+    events = collector.drain()
+    assert [e.key for e in events] == [("statcan", "get_retail_sales_yoy", "data_missing")]
+    assert "no prior-year point" in events[0].message
+
+
+async def test_a_missing_lookback_that_keeps_the_value_is_not_reported(
+    provider, monkeypatch, collector
+):
+    """Only a derived delta is absent (the value itself is present), so this is not a
+    lost source: the existing warning covers it and nothing is recorded."""
+    _always(monkeypatch, provider, [_success_row(_point("2026-06-01", 6.5))])
+
+    result = await provider.get_unemployment_rate()
+
+    assert result["value"] == 6.5 and result["delta_6m_pp"] is None
+    assert collector.drain() == []
+
+
+async def test_healthy_statcan_calls_report_nothing(provider, monkeypatch, collector):
+    _always(monkeypatch, provider, [_success_row(_point("2026-06-01", 238.971, 3))])
+    assert (await provider.get_housing_starts())["value"] == pytest.approx(238971.0)
+    assert collector.drain() == []

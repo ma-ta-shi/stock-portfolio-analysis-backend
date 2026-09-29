@@ -1,5 +1,7 @@
 import pandas as pd
 import aiohttp
+from data.degradation import DATA_MISSING, FETCH_FAILED
+from data.degradation import report as report_degradation
 from data.providers.base import MacroDataProvider
 import logging
 
@@ -114,9 +116,18 @@ class BOCMacroDataProvider(MacroDataProvider):
                         result[series_id] = pd.Series(values, index=dates, name=series_id)
                     else:
                         logger.warning(f"No valid data found for series {series_id}")
+                        report_degradation(
+                            "boc",
+                            "get_macro_data",
+                            DATA_MISSING,
+                            f"{series_id}: no valid observations",
+                        )
 
             except Exception as e:
                 logger.error(f"Error fetching macro data for {series_id}: {e}")
+                report_degradation(
+                    "boc", "get_macro_data", FETCH_FAILED, f"{series_id}: {e}", exc=e
+                )
                 continue
 
         return result
@@ -157,6 +168,7 @@ class BOCMacroDataProvider(MacroDataProvider):
             return result
         except Exception as e:
             logger.error(f"Error fetching interest rates: {e}")
+            report_degradation("boc", "get_interest_rates", FETCH_FAILED, str(e), exc=e)
             return {}
 
     async def get_exchange_rates(self, pair: str = "CADUSD") -> dict:
@@ -207,4 +219,5 @@ class BOCMacroDataProvider(MacroDataProvider):
             return result
         except Exception as e:
             logger.error(f"Error fetching exchange rate for {pair}: {e}")
+            report_degradation("boc", "get_exchange_rates", FETCH_FAILED, f"{pair}: {e}", exc=e)
             return {"pair": pair, "rate": None, "date": None}
