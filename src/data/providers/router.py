@@ -32,6 +32,8 @@ from typing import Any, Protocol
 import pandas as pd
 import structlog
 
+from data.degradation import AUTH_FAILED, EMPTY_AFTER_FAILURE, LINK_FAILED
+from data.degradation import report as report_degradation
 from data.providers.base import NewsProvider, StockDataProvider
 from data.providers.ca_crosslisting import get_us_ticker
 from data.providers.edgartools import EdgarToolsDataProvider
@@ -337,6 +339,7 @@ class Router(StockDataProvider, NewsProvider):
         swallowed as a per-call failure. Anything else is logged and treated as
         a fallback trigger. Returns (result, provider_key_that_produced_it)."""
         result: Any = None
+        raised_links: list[str] = []
         for key in self._chain(method_name, *args):
             provider = self._providers.get(key)
             method = getattr(provider, method_name, None) if provider is not None else None
@@ -349,21 +352,38 @@ class Router(StockDataProvider, NewsProvider):
                 continue
             except RuntimeError as e:
                 if "401" in str(e):
+                    report_degradation(key, method_name, AUTH_FAILED, str(e), exc=e)
                     raise
                 logger.warning(
                     "router_chain_call_failed", method=method_name, provider=key, error=str(e)
                 )
+                report_degradation(key, method_name, LINK_FAILED, str(e), exc=e)
+                raised_links.append(key)
                 result = None
                 continue
-            except Exception:
+            except Exception as e:
                 logger.warning(
                     "router_chain_call_failed", method=method_name, provider=key, exc_info=True
                 )
+                report_degradation(key, method_name, LINK_FAILED, str(e), exc=e)
+                raised_links.append(key)
                 result = None
                 continue
             if not _is_empty(result):
                 self.sources_used[method_name] = key
                 return result, key
+        # Nothing produced data. If every link merely returned nothing, that is a
+        # confirmed empty and says nothing. If at least one RAISED, an outage may
+        # be hiding the data, and the caller is about to collapse this to {}/[]
+        # either way (ClickUp 86bbzgapt): record that it happened. Reporting only;
+        # the return value below is unchanged.
+        if raised_links:
+            report_degradation(
+                "+".join(raised_links),
+                method_name,
+                EMPTY_AFTER_FAILURE,
+                "no provider produced data and at least one raised",
+            )
         return result, None
 
     # ---------- StockDataProvider ----------
@@ -484,10 +504,11 @@ class Router(StockDataProvider, NewsProvider):
                 finnhub = FinnhubDataProvider()
                 self._providers["finnhub"] = finnhub
             us_articles = await finnhub.get_news(us_ticker, days)
-        except Exception:
+        except Exception as e:
             logger.warning(
                 "ca_news_merge_failed", ticker=ticker, us_ticker=us_ticker, exc_info=True
             )
+            report_degradation("finnhub", "get_news_crosslisted_us", LINK_FAILED, str(e), exc=e)
             return ca_articles
         return _merge_ca_us_news(ca_articles, us_articles)
 

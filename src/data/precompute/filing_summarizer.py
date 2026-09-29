@@ -43,6 +43,8 @@ import structlog
 # the OLLAMA_HOST/_MODEL duplication below is a different, unrelated
 # decision about a different module).
 from agents.capture import CaptureContext, record_call
+from data.degradation import LLM_REQUEST_FAILED
+from data.degradation import report as report_degradation
 from data.schemas.common import FilingDigest
 
 logger = structlog.get_logger(__name__)
@@ -163,6 +165,13 @@ async def summarize_filing_section(
         async with session.post(_OLLAMA_URL, json=payload, timeout=_TIMEOUT) as response:
             if response.status != 200:
                 logger.warning("filing_summary_http_error", status=response.status, section=section)
+                report_degradation(
+                    "ollama",
+                    "filing_summary",
+                    LLM_REQUEST_FAILED,
+                    f"HTTP {response.status} ({section})",
+                    context={"section": section},
+                )
                 return None
             data = await response.json()
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
@@ -172,6 +181,14 @@ async def summarize_filing_section(
         # as sentiment.py's _score_article. No capture on this path, same reasoning
         # too -- no response body exists at all to write as an artifact.
         logger.warning("filing_summary_request_failed", error=str(exc), section=section)
+        report_degradation(
+            "ollama",
+            "filing_summary",
+            LLM_REQUEST_FAILED,
+            f"{exc} ({section})",
+            exc=exc,
+            context={"section": section},
+        )
         return None
 
     digest: str | None = None

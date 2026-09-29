@@ -45,6 +45,8 @@ import structlog
 # filing_summarizer.py) route through -- a real, intended dependency, not
 # an accidental crossing of the boundary the comment below is about.
 from agents.capture import CaptureContext, record_call
+from data.degradation import LLM_REQUEST_FAILED, SENTIMENT_UNSCORED
+from data.degradation import report as report_degradation
 
 logger = structlog.get_logger(__name__)
 
@@ -132,6 +134,9 @@ async def _score_article(
         async with session.post(_OLLAMA_URL, json=payload, timeout=_TIMEOUT) as response:
             if response.status != 200:
                 logger.warning("sentiment_score_http_error", status=response.status)
+                report_degradation(
+                    "ollama", "sentiment_score", LLM_REQUEST_FAILED, f"HTTP {response.status}"
+                )
                 return None
             data = await response.json()
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
@@ -144,6 +149,7 @@ async def _score_article(
         # own call_model, which never reaches its capture point on this class of
         # failure either).
         logger.warning("sentiment_score_request_failed", error=str(exc))
+        report_degradation("ollama", "sentiment_score", LLM_REQUEST_FAILED, str(exc), exc=exc)
         return None
 
     # message/content pulled out here, before the parse try/except, so both
@@ -243,4 +249,16 @@ async def summarize_news(
         }
         for article, sentiment in zip(id_assigned_articles, sentiments)
     ]
+    # sentiment_source is "local_llm" even when NO article was scored, so it reads
+    # as success. Say how many were left unscored, in one event with the count
+    # (the return value is unchanged).
+    unscored = sum(1 for sentiment in sentiments if sentiment is None)
+    if unscored:
+        report_degradation(
+            "ollama",
+            "sentiment",
+            SENTIMENT_UNSCORED,
+            f"{unscored} of {len(sentiments)} articles could not be scored",
+            context={"unscored": unscored, "total": len(sentiments)},
+        )
     return {"articles": articles, "sentiment_source": "local_llm"}
