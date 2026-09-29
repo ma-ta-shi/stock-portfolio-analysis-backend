@@ -148,7 +148,7 @@ def test_create_analysis_409s_when_already_in_progress(client, mock_router):
 @pytest.mark.asyncio
 async def test_concurrent_create_analysis_for_same_new_ticker_does_not_duplicate():
     """Real race, flagged during a 2026-09-23 review, never previously
-    tested: both _resolve_or_create_stock's own SELECT-then-INSERT (for a
+    tested: both resolve_or_create_stock's own SELECT-then-INSERT (for a
     brand-new ticker) and create_analysis's own in-progress-run SELECT-
     then-INSERT are classic TOCTOU races -- nothing serializes the
     check-then-write across two concurrent requests. Two users requesting
@@ -226,7 +226,7 @@ async def test_concurrent_create_analysis_for_same_new_ticker_does_not_duplicate
         os.remove(db_path)
 
     assert len(stocks) == 1, (
-        f"_resolve_or_create_stock's SELECT-then-INSERT let concurrent requests create "
+        f"resolve_or_create_stock's SELECT-then-INSERT let concurrent requests create "
         f"{len(stocks)} Stock rows for the same ticker; statuses were {statuses}"
     )
     assert len(runs) == 1, (

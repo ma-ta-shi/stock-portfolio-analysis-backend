@@ -83,11 +83,15 @@ def _not_found(code: str, message: str, **details) -> HTTPException:
     )
 
 
-async def _resolve_or_create_stock(ticker: str, db: AsyncSession) -> Stock:
+async def resolve_or_create_stock(ticker: str, db: AsyncSession) -> Stock:
     """orchestration-engine.md's own documented step 2 ("Resolve ticker ->
     canonical stock_id") -- DataPipeline.prepare() takes a stock_id, not a
     ticker string, so this is a real, necessary prerequisite, not an
     implementation detail that falls out for free.
+
+    No longer module-private (86bc90p0a): `scripts/analyze.py` is a second,
+    real caller outside this module, which made the old leading-underscore
+    name actively misleading rather than just unused convention.
     """
     existing = (
         await db.execute(select(Stock).where(Stock.canonical_ticker == ticker))
@@ -181,7 +185,7 @@ async def create_analysis(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_async_db),
 ):
-    stock = await _resolve_or_create_stock(body.ticker, db)
+    stock = await resolve_or_create_stock(body.ticker, db)
 
     in_progress = (
         await db.execute(
