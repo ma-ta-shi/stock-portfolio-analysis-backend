@@ -45,7 +45,7 @@ class AnalysisRun(Base):
     account_type: Mapped[str] = mapped_column(String(20))  # tfsa|rrsp|trading
     timeline: Mapped[str] = mapped_column(String(20))       # short_term|medium_term|long_term
     triggered_at: Mapped[datetime] = mapped_column(default=func.now())
-    triggered_by: Mapped[str] = mapped_column(String(20))    # manual|scheduled|alert
+    triggered_by: Mapped[str] = mapped_column(String(20))    # manual|scheduled|alert|cli
     status: Mapped[str] = mapped_column(String(30), default="queued")
     pass1_completed_at: Mapped[Optional[datetime]]
     pass2_completed_at: Mapped[Optional[datetime]]
