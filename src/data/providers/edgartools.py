@@ -429,6 +429,7 @@ class EdgarToolsDataProvider(StockDataProvider):
                 "get_financials",
                 DATA_MISSING,
                 f"no {period} financials container for {ticker}",
+                context={"symbol": ticker},
             )
             return pd.DataFrame()
 
@@ -552,6 +553,7 @@ class EdgarToolsDataProvider(StockDataProvider):
                     FETCH_FAILED,
                     f"Form 4 {filing.accession_no}: {exc}",
                     exc=exc,
+                    context={"symbol": ticker},
                 )
                 continue
             if df is None or df.empty or "Date" not in df.columns:

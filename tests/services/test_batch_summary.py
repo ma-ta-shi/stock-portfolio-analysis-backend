@@ -129,7 +129,9 @@ async def _engine():
     return engine
 
 
-async def _seed_run(engine, status, *, error_log=None, recommendation=None, minutes=5):
+async def _seed_run(
+    engine, status, *, error_log=None, recommendation=None, minutes=5, llm_config=None
+):
     async with async_sessionmaker(engine, expire_on_commit=False)() as session:
         stock = Stock(
             stock_id=uuid4(),
@@ -148,7 +150,7 @@ async def _seed_run(engine, status, *, error_log=None, recommendation=None, minu
             timeline="medium_term",
             triggered_by="cli",
             status=status,
-            llm_config={},
+            llm_config=llm_config or {},
             triggered_at=NOW - timedelta(minutes=minutes),
             completed_at=NOW if status in ("completed", "failed") else None,
             error_log=error_log,
@@ -224,3 +226,64 @@ async def test_describe_an_unknown_run_is_reported_not_raised():
     async with async_sessionmaker(engine)() as session:
         row = await describe_run(session, uuid4())
     assert row["outcome"] == NOT_STARTED
+
+
+# --- which prompt text each run used (ledger BB-045) ---
+
+
+def test_a_batch_on_one_prompt_state_says_so():
+    text = format_batch_summary(
+        [_row(OK, prompts="aaa111bbb222", run_id=UUID(RUN_ID)), _row(OK, prompts="aaa111bbb222")]
+    )
+    assert "PROMPTS: every run used prompt state aaa111bbb222" in text
+
+
+def test_a_batch_that_spans_a_prompt_edit_is_flagged_as_mixed():
+    text = format_batch_summary(
+        [_row(OK, prompts="aaa111bbb222"), _row(OK, prompts="ccc333ddd444")]
+    )
+    assert "this batch mixes prompt states (aaa111bbb222, ccc333ddd444)" in text
+    assert "compare runs only within one state" in text
+
+
+def test_runs_that_predate_hash_recording_are_reported_as_such():
+    text = format_batch_summary([_row(OK, run_id=UUID(RUN_ID))])
+    assert "PROMPTS: not recorded for these runs (they predate it)" in text
+
+
+def test_a_batch_with_no_runs_started_has_no_prompts_line():
+    assert "PROMPTS" not in format_batch_summary([_row(NOT_STARTED, "never started")])
+
+
+async def test_describe_run_carries_the_prompt_state():
+    engine = await _engine()
+    run_id = await _seed_run(
+        engine, "completed", recommendation=("bullish", 70), llm_config={"prompts_hash": "abc123def456"}
+    )
+    async with async_sessionmaker(engine)() as session:
+        row = await describe_run(session, run_id)
+    assert row["prompts"] == "abc123def456"
+
+
+def test_the_code_state_is_reported_the_same_way_as_the_prompt_state():
+    same = format_batch_summary(
+        [_row(OK, code="0f1e2d3c4b5a", run_id=UUID(RUN_ID)), _row(OK, code="0f1e2d3c4b5a")]
+    )
+    mixed = format_batch_summary([_row(OK, code="0f1e2d3c4b5a"), _row(OK, code="999888777666")])
+    none = format_batch_summary([_row(OK, run_id=UUID(RUN_ID))])
+
+    assert "CODE: every run used code state 0f1e2d3c4b5a" in same
+    assert "CODE: this batch mixes code states (0f1e2d3c4b5a, 999888777666)" in mixed
+    assert "CODE: not recorded for these runs (they predate it)" in none
+
+
+def test_a_batch_can_agree_on_prompts_but_differ_on_code():
+    """The case the prompt hash alone would call comparable."""
+    text = format_batch_summary(
+        [
+            _row(OK, prompts="aaa111bbb222", code="0f1e2d3c4b5a"),
+            _row(OK, prompts="aaa111bbb222", code="999888777666"),
+        ]
+    )
+    assert "PROMPTS: every run used prompt state aaa111bbb222" in text
+    assert "CODE: this batch mixes code states" in text

@@ -67,6 +67,58 @@ async def _end_timed_out_run(bind, run_id: UUID, ticker: str, minutes: int) -> N
         )
 
 
+def _describe_exit(code: int | None) -> str:
+    """A plain-words reading of a process exit code (Git Bash reports a native crash as 139,
+    Windows itself as the unsigned 0xC0000005)."""
+    known = {139: "a segmentation fault", 3221225477: "an access violation (0xC0000005)"}
+    if code in known:
+        return known[code]
+    if code == 0:
+        return "it exited normally but the run never finished"
+    if code == 1:
+        return "it exited with an error before the run finished"
+    return "it crashed or was killed"
+
+
+def _not_started_headline(code: int | None) -> str:
+    """Why a child that never printed a run id is reported as not started. A native crash
+    (segfault at import) leaves no output at all, so the exit code is the only evidence."""
+    if code in (None, 0):
+        return "analyze.py never started a run (see its output above)"
+    crash = f", {_describe_exit(code)}" if code in (139, 3221225477) else ""
+    return f"analyze.py never started a run (exit code {code}{crash}; see its output above)"
+
+
+async def _end_dead_run(bind, run_id: UUID, ticker: str, exit_code: int | None) -> bool:
+    """The child process has exited. If its run is still not finished, the run is provably
+    dead (nothing is left to finish it), so end it NOW as failed and leave an error row,
+    instead of leaving it blocking its ticker until the 90-minute stale rule and reporting
+    it as "running" (ledger BB-048). A run that finished normally is not touched: the update
+    only fires while the run is non-terminal. Returns True if it ended one."""
+    message = (
+        f"analyze.py exited with code {exit_code} ({_describe_exit(exit_code)}) before the run "
+        "finished, so the run cannot continue"
+    )
+    if not await end_run_now(bind, run_id, stage="crashed", message=message):
+        return False
+    await write_error_notes(
+        bind,
+        [
+            build_error_note(
+                "orchestrator",
+                "process_crashed",
+                "high",
+                message,
+                run_id=run_id,
+                stock_ticker=ticker,
+                dedup_subtype="crashed",
+                context={"stage": "crashed", "exit_code": exit_code},
+            )
+        ],
+    )
+    return True
+
+
 async def _run_one(cmd: list[str], timeout_s: float) -> tuple[UUID | None, bool, int | None]:
     """Run one analyze.py, echoing its output live. Returns (run_id, timed_out,
     exit code). run_id comes from the child's 'Starting analysis:' line."""
@@ -122,12 +174,14 @@ async def _main(args: argparse.Namespace) -> int:
         async with AsyncSessionLocal() as session:
             if run_id is not None and timed_out:
                 await _end_timed_out_run(session.bind, run_id, ticker, args.run_timeout_minutes)
+            elif run_id is not None:
+                await _end_dead_run(session.bind, run_id, ticker, code)
             row = (
                 await describe_run(session, run_id)
                 if run_id is not None
                 else {
                     "outcome": NOT_STARTED,
-                    "headline": "analyze.py never started a run (see its output above)",
+                    "headline": _not_started_headline(code),
                 }
             )
         if timed_out:

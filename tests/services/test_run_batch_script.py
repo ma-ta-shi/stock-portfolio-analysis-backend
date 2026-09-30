@@ -113,3 +113,112 @@ async def test_a_run_the_batch_kills_is_ended_and_leaves_an_error_row(run_batch)
         "TD.TO",
         "timeout",
     )
+
+
+# --- a run whose process died is ended at once (ledger BB-048) --------------------------
+
+
+async def _seeded_run(status):
+    from datetime import datetime
+    from uuid import uuid4
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from api.database import Base
+    from api.tables.analysis_runs import AnalysisRun
+    from api.tables.stock import Stock
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    maker = async_sessionmaker(engine, expire_on_commit=False)
+    async with maker() as session:
+        stock = Stock(
+            stock_id=uuid4(),
+            canonical_ticker="KO",
+            company_name="KO",
+            primary_exchange="NYSE",
+            currency="USD",
+        )
+        session.add(stock)
+        await session.commit()
+        run = AnalysisRun(
+            run_id=uuid4(),
+            user_id=uuid4(),
+            stock_id=stock.stock_id,
+            account_type="tfsa",
+            timeline="medium_term",
+            triggered_by="cli",
+            status=status,
+            llm_config={},
+            triggered_at=datetime(2026, 9, 30, 1, 0, 0),
+        )
+        session.add(run)
+        await session.commit()
+        return engine, maker, run.run_id
+
+
+async def test_a_run_left_unfinished_by_a_dead_process_is_ended_with_the_exit_code(run_batch):
+    from sqlalchemy import select
+
+    from api.tables.analysis_runs import AnalysisRun
+    from api.tables.error_records import ErrorRecord
+
+    engine, maker, run_id = await _seeded_run("queued")
+
+    assert await run_batch._end_dead_run(engine, run_id, "KO", 139) is True
+    assert await run_batch._end_dead_run(engine, run_id, "KO", 139) is False  # harmless twice
+
+    async with maker() as session:
+        run = (
+            await session.execute(select(AnalysisRun).where(AnalysisRun.run_id == run_id))
+        ).scalar_one()
+        rows = (await session.execute(select(ErrorRecord))).scalars().all()
+    assert run.status == "failed" and run.error_log[0]["stage"] == "crashed"
+    assert "code 139" in run.error_log[0]["error"] and "segmentation fault" in run.error_log[0]["error"]
+    assert len(rows) == 1  # written once
+    assert (rows[0].error_type, rows[0].stock_ticker, rows[0].dedup_subtype) == (
+        "process_crashed",
+        "KO",
+        "crashed",
+    )
+    assert rows[0].context_json["exit_code"] == 139
+
+
+async def test_a_run_that_finished_normally_is_never_touched(run_batch):
+    from sqlalchemy import select
+
+    from api.tables.analysis_runs import AnalysisRun
+    from api.tables.error_records import ErrorRecord
+
+    engine, maker, run_id = await _seeded_run("completed")
+
+    assert await run_batch._end_dead_run(engine, run_id, "KO", 0) is False
+
+    async with maker() as session:
+        run = (
+            await session.execute(select(AnalysisRun).where(AnalysisRun.run_id == run_id))
+        ).scalar_one()
+        assert run.status == "completed" and run.error_log is None
+        assert (await session.execute(select(ErrorRecord))).scalars().all() == []
+
+
+@pytest.mark.parametrize(
+    "code, expected",
+    [
+        (139, "a segmentation fault"),
+        (3221225477, "an access violation"),
+        (0, "exited normally"),
+        (1, "exited with an error"),
+        (-9, "crashed or was killed"),
+    ],
+)
+def test_exit_codes_are_described_in_plain_words(run_batch, code, expected):
+    assert expected in run_batch._describe_exit(code)
+
+
+def test_a_child_that_dies_before_printing_a_run_id_shows_its_exit_code(run_batch):
+    assert "exit code" not in run_batch._not_started_headline(0)
+    assert "exit code 1;" in run_batch._not_started_headline(1)
+    crash = run_batch._not_started_headline(3221225477)
+    assert "exit code 3221225477" in crash and "access violation" in crash

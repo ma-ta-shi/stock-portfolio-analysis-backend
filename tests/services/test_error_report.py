@@ -4,7 +4,7 @@ the reports must tell apart. Hermetic: in-memory SQLite, an injected clock.
 """
 
 from datetime import datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select
@@ -20,10 +20,13 @@ from api.tables.stock import Stock
 from services.error_report import (
     diagnose_run,
     format_diagnosis,
+    format_prompt_comparison,
     format_recent_errors,
     format_run_summary,
     parse_since,
+    prompt_comparison,
     recent_errors,
+    resolve_run_id,
 )
 from services.run_liveness import end_stale_runs
 
@@ -55,6 +58,7 @@ async def _run(
     error_log=None,
     pass1_min=None,
     completed_min=None,
+    llm_config=None,
 ):
     async with _maker(engine)() as session:
         stock = (
@@ -78,7 +82,7 @@ async def _run(
             timeline="medium_term",
             triggered_by="manual",
             status=status,
-            llm_config={},
+            llm_config=llm_config or {},
             triggered_at=_ago(triggered_min),
             pass1_completed_at=_ago(pass1_min) if pass1_min is not None else None,
             completed_at=_ago(completed_min) if completed_min is not None else None,
@@ -877,7 +881,7 @@ async def test_a_run_that_completed_on_degraded_data_lists_what_degraded():
     )
     assert "[medium] data:ollama:filing_summary:llm_request_failed x2: timeout (Business)" in text
     assert (
-        "fund: 1 of 2 attempt(s) rejected, then accepted (caveats is empty -- must explain why)"
+        "fund: 1 of 2 attempt(s) rejected, then passed (caveats is empty -- must explain why)"
         in text
     )
     # Most severe first.
@@ -903,7 +907,7 @@ async def test_a_failed_run_summary_gives_the_reason_even_without_error_rows():
 
 async def test_a_failed_agent_is_not_listed_twice():
     """A failed agent already has an error row; its rejected attempts must not add
-    a second 'rejected, then accepted' line that would be untrue."""
+    a second "rejected, then passed" line that would be untrue."""
     engine = await _engine()
     run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
     await _agent(engine, run_id, "FUND", status="failed", error_detail="narrative too long")
@@ -995,7 +999,7 @@ async def test_a_truncated_reply_is_reported_as_the_reason_when_no_validator_spo
 
     text = await _summary_for(engine, run_id)
 
-    assert "fund: 1 of 2 attempt(s) rejected, then accepted (finish_reason=length)" in text
+    assert "fund: 1 of 2 attempt(s) rejected, then passed (finish_reason=length)" in text
 
 
 async def test_a_hard_failure_row_keeps_its_component_label_in_the_summary():
@@ -1059,3 +1063,309 @@ async def test_low_events_beside_retries_still_read_as_retries_not_problems():
 
     assert d["verdict"]["outcome"] == "COMPLETED WITH RETRIES"
     assert d["verdict"]["headline"].endswith("(1 low-severity event(s), see diagnose_run)")
+
+
+# --- which prompt text a run used (ledger BB-045) ---
+
+
+async def test_the_diagnosis_says_which_prompt_state_the_run_used():
+    engine = await _engine()
+    run_id = await _run(
+        engine,
+        "AAPL",
+        "completed",
+        triggered_min=60,
+        completed_min=55,
+        llm_config={"model": "gpt-oss:20b", "prompts_hash": "abc123def456", "code_hash": "0f1e2d3c4b5a"},
+    )
+    async with _maker(engine)() as session:
+        d = await diagnose_run(session, run_id, now=NOW)
+
+    assert d["run"]["prompts_hash"] == "abc123def456"
+    assert d["run"]["code_hash"] == "0f1e2d3c4b5a"
+    assert "prompts: abc123def456 | code: 0f1e2d3c4b5a" in format_diagnosis(d)
+
+
+async def test_a_run_from_before_hashes_were_recorded_says_so():
+    engine = await _engine()
+    run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
+    async with _maker(engine)() as session:
+        d = await diagnose_run(session, run_id, now=NOW)
+
+    assert d["run"]["prompts_hash"] is None and d["run"]["code_hash"] is None
+    assert "prompts: not recorded | code: not recorded" in format_diagnosis(d)
+
+
+# --- the run summary says every rule, and when validation was overridden (BB-040) ------
+
+
+async def test_the_summary_names_every_distinct_rule_not_just_the_first():
+    """Both Macro rules fired; showing only the first hid the stale-data one."""
+    engine = await _engine()
+    run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
+    await _agent(engine, run_id, "MACRO")
+    await _call(
+        engine,
+        run_id,
+        seq=1,
+        attempt=1,
+        site="agent:macro",
+        validator_passed=False,
+        validator_errors=[
+            "risks: need <=3 items, got 4",
+            "a real data-quality issue is flagged (stale data) while confidence is high",
+        ],
+    )
+    await _call(engine, run_id, seq=2, attempt=2, site="agent:macro", validator_passed=True)
+
+    text = await _summary_for(engine, run_id)
+
+    assert "macro: 1 of 2 attempt(s) rejected, then passed" in text
+    assert "risks: need <=3 items, got 4" in text
+    assert "a real data-quality issue is flagged" in text
+
+
+async def test_the_same_rule_with_different_numbers_is_listed_once_and_extras_are_counted():
+    engine = await _engine()
+    run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
+    await _agent(engine, run_id, "SENT")
+    attempts = [
+        ["narrative: too long (2182 chars, max 1080)", "key_factors: need <=3 items, got 4"],
+        ["narrative: too long (2173 chars, max 1080)", "summary: too long", "tone: bad"],
+    ]
+    for attempt, errors in enumerate(attempts, start=1):
+        await _call(
+            engine,
+            run_id,
+            seq=attempt,
+            attempt=attempt,
+            site="agent:sent",
+            validator_passed=False,
+            validator_errors=errors,
+        )
+    await _call(engine, run_id, seq=3, attempt=3, site="agent:sent", validator_passed=True)
+
+    text = await _summary_for(engine, run_id)
+
+    assert text.count("narrative: too long") == 1  # two attempts, one rule
+    assert "+1 more" in text  # 4 distinct rules, 3 shown
+
+
+async def test_an_agent_whose_every_attempt_failed_is_reported_as_used_despite_failing():
+    """agent_completed() treats validation as a warning, so the last output is used. That is
+    not a retry that passed, and it must not read like one."""
+    engine = await _engine()
+    run_id = await _run(engine, "ENB.TO", "completed", triggered_min=60, completed_min=55)
+    await _agent(engine, run_id, "SENT")
+    for attempt in (1, 2, 3):
+        await _call(
+            engine,
+            run_id,
+            seq=attempt,
+            attempt=attempt,
+            site="agent:sent",
+            validator_passed=False,
+            validator_errors=["narrative: too long (2182 chars, max 1080)"],
+        )
+
+    async with _maker(engine)() as session:
+        d = await diagnose_run(session, run_id, now=NOW)
+    text = format_run_summary(d)
+
+    assert d["verdict"]["outcome"] == "COMPLETED WITH PROBLEMS"  # not "with retries"
+    assert (
+        "1 agent(s) used output that failed validation on every attempt (sent)"
+        in d["verdict"]["headline"]
+    )
+    assert "sent: all 3 attempt(s) failed validation; the last output was used anyway" in text
+    assert "then passed" not in text and "then accepted" not in text
+
+
+async def test_recovered_and_exhausted_agents_are_counted_separately():
+    engine = await _engine()
+    run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
+    for name in ("SENT", "TECH"):
+        await _agent(engine, run_id, name)
+    await _call(engine, run_id, seq=1, attempt=1, site="agent:sent", validator_passed=False)
+    await _call(engine, run_id, seq=2, attempt=2, site="agent:sent", validator_passed=False)
+    await _call(engine, run_id, seq=3, attempt=1, site="agent:tech", validator_passed=False)
+    await _call(engine, run_id, seq=4, attempt=2, site="agent:tech", validator_passed=True)
+
+    async with _maker(engine)() as session:
+        d = await diagnose_run(session, run_id, now=NOW)
+
+    assert d["verdict"]["headline"] == (
+        "COMPLETED, but 1 agent(s) used output that failed validation on every attempt (sent); "
+        "1 other agent(s) needed retries"
+    )
+
+
+async def test_a_data_event_row_shows_which_symbols_it_happened_for():
+    engine = await _engine()
+    run_id = await _run(engine, "MSFT", "completed", triggered_min=60, completed_min=55)
+    await _agent(engine, run_id, "FUND")
+    await _error(
+        engine,
+        run_id,
+        minutes_ago=58,
+        severity="medium",
+        component="data_pipeline",
+        error_type="empty_after_failure",
+        agent=None,
+        fingerprint="data:finnhub:get_news:empty_after_failure",
+        message="no provider produced data and at least one raised",
+        context={"symbols": ["WMT", "PEP"]},
+    )
+
+    text = await _summary_for(engine, run_id)
+
+    assert "data:finnhub:get_news:empty_after_failure: no provider produced data" in text
+    assert "[WMT, PEP]" in text
+
+
+# --- run ids as the scripts accept them (BB-051) ----------------------------------------
+
+
+async def test_a_full_id_a_dashed_prefix_and_a_short_prefix_all_resolve():
+    engine = await _engine()
+    run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
+    async with _maker(engine)() as session:
+        assert await resolve_run_id(session, str(run_id)) == run_id
+        assert await resolve_run_id(session, run_id.hex) == run_id
+        assert await resolve_run_id(session, run_id.hex[:8]) == run_id  # what the batch prints
+        assert await resolve_run_id(session, str(run_id)[:13].upper()) == run_id  # dashes, caps
+
+
+async def test_an_unknown_or_malformed_id_says_what_is_wrong():
+    engine = await _engine()
+    run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
+    unused = "eeee" if not run_id.hex.startswith("eeee") else "dddd"
+    async with _maker(engine)() as session:
+        with pytest.raises(ValueError, match="no recent run"):
+            await resolve_run_id(session, unused)
+        with pytest.raises(ValueError, match="not a run id"):
+            await resolve_run_id(session, "xyz")
+        with pytest.raises(ValueError, match="not a run id"):
+            await resolve_run_id(session, "ab")  # too short to be safe
+
+
+async def test_a_prefix_shared_by_two_runs_is_refused_rather_than_guessed():
+    engine = await _engine()
+    async with _maker(engine)() as session:
+        stock = Stock(
+            stock_id=uuid4(),
+            canonical_ticker="KO",
+            company_name="KO",
+            primary_exchange="NYSE",
+            currency="USD",
+        )
+        session.add(stock)
+        await session.commit()
+        for tail in ("1", "2"):
+            session.add(
+                AnalysisRun(
+                    run_id=UUID(f"abcd1234-0000-4000-8000-00000000000{tail}"),
+                    user_id=uuid4(),
+                    stock_id=stock.stock_id,
+                    account_type="tfsa",
+                    timeline="medium_term",
+                    triggered_by="cli",
+                    status="failed",
+                    llm_config={},
+                    triggered_at=_ago(10 + int(tail)),
+                )
+            )
+        await session.commit()
+        with pytest.raises(ValueError, match="matches 2 runs"):
+            await resolve_run_id(session, "abcd1234")
+        assert str(await resolve_run_id(session, "abcd1234-0000-4000-8000-000000000002")).endswith("2")
+
+
+# --- quality by prompt state (BB-045) ---------------------------------------------------
+
+
+async def _agent_run(engine, ticker, *, prompt_hash, code_hash="c0de00000001", minutes=60):
+    """A completed run whose tech agent used a template with `prompt_hash`."""
+    config = (
+        {"prompt_hashes": {"technical_analyst/v1.txt": prompt_hash}, "code_hash": code_hash}
+        if prompt_hash
+        else {}
+    )
+    return await _run(
+        engine,
+        ticker,
+        "completed",
+        triggered_min=minutes,
+        completed_min=minutes - 5,
+        llm_config=config,
+    )
+
+
+async def test_rejection_rates_are_split_by_the_agents_own_prompt_hash():
+    engine = await _engine()
+    old = await _agent_run(engine, "AAPL", prompt_hash="aaaaaaaaaaaa", minutes=90)
+    new = await _agent_run(engine, "MSFT", prompt_hash="bbbbbbbbbbbb", minutes=30)
+    # old prompt: 2 of 3 attempts rejected; new prompt: 0 of 2
+    await _call(engine, old, seq=1, attempt=1, site="agent:tech", validator_passed=False,
+                validator_errors=["key_factors[0].sentiment: must be positive|negative|neutral"])
+    await _call(engine, old, seq=2, attempt=2, site="agent:tech", validator_passed=False,
+                validator_errors=["key_factors[1].sentiment: must be positive|negative|neutral"])
+    await _call(engine, old, seq=3, attempt=3, site="agent:tech", validator_passed=True)
+    await _call(engine, new, seq=1, attempt=1, site="agent:tech", validator_passed=True)
+    await _call(engine, new, seq=2, attempt=1, site="agent:fund", validator_passed=True)
+
+    async with _maker(engine)() as session:
+        d = await prompt_comparison(session, NOW - timedelta(days=1))
+
+    tech = {g["prompt_hash"]: g for g in d["groups"] if g["agent"] == "tech"}
+    assert set(tech) == {"aaaaaaaaaaaa", "bbbbbbbbbbbb"}
+    assert (tech["aaaaaaaaaaaa"]["attempts"], tech["aaaaaaaaaaaa"]["rejected"]) == (3, 2)
+    assert round(tech["aaaaaaaaaaaa"]["rate"], 2) == 0.67
+    assert (tech["bbbbbbbbbbbb"]["attempts"], tech["bbbbbbbbbbbb"]["rejected"]) == (1, 0)
+    # the two sentiment errors are the same rule with a different index: counted together
+    assert tech["aaaaaaaaaaaa"]["top_reasons"][0][1] == 2
+    text = format_prompt_comparison(d)
+    assert "aaaaaaaaaaaa" in text and "67%" in text and "technical_analyst/v1.txt" in text
+
+
+async def test_runs_without_a_recorded_hash_fall_in_a_not_recorded_group_and_code_changes_are_flagged():
+    engine = await _engine()
+    unhashed = await _agent_run(engine, "AAPL", prompt_hash=None, minutes=90)
+    one = await _agent_run(engine, "MSFT", prompt_hash="bbbbbbbbbbbb", code_hash="c0de00000001")
+    two = await _agent_run(engine, "KO", prompt_hash="bbbbbbbbbbbb", code_hash="c0de00000002", minutes=20)
+    for run_id in (unhashed, one, two):
+        await _call(engine, run_id, seq=1, attempt=1, site="agent:tech", validator_passed=True)
+
+    async with _maker(engine)() as session:
+        d = await prompt_comparison(session, NOW - timedelta(days=1))
+    text = format_prompt_comparison(d)
+
+    hashes = {g["prompt_hash"]: g for g in d["groups"]}
+    assert hashes["not recorded"]["runs"] == 1
+    assert hashes["bbbbbbbbbbbb"]["runs"] == 2 and hashes["bbbbbbbbbbbb"]["code_states"] == 2
+    assert "CODE CHANGED across 2 states" in text
+
+
+async def test_the_comparison_ignores_the_window_before_since_and_non_agent_calls():
+    engine = await _engine()
+    run_id = await _agent_run(engine, "AAPL", prompt_hash="aaaaaaaaaaaa")
+    await _call(engine, run_id, seq=1, attempt=1, site="agent:tech", validator_passed=True,
+                minutes_ago=60 * 24 * 5)  # five days ago
+    await _call(engine, run_id, seq=2, attempt=1, site="precompute:sentiment", validator_passed=True)
+
+    async with _maker(engine)() as session:
+        d = await prompt_comparison(session, NOW - timedelta(days=1))
+
+    assert d["groups"] == []
+    assert "no agent attempts in this window" in format_prompt_comparison(d)
+
+
+def test_every_mapped_agent_template_is_a_real_prompt_file():
+    """The by-prompt view joins call sites to template files by this table; a renamed or
+    removed template would silently make its agent show as "not recorded" forever."""
+    from agents.prompts import prompt_fingerprints
+    from services.error_report import _AGENT_TEMPLATES
+
+    hashed = set(prompt_fingerprints()["files"])
+    missing = {site: path for site, path in _AGENT_TEMPLATES.items() if path not in hashed}
+    assert missing == {}

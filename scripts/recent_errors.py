@@ -4,6 +4,7 @@
     python scripts/recent_errors.py --since 24h     # 30m, 24h, 7d, 2w, or 2026-09-28
     python scripts/recent_errors.py --all           # include low-severity events
     python scripts/recent_errors.py --fail-stale    # end runs whose process died
+    python scripts/recent_errors.py --by-prompt     # rejection rate per agent per prompt version
 
 Prints a health verdict, then the failures grouped by fingerprint (how many
 times, in how many runs, first and last seen, which tickers, and whether this
@@ -30,19 +31,25 @@ import sys
 import _bootstrap  # noqa: F401  (UTF-8 console, sys.path, table imports; must come first)
 from api.database import AsyncSessionLocal
 from services.error_report import (
+    format_prompt_comparison,
     format_recent_errors,
     parse_since,
+    prompt_comparison,
     recent_errors,
 )
 from services.run_liveness import end_stale_runs
 
 
-async def _main(since_text: str, include_low: bool, fail_stale: bool) -> int:
+async def _main(since_text: str, include_low: bool, fail_stale: bool, by_prompt: bool) -> int:
     try:
         since = parse_since(since_text)
     except ValueError as exc:
         print(f"Error: {exc}")
         return 2
+    if by_prompt:
+        async with AsyncSessionLocal() as session:
+            print(format_prompt_comparison(await prompt_comparison(session, since)))
+        return 0
     async with AsyncSessionLocal() as session:
         if fail_stale:
             ended = await end_stale_runs(session.bind)
@@ -69,8 +76,14 @@ def main() -> None:
     )
     parser.add_argument("--all", action="store_true", help="include low-severity events")
     parser.add_argument("--fail-stale", action="store_true", help="end runs that have gone quiet")
+    parser.add_argument(
+        "--by-prompt",
+        action="store_true",
+        help="instead of the error report, show each agent's rejection rate split by the hash "
+        "of its own prompt template (a prompt-fix before and after)",
+    )
     args = parser.parse_args()
-    sys.exit(asyncio.run(_main(args.since, args.all, args.fail_stale)))
+    sys.exit(asyncio.run(_main(args.since, args.all, args.fail_stale, args.by_prompt)))
 
 
 if __name__ == "__main__":

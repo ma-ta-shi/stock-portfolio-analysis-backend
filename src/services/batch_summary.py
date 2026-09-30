@@ -63,12 +63,29 @@ async def describe_run(session, run_id: UUID) -> dict:
         "ticker": run["ticker"],
         "outcome": d["verdict"]["outcome"],
         "headline": d["verdict"]["headline"],
+        "prompts": run["prompts_hash"],
+        "code": run["code_hash"],
         "errors": sum(1 for e in d["errors"] if e["severity"] != "low"),
         "retries": quality.get("retry_calls"),
         "seconds": seconds,
         "outlook": None if recommendation is None else recommendation.stock_outlook_direction,
         "confidence": None if recommendation is None else recommendation.overall_confidence,
     }
+
+
+def _state_line(label: str, noun: str, key: str, rows: list[dict]) -> str | None:
+    """One line saying whether every run in the batch used the same `key` state (a prompt
+    hash or a code hash), or that the batch mixed states, or that none were recorded."""
+    states = sorted({r[key] for r in rows if r.get(key)})
+    unrecorded = sum(1 for r in rows if r.get("run_id") and not r.get(key))
+    if len(states) == 1 and not unrecorded:
+        return f"{label}: every run used {noun} state {states[0]}"
+    if not states and unrecorded:
+        return f"{label}: not recorded for these runs (they predate it)"
+    if states:
+        mixed = ", ".join(states) + (f" and {unrecorded} with none recorded" if unrecorded else "")
+        return f"{label}: this batch mixes {noun} states ({mixed}): compare runs only within one state"
+    return None
 
 
 def format_batch_summary(rows: list[dict]) -> str:
@@ -93,6 +110,12 @@ def format_batch_summary(rows: list[dict]) -> str:
         parts.append(f"{other} other")
     out.append("")
     out.append("TOTALS: " + (", ".join(parts) if parts else "no runs"))
+    # Which prompt text and which code each run used. Both are edited in place, so a batch
+    # that spans an edit mixes two states and must not be compared as one.
+    for label, noun, key in (("PROMPTS", "prompt", "prompts"), ("CODE", "code", "code")):
+        line = _state_line(label, noun, key, rows)
+        if line:
+            out.append(line)
     if not rows:
         verdict = "VERDICT: ATTENTION - nothing ran"
     elif counts[OK] == len(rows):

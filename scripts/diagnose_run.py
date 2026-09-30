@@ -20,15 +20,19 @@ Base.metadata.create_all against the real app.db at import time.
 import argparse
 import asyncio
 import sys
-from uuid import UUID
 
 import _bootstrap  # noqa: F401  (UTF-8 console, sys.path, table imports; must come first)
 from api.database import AsyncSessionLocal
-from services.error_report import diagnose_run, format_diagnosis
+from services.error_report import diagnose_run, format_diagnosis, resolve_run_id
 
 
-async def _main(run_id: UUID) -> int:
+async def _main(run_text: str) -> int:
     async with AsyncSessionLocal() as session:
+        try:
+            run_id = await resolve_run_id(session, run_text)
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 2
         diagnosis = await diagnose_run(session, run_id)
     if diagnosis is None:
         print(f"No analysis_runs row for run_id={run_id}")
@@ -41,7 +45,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawTextHelpFormatter
     )
-    parser.add_argument("run_id", type=UUID)
+    parser.add_argument("run_id", help="the full run id, or a unique prefix (e.g. the 8 characters the batch table prints)")
     args = parser.parse_args()
     sys.exit(asyncio.run(_main(args.run_id)))
 

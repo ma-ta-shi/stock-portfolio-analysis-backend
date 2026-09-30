@@ -132,6 +132,13 @@ def is_canadian(stock: StockLike | None = None, *, ticker: str | None = None) ->
     raise ValueError("is_canadian() needs either a stock or a ticker")
 
 
+def _symbol_context(args: tuple) -> dict | None:
+    """The symbol a chain call was made for (every Router getter takes it first), so a
+    recorded failure says WHICH ticker: a peer's call and the stock's own call otherwise
+    look identical (ledger BB-041). None when the first argument is not a symbol."""
+    return {"symbol": args[0]} if args and isinstance(args[0], str) else None
+
+
 def _is_empty(value: Any) -> bool:
     """Generalized from us_equity.py — the proven "is this missing" check,
     dict/list/DataFrame-aware.
@@ -352,12 +359,16 @@ class Router(StockDataProvider, NewsProvider):
                 continue
             except RuntimeError as e:
                 if "401" in str(e):
-                    report_degradation(key, method_name, AUTH_FAILED, str(e), exc=e)
+                    report_degradation(
+                        key, method_name, AUTH_FAILED, str(e), exc=e, context=_symbol_context(args)
+                    )
                     raise
                 logger.warning(
                     "router_chain_call_failed", method=method_name, provider=key, error=str(e)
                 )
-                report_degradation(key, method_name, LINK_FAILED, str(e), exc=e)
+                report_degradation(
+                    key, method_name, LINK_FAILED, str(e), exc=e, context=_symbol_context(args)
+                )
                 raised_links.append(key)
                 result = None
                 continue
@@ -365,7 +376,9 @@ class Router(StockDataProvider, NewsProvider):
                 logger.warning(
                     "router_chain_call_failed", method=method_name, provider=key, exc_info=True
                 )
-                report_degradation(key, method_name, LINK_FAILED, str(e), exc=e)
+                report_degradation(
+                    key, method_name, LINK_FAILED, str(e), exc=e, context=_symbol_context(args)
+                )
                 raised_links.append(key)
                 result = None
                 continue
@@ -383,6 +396,7 @@ class Router(StockDataProvider, NewsProvider):
                 method_name,
                 EMPTY_AFTER_FAILURE,
                 "no provider produced data and at least one raised",
+                context=_symbol_context(args),
             )
         return result, None
 
@@ -508,7 +522,14 @@ class Router(StockDataProvider, NewsProvider):
             logger.warning(
                 "ca_news_merge_failed", ticker=ticker, us_ticker=us_ticker, exc_info=True
             )
-            report_degradation("finnhub", "get_news_crosslisted_us", LINK_FAILED, str(e), exc=e)
+            report_degradation(
+                "finnhub",
+                "get_news_crosslisted_us",
+                LINK_FAILED,
+                str(e),
+                exc=e,
+                context={"symbol": us_ticker},
+            )
             return ca_articles
         return _merge_ca_us_news(ca_articles, us_articles)
 

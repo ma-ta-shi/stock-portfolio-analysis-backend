@@ -523,3 +523,44 @@ async def test_an_empty_filing_section_is_not_a_degradation(collector):
         await summarize_filing_section(_FakeSession(_FakeResponse(200, {})), "   ", "MDA") is None
     )
     assert collector.drain() == []
+
+
+# --- which symbol an event was for (ledger BB-041) ------------------------------------
+
+
+def test_symbols_accumulate_on_one_deduplicated_event_without_a_lone_symbol_key():
+    c = DegradationCollector()
+    for symbol in ("WMT", "PEP", "WMT", "KO"):
+        c.record("finnhub", "get_news", LINK_FAILED, "boom", context={"symbol": symbol})
+    (event,) = c.drain()
+
+    assert event.count == 4
+    assert event.context["symbols"] == ["WMT", "PEP", "KO"]  # distinct, in first-seen order
+    assert "symbol" not in event.context
+
+
+def test_the_symbol_list_is_capped():
+    c = DegradationCollector()
+    for i in range(25):
+        c.record("finnhub", "get_news", LINK_FAILED, "boom", context={"symbol": f"T{i}"})
+    (event,) = c.drain()
+    assert len(event.context["symbols"]) == 10 and event.count == 25
+
+
+def test_an_event_with_no_symbol_has_no_symbols_key():
+    c = DegradationCollector()
+    c.record("fred", "get_macro_data", LINK_FAILED, "boom", context={"series": "CPIAUCSL"})
+    (event,) = c.drain()
+    assert event.context == {"series": "CPIAUCSL"}
+
+
+@pytest.mark.asyncio
+async def test_router_events_say_which_ticker_the_failed_call_was_for(collector):
+    """A peer's failed news call and the stock's own call looked identical before."""
+    router, first, second = _us_quote_router(_raises(RuntimeError("boom")), _ok({}))
+
+    assert await router.get_quote("PEP") == {}  # every link empty, one of them raised
+
+    events = {e.kind: e for e in collector.drain()}
+    assert events[LINK_FAILED].context["symbols"] == ["PEP"]
+    assert events[EMPTY_AFTER_FAILURE].context["symbols"] == ["PEP"]
