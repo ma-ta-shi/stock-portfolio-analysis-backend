@@ -26,19 +26,15 @@ class _FakeFred:
 
 
 class _FakeBoc:
-    def __init__(self, bond_series=None, rates=None, fx=None):
+    def __init__(self, bond_series=None, rates=None):
         self._bond_series = bond_series or {}
         self._rates = rates if rates is not None else {"overnight_rate": 4.5}
-        self._fx = fx if fx is not None else {"pair": "CADUSD", "rate": 0.73}
 
     async def get_macro_data(self, series_ids):
         return {sid: self._bond_series.get(sid, pd.Series(dtype="float64")) for sid in series_ids}
 
     async def get_interest_rates(self):
         return self._rates
-
-    async def get_exchange_rates(self, pair="CADUSD"):
-        return self._fx
 
 
 class _FakeFinnhub:
@@ -84,7 +80,7 @@ class _FakeStatsCanada:
 
 def _full_fred_series() -> dict[str, pd.Series]:
     return {
-        "FEDFUNDS": _series({90: 5.00, 0: 5.25}),
+        "DFF": _series({90: 5.00, 0: 5.25}),
         "DGS2": _series({0: 4.25}),
         "DGS5": _series({0: 4.40}),
         "DGS10": _series({0: 4.70}),
@@ -106,6 +102,8 @@ def _full_boc_series() -> dict[str, pd.Series]:
         "BD.CDN.5YR.DQ.YLD": _series({0: 3.6}),
         "BD.CDN.10YR.DQ.YLD": _series({0: 3.8}),
         "V39079": _series({90: 4.75, 0: 4.25}),  # BoC overnight rate, -50bp over 90d
+        # CAD per USD: 1.40 -> 1.35 over 90d = the CAD got stronger (USD per CAD 0.7143 -> 0.7407)
+        "FXUSDCAD": _series({90: 1.40, 0: 1.35}),
     }
 
 
@@ -138,14 +136,14 @@ async def test_full_construction_with_all_series_present():
     bundle = await _compute()
     assert bundle.fed_funds_rate == 5.25
     assert bundle.boc_rate == 4.5
-    assert bundle.cad_usd == 0.73
+    assert bundle.cad_usd == pytest.approx(0.7407, abs=0.0001)  # 1 / 1.35
     assert bundle.canada_bond_10y == 3.8
     assert bundle.canada_cpi is None  # StatsCanada-sourced now; no provider passed here
 
 
 @pytest.mark.asyncio
 async def test_policy_rate_delta_computed_in_basis_points():
-    """FEDFUNDS moved 5.00 -> 5.25 over 90 days = +25bp."""
+    """DFF moved 5.00 -> 5.25 over 90 days = +25bp."""
     bundle = await _compute()
     assert bundle.policy_rate_90d_delta_bp == 25.0
     assert bundle.rate_trend == "tightening"
@@ -153,7 +151,8 @@ async def test_policy_rate_delta_computed_in_basis_points():
 
 @pytest.mark.asyncio
 async def test_cad_usd_change_computed_as_pct_not_point_delta():
-    """1.35 -> 1.40 over 90 days = +3.70% (not +0.05)."""
+    """USD per CAD 0.7143 -> 0.7407 over 90 days = +3.70% (not +0.03), and a rising
+    CAD/USD is a STRONGER CAD. BoC quotes CAD per USD (1.40 -> 1.35), which falls."""
     bundle = await _compute()
     assert bundle.cad_usd_90d_change_pct == pytest.approx(3.70, abs=0.01)
     assert bundle.cad_trend == "cad_strengthening"
@@ -205,9 +204,9 @@ async def test_us_and_boc_derived_fields_populated():
 
 @pytest.mark.asyncio
 async def test_missing_series_degrades_the_whole_dependent_chain_to_none():
-    """No FEDFUNDS data -> fed_funds_rate, its delta, its trend, and its
+    """No DFF data -> fed_funds_rate, its delta, its trend, and its
     age all fall back to None instead of raising."""
-    fred = _FakeFred({k: v for k, v in _full_fred_series().items() if k != "FEDFUNDS"})
+    fred = _FakeFred({k: v for k, v in _full_fred_series().items() if k != "DFF"})
     bundle = await _compute(fred=fred)
     assert bundle.fed_funds_rate is None
     assert bundle.policy_rate_90d_delta_bp is None
@@ -241,7 +240,7 @@ async def test_missing_us_10y_treasury_makes_bond_yields_available_false():
 
 @pytest.mark.asyncio
 async def test_totally_empty_fred_and_boc_still_constructs():
-    bundle = await _compute(fred=_FakeFred({}), boc=_FakeBoc({}, rates={}, fx={"pair": "CADUSD"}))
+    bundle = await _compute(fred=_FakeFred({}), boc=_FakeBoc({}, rates={}))
     assert bundle.fed_funds_rate is None
     assert bundle.boc_rate is None
     assert bundle.cad_usd is None
@@ -275,7 +274,7 @@ async def test_us_gdp_yoy_none_when_under_five_quarters_but_qoq_still_computes()
 async def test_delta_is_none_when_only_the_latest_point_exists_no_lookback():
     """A series with just one recent point has nothing 90 days back —
     latest value still resolves, but the delta/trend don't."""
-    fred = _FakeFred({**_full_fred_series(), "FEDFUNDS": _series({0: 5.25})})
+    fred = _FakeFred({**_full_fred_series(), "DFF": _series({0: 5.25})})
     bundle = await _compute(fred=fred)
     assert bundle.fed_funds_rate == 5.25
     assert bundle.policy_rate_90d_delta_bp is None
@@ -334,7 +333,7 @@ def test_yoy_pct_latest_none_on_empty_series():
 @pytest.mark.asyncio
 async def test_rate_trend_thresholds(delta_bp, expected):
     fred = _FakeFred(
-        {**_full_fred_series(), "FEDFUNDS": _series({90: 5.00, 0: 5.00 + delta_bp / 100})}
+        {**_full_fred_series(), "DFF": _series({90: 5.00, 0: 5.00 + delta_bp / 100})}
     )
     bundle = await _compute(fred=fred)
     assert bundle.rate_trend == expected
@@ -639,7 +638,7 @@ async def test_latest_value_is_correct_even_if_the_provider_returns_unsorted_dat
             [pd.Timestamp(_AS_OF.date()), pd.Timestamp(_AS_OF.date()) - pd.Timedelta(days=90)]
         ),
     )
-    fred = _FakeFred({**_full_fred_series(), "FEDFUNDS": out_of_order})
+    fred = _FakeFred({**_full_fred_series(), "DFF": out_of_order})
     bundle = await _compute(fred=fred)
     assert bundle.fed_funds_rate == 5.25
     assert bundle.policy_rate_90d_delta_bp == 25.0
@@ -787,3 +786,126 @@ async def test_a_healthy_macro_computation_reports_nothing(collector):
     )
     await _compute(is_canadian_stock=True, stats_canada=stats_canada)
     assert collector.drain() == []
+
+
+# ---------- ages from period end, and the daily policy rate (BB-001, BB-062) ----------
+
+
+def _dated(**points):
+    return pd.Series(
+        list(points.values()),
+        index=pd.to_datetime([k.replace("_", "-") for k in points]),
+        dtype="float64",
+    )
+
+
+@pytest.mark.parametrize(
+    "as_of, expected",
+    [
+        (date(2026, 9, 30), 30),  # August data, a month after it ended: NOT stale
+        (date(2026, 10, 14), 44),  # just before September's release: still normal
+        (date(2026, 8, 20), 0),  # a period that has not ended counts as age 0
+    ],
+)
+def test_a_monthly_value_ages_from_the_end_of_its_month(as_of, expected):
+    from data.precompute.macro_sources import _period_end_age_days
+
+    assert _period_end_age_days(_dated(**{"2026_08_01": 4.1}), as_of, "monthly") == expected
+
+
+def test_a_quarterly_value_ages_from_the_end_of_its_quarter():
+    from data.precompute.macro_sources import _period_end_age_days
+
+    q2 = _dated(**{"2026_04_01": 24000.0})
+    assert _period_end_age_days(q2, date(2026, 9, 30), "quarterly") == 92
+    assert _period_end_age_days(pd.Series(dtype="float64"), date(2026, 9, 30), "quarterly") is None
+
+
+@pytest.mark.asyncio
+async def test_cpi_unemployment_and_gdp_ages_are_measured_from_period_end():
+    """The live case: FRED's newest CPI/unemployment are dated 2026-08-01 and GDP
+    2026-04-01. From those dates they were 60d and 182d old and flagged stale on every
+    run; from period end they are 30d and 92d, inside the 55d / 130d limits."""
+    series = {
+        **_full_fred_series(),
+        "CPIAUCSL": _dated(**{"2025_08_01": 300.0, "2026_08_01": 310.0}),
+        "UNRATE": _dated(**{"2026_08_01": 4.1}),
+        "GDP": _dated(**{"2026_04_01": 32486.0}),
+        "GDPC1": _dated(**{"2026_04_01": 24269.0}),
+    }
+    bundle = await compute_macro_sources(
+        sector=None,
+        is_canadian_stock=False,
+        timeline="medium_term",
+        fred=_FakeFred(series),
+        boc=_FakeBoc(_full_boc_series()),
+        finnhub=_FakeFinnhub(),
+        as_of=datetime(2026, 9, 30, tzinfo=UTC),
+    )
+    assert (bundle.cpi_age_days, bundle.unemployment_age_days, bundle.gdp_age_days) == (30, 30, 92)
+
+
+def test_the_policy_rate_comes_from_the_daily_series():
+    from data.precompute.macro_sources import _FRED_SERIES
+
+    assert _FRED_SERIES["fed_funds_rate"] == "DFF"
+
+
+# ---------- FX: one BoC series, CAD/USD = USD per CAD (BB-063) ----------
+
+
+@pytest.mark.asyncio
+async def test_a_weakening_cad_is_reported_as_weakening():
+    """BoC CAD-per-USD rises 1.35 -> 1.45: the CAD lost value. That used to read as
+    'cad_strengthening' because the change was taken from the CAD-per-USD series."""
+    boc = _FakeBoc({**_full_boc_series(), "FXUSDCAD": _series({90: 1.35, 0: 1.45})})
+    bundle = await _compute(boc=boc)
+    assert bundle.cad_usd == pytest.approx(0.6897, abs=0.0001)
+    assert bundle.cad_usd_90d_change_pct == pytest.approx(-6.90, abs=0.02)
+    assert bundle.cad_trend == "cad_weakening"
+
+
+@pytest.mark.asyncio
+async def test_fx_age_comes_from_the_boc_series_not_the_weekly_fred_one():
+    fred = _FakeFred({**_full_fred_series(), "DEXCAUS": _series({10: 1.40})})
+    boc = _FakeBoc({**_full_boc_series(), "FXUSDCAD": _series({1: 1.35})})
+    bundle = await _compute(fred=fred, boc=boc)
+    assert bundle.cad_usd_age_days == 1
+    assert bundle.cad_usd_fred == 1.40  # the FRED value is still reported, just not used for age
+
+
+@pytest.mark.asyncio
+async def test_missing_boc_fx_series_leaves_the_fx_fields_empty():
+    boc = _FakeBoc({k: v for k, v in _full_boc_series().items() if k != "FXUSDCAD"})
+    bundle = await _compute(boc=boc)
+    assert (bundle.cad_usd, bundle.cad_usd_90d_change_pct, bundle.cad_trend) == (None, None, None)
+    assert bundle.cad_usd_age_days is None
+
+
+@pytest.mark.asyncio
+async def test_a_us_basic_materials_stock_gets_the_copper_data():
+    """yfinance calls the sector "Basic Materials"; the lookup used to match only
+    "Materials", so US mining and chemicals stocks silently had no commodity data."""
+    fred = _FakeFred({**_full_fred_series(), "PCOPPUSDM": _series({0: 4.2})})
+    bundle = await _compute(sector="Basic Materials", fred=fred)
+    assert bundle.sector_commodity_relevant is True
+    assert bundle.sector_commodity_name == "Copper"
+
+
+@pytest.mark.asyncio
+async def test_copper_ages_from_the_end_of_its_month_and_oil_from_its_observation_date():
+    """PCOPPUSDM is monthly (dated by month start); DCOILWTICO is a daily observation."""
+    copper = _dated(**{"2026_07_01": 4.2, "2026_04_01": 4.0})
+    oil = _dated(**{"2026_09_22": 96.4, "2026_06_24": 70.0})
+    fred = _FakeFred({**_full_fred_series(), "PCOPPUSDM": copper, "DCOILWTICO": oil})
+    as_of = datetime(2026, 9, 30, tzinfo=UTC)
+
+    async def age(sector):
+        bundle = await compute_macro_sources(
+            sector=sector, is_canadian_stock=False, timeline="medium_term",
+            fred=fred, boc=_FakeBoc(_full_boc_series()), finnhub=_FakeFinnhub(), as_of=as_of,
+        )
+        return bundle.sector_commodity_age_days
+
+    assert await age("Basic Materials") == 61  # Jul 31 -> Sep 30
+    assert await age("Energy") == 8  # Sep 22 -> Sep 30

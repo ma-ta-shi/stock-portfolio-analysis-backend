@@ -21,8 +21,8 @@ MacroSourcesBundle dataclass, and financial-data-api-research.md):
   (wrong shape, stale since 2024-02) and is no longer fetched at all.
 - The ticket's (a) list groups FXCADUSD under "FRED:", but
   financial-data-api-research.md §7 lists FXCADUSD as a Bank of Canada
-  Valet series, and boc.py's get_exchange_rates() already uses it (via
-  FXUSDCAD inverted) for the contract's cad_usd field. cad_usd_fred
+  Valet series; cad_usd, its 90-day change and its age all come from
+  BoC's FXUSDCAD (inverted, see _BOC_FX_SERIES). cad_usd_fred
   instead uses FRED's DEXCAUS (live-verified 2026-08-07), which the
   ticket doesn't name at all — an omission in the other direction.
 - usd_revenue_exposure_pct has no wired-up data source anywhere in the
@@ -77,11 +77,16 @@ from data.providers.fred import FredMacroDataProvider
 from data.providers.stats_canada import StatsCanadaProvider
 from data.schemas.common import CBCommentaryItem
 from data.schemas.macro_sources_bundle import MacroSourcesBundle
+from data.sector_names import normalize_sector
 
 logger = structlog.get_logger(__name__)
 
 _FRED_SERIES = {
-    "fed_funds_rate": "FEDFUNDS",
+    # DFF is the DAILY effective rate. FEDFUNDS is the same rate averaged by month,
+    # dated by month start and published in the next month, so it showed August's 3.63%
+    # while DFF showed 3.88% (bug bash BB-062): a month behind on a rate that moves at
+    # meetings.
+    "fed_funds_rate": "DFF",
     "treasury_2y": "DGS2",
     "treasury_5y": "DGS5",
     "treasury_10y": "DGS10",
@@ -105,6 +110,14 @@ _BOC_BOND_SERIES = {
 # the latest) for the 90-day delta (86bbq8rj1). boc.get_macro_data was
 # widened to recent=200 so this lookback resolves.
 _BOC_OVERNIGHT_RATE_SERIES = "V39079"
+
+# BoC's daily exchange rate, in CAD per 1 USD (about 1.4). The CAD/USD level, its 90-day
+# change, the trend and the age are all derived from this ONE series, so they cannot
+# disagree. Convention: CAD/USD = USD per 1 CAD (0.70), so a rise means the CAD got
+# STRONGER, which is what the `cad_strengthening` trend value says. The change used to
+# come from FRED's DEXCAUS, which is CAD per USD (a rise = CAD weaker), so the trend had
+# the opposite sign (BB-063).
+_BOC_FX_SERIES = "FXUSDCAD"
 
 # sector (lowercased GICS name) -> (display name, FRED series id)
 _SECTOR_COMMODITY = {
@@ -170,6 +183,30 @@ def _latest_age_days(series: pd.Series, as_of: date) -> int | None:
     if hasattr(latest_date, "date"):
         latest_date = latest_date.date()
     return (as_of - latest_date).days
+
+
+def _period_end_age_days(
+    series: pd.Series, as_of: date, cadence: Literal["monthly", "quarterly"]
+) -> int | None:
+    """Age of the newest observation measured from the END of the period it describes.
+    FRED dates a monthly or quarterly value by the period's START (August CPI is
+    2026-08-01, Q2 GDP is 2026-04-01), so age-from-that-date is always a month or a
+    quarter too large and made every run look stale (BB-001). Never negative: a
+    period that has not ended yet counts as age 0."""
+    dropped = _sorted_dropna(series)
+    if dropped.empty:
+        return None
+    start = pd.Timestamp(dropped.index[-1])
+    offset = pd.offsets.MonthEnd(0) if cadence == "monthly" else pd.offsets.QuarterEnd(0)
+    period_end = (start + offset).date()
+    return max(0, (as_of - period_end).days)
+
+
+def _usd_per_cad(cad_per_usd: pd.Series) -> pd.Series:
+    """Invert a CAD-per-USD series into USD per CAD, dropping missing and non-positive
+    points (nothing to invert)."""
+    cleaned = _sorted_dropna(cad_per_usd)
+    return 1.0 / cleaned[cleaned > 0]
 
 
 def _value_n_days_ago(series: pd.Series, as_of: date, days: int) -> float | None:
@@ -259,7 +296,7 @@ def _yoy_pct_latest(series: pd.Series, as_of: date) -> float | None:
 
 def _policy_rate_delta_bp(policy_rate: pd.Series, as_of: date) -> float | None:
     """90-day change in a central-bank policy rate, in basis points.
-    Generic — used for both FEDFUNDS and the BoC overnight rate (V39079)."""
+    Generic — used for both DFF and the BoC overnight rate (V39079)."""
     delta_pp = _point_delta(policy_rate, as_of, 90)
     if delta_pp is None:
         return None
@@ -397,7 +434,9 @@ async def _resolve_sector_commodity(
     4-row) lookup table — matches MacroSourcesBundle's
     _check_sector_commodity_nulls validator, which requires exactly that
     combination for sector_commodity_relevant=False."""
-    normalized = (sector or "").strip().lower()
+    # Provider spellings differ ("Basic Materials" from yfinance, "Materials" from TMX),
+    # so look up by the canonical name, not the raw string.
+    normalized = (normalize_sector(sector) or "").lower()
     commodity = _SECTOR_COMMODITY.get(normalized)
     if commodity is None:
         return {
@@ -420,7 +459,13 @@ async def _resolve_sector_commodity(
         "sector_commodity_name": name,
         "sector_commodity_level": _latest_value(series),
         "sector_commodity_direction": direction,
-        "sector_commodity_age_days": _latest_age_days(series, as_of),
+        # Copper (IMF) is a monthly series dated by month start, so it ages from month end
+        # like CPI; the EIA oil and gas series are daily observations.
+        "sector_commodity_age_days": (
+            _period_end_age_days(series, as_of, "monthly")
+            if series_id == "PCOPPUSDM"
+            else _latest_age_days(series, as_of)
+        ),
         "commodity_90d_change_pct": change_pct,
     }
 
@@ -631,9 +676,10 @@ async def compute_macro_sources(
     as_of_date = as_of_dt.date()
 
     fred_series = await fred.get_macro_data(list(_FRED_SERIES.values()))
-    boc_series = await boc.get_macro_data([*_BOC_BOND_SERIES.values(), _BOC_OVERNIGHT_RATE_SERIES])
+    boc_series = await boc.get_macro_data(
+        [*_BOC_BOND_SERIES.values(), _BOC_OVERNIGHT_RATE_SERIES, _BOC_FX_SERIES]
+    )
     boc_rates = await boc.get_interest_rates()
-    boc_fx = await boc.get_exchange_rates("CADUSD")
 
     def fred_series_for(field: str) -> pd.Series:
         return fred_series.get(_FRED_SERIES[field], pd.Series(dtype="float64"))
@@ -663,7 +709,8 @@ async def compute_macro_sources(
     us_cpi_yoy = _yoy_pct_latest(cpi_series, as_of_date)
     us_core_cpi_yoy = _yoy_pct_latest(core_cpi_series, as_of_date)
     us_gdp_growth = _real_gdp_growth(gdp_real_series, as_of_date)
-    cad_change_pct = _pct_change(cad_usd_fred_series, as_of_date, 90)
+    cad_usd_series = _usd_per_cad(boc_series.get(_BOC_FX_SERIES, pd.Series(dtype="float64")))
+    cad_change_pct = _pct_change(cad_usd_series, as_of_date, 90)
     unemployment_delta = _point_delta(unemployment_series, as_of_date, 180)  # ~6 months
     latest_vix = _latest_value(vix_series)
     vix_30d_avg = _rolling_avg(vix_series, as_of_date, 30)
@@ -696,7 +743,7 @@ async def compute_macro_sources(
         cad_usd_fred=_latest_value(cad_usd_fred_series),
         wti_crude=_latest_value(fred_series_for("wti_crude")),
         boc_rate=boc_rates.get("overnight_rate"),
-        cad_usd=boc_fx.get("rate"),
+        cad_usd=_latest_value(cad_usd_series),
         canada_bond_2y=canada_bond_2y,
         canada_bond_5y=_latest_value(boc_series_for("canada_bond_5y")),
         canada_bond_10y=canada_bond_10y,
@@ -735,13 +782,13 @@ async def compute_macro_sources(
         cb_commentary_count=len(cb_items),
         cb_stance_note=cb_stance_note,
         policy_rate_age_days=_latest_age_days(fed_funds_series, as_of_date),
-        cpi_age_days=_latest_age_days(cpi_series, as_of_date),
+        cpi_age_days=_period_end_age_days(cpi_series, as_of_date, "monthly"),
         # tracks nominal GDP; also the freshness proxy for us_gdp_qoq/
         # us_gdp_4q_trend (GDPC1) — the BEA co-releases nominal and real
         # GDP on the same schedule.
-        gdp_age_days=_latest_age_days(gdp_series, as_of_date),
-        unemployment_age_days=_latest_age_days(unemployment_series, as_of_date),
-        cad_usd_age_days=_latest_age_days(cad_usd_fred_series, as_of_date),
+        gdp_age_days=_period_end_age_days(gdp_series, as_of_date, "quarterly"),
+        unemployment_age_days=_period_end_age_days(unemployment_series, as_of_date, "monthly"),
+        cad_usd_age_days=_latest_age_days(cad_usd_series, as_of_date),
         vix_age_days=_latest_age_days(vix_series, as_of_date),
         **statcan_fields,
     )

@@ -82,6 +82,7 @@ values.
 from functools import partial
 
 from agents.base import BaseRunner
+from agents.macro_hints import currency_exposure_hint, sector_macro_hint
 from agents.prompts import fill, load_template
 from agents.utils import (
     compute_data_quality_assessment,
@@ -106,9 +107,22 @@ _COVERAGE_GAP_SENTENCES = {
     "statcan": "no Statistics Canada demand indicator data available",
 }
 
-_STALE_DAILY_DAYS = 7        # policy rate, FX, VIX, commodities -- real market/daily series
-_STALE_MONTHLY_DAYS = 45     # CPI, unemployment, StatCan -- survives a normal ~30d release lag
-_STALE_QUARTERLY_DAYS = 100  # GDP -- survives a normal ~90d release lag
+# Monthly and quarterly ages are measured from the END of the period the value describes
+# (see macro_sources._period_end_age_days), not from FRED's period-start date. Limits come
+# from FRED's measured first-release lag since 2022 (CPI 10-48d, unemployment 1-51d, GDP
+# advance 25-84d): just before the next release the newest value is ~45d (monthly) or
+# ~120d (quarterly) past its period end, so past 55 / 130 a release really was missed.
+_STALE_DAILY_DAYS = 7        # policy rate (DFF), FX, VIX -- daily series
+_STALE_MONTHLY_DAYS = 55     # CPI, unemployment
+_STALE_QUARTERLY_DAYS = 130  # GDP
+_STALE_STATCAN_DAYS = 45     # StatCan age is time since RELEASE, not since period end
+
+# Sector commodities are not real-time. FRED's EIA oil and gas series post about a week
+# late (measured first-release lag since late 2024: median 6d, 90th percentile 8d, max
+# 13-14d), so the 7-day daily limit flagged them about half the time. Copper is monthly
+# (IMF; newest value is normally 1-2 months behind, measured 90th percentile ~74d).
+_STALE_COMMODITY_DAYS = {"WTI Crude Oil": 14, "Natural Gas": 14, "Copper": 90}
+_STALE_COMMODITY_DEFAULT_DAYS = 14
 
 # series -> MacroSourcesBundle age field, for the always-applicable series
 # (commodities/statcan are conditional -- handled separately below).
@@ -141,13 +155,14 @@ def _stale_data(bundle: DataBundle) -> list[str]:
     if (
         m.sector_commodity_relevant
         and m.sector_commodity_age_days is not None
-        and m.sector_commodity_age_days > _STALE_DAILY_DAYS
+        and m.sector_commodity_age_days
+        > _STALE_COMMODITY_DAYS.get(m.sector_commodity_name, _STALE_COMMODITY_DEFAULT_DAYS)
     ):
         stale.append("commodities")
     if (
         bundle.canadian_data_flags is not None
         and m.statcan_age_days is not None
-        and m.statcan_age_days > _STALE_MONTHLY_DAYS
+        and m.statcan_age_days > _STALE_STATCAN_DAYS
     ):
         stale.append("statcan")
     return stale
@@ -248,7 +263,7 @@ def _employ_block(m: MacroSourcesBundle, is_ca: bool) -> str:
 
 def _fx_block(m: MacroSourcesBundle, currency: str, exchange: str) -> str:
     return (
-        f"  USD/CAD: {_fmt(m.cad_usd)} | Trend: {_fmt(m.cad_trend)} | 90d change: {_fmt(m.cad_usd_90d_change_pct, '%')}\n"
+        f"  CAD/USD (USD per 1 CAD): {_fmt(m.cad_usd)} | Trend: {_fmt(m.cad_trend)} | 90d change: {_fmt(m.cad_usd_90d_change_pct, '%')}\n"
         f"  Stock currency: {currency} | Listed: {exchange}"
     )
 
@@ -409,8 +424,10 @@ class MacroEconomistRunner(BaseRunner):
                 "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
                 "memory_brief": "",
                 "accuracy_brief": "",
-                "currency_exposure_hint": "",
-                "sector_macro_hint": "",
+                "currency_exposure_hint": currency_exposure_hint(
+                    bundle.canadian_data_flags is not None
+                ),
+                "sector_macro_hint": sector_macro_hint(bundle.company_info.get("sector")),
             },
         )
         return await self.call_with_validation(
