@@ -256,6 +256,27 @@ def compute_effective_after_tax_yield(
     return round(yield_pct - drag, 1), round(drag, 1)
 
 
+def build_alternatives_line(dividend_classification: str, yield_pct: float | None) -> str | None:
+    """The same holding's withholding drag in each account, straight from WHT_GRID
+    (yield x grid rate, the same measure as the `WHT: annual tax drag` line), so the
+    cross-account comparison the prompt's rules 4 and 6 ask for is arithmetic on
+    numbers the agent is given instead of a look-up it must do from prose. Each
+    account carries the grid's own note verbatim; no new tax logic (no dividend-tax-
+    credit or foreign-tax-credit maths). None when there is no dividend or fewer than
+    two accounts are modelled -- there is nothing to compare."""
+    if yield_pct is None:
+        return None
+    parts = []
+    for account in ("tfsa", "rrsp", "trading"):
+        entry = resolve_withholding(dividend_classification, account)
+        if entry is not None:
+            rate, note = entry
+            parts.append(f"{account} {yield_pct * rate / 100:.1f}% ({note})")
+    if len(parts) < 2:
+        return None
+    return "ALTERNATIVES (withholding drag on this dividend if held in): " + " | ".join(parts)
+
+
 # CGAIN_BY_ACCOUNT: quoted verbatim from the reference's own TFSA/RRSP/Taxable capital-gains
 # sections - account-keyed deliberately, not one shared line. An earlier draft (in the audit
 # rig this ported logic from) rendered one hardcoded taxable-account line for every account,
@@ -639,8 +660,11 @@ def build_precomputed_tax_metrics(
         yield_pct, wht[0] if wht is not None else None
     )
     if effective_yield is not None:
-        lines.append(f"Effective after-tax yield: {effective_yield:.1f}%")
-        lines.append(f"Annual tax drag: {drag:.1f}%")
+        lines.append(f"WHT: effective after-tax yield {effective_yield:.1f}%")
+        lines.append(f"WHT: annual tax drag {drag:.1f}%")
+        alternatives = build_alternatives_line(classification, yield_pct)
+        if alternatives is not None:
+            lines.append(alternatives)
 
     cgain_line = f"CGAIN: {CGAIN_BY_ACCOUNT[account_type]}"
     if account_state is not None and account_type == "trading":
@@ -665,19 +689,20 @@ def build_precomputed_tax_metrics(
             )
 
     if account_state is not None:
-        if account_type == "tfsa":
-            room = account_state.get("tfsa_room_remaining_cents")
+        # Both registered rooms when the profile has them, the analysed account's first: a
+        # cross-account recommendation (rules 6 and 12) cannot be checked for feasibility
+        # against a room figure the agent never sees. Each item carries its own staleness.
+        room_items = []
+        for room_account in sorted(("tfsa", "rrsp"), key=lambda a: a != account_type):
+            room = account_state.get(f"{room_account}_room_remaining_cents")
             if room is not None:
-                stale, age_days = _room_stale(account_state.get("tfsa_room_as_of"), now)
+                stale, age_days = _room_stale(account_state.get(f"{room_account}_room_as_of"), now)
                 suffix = f" (stale, last updated {age_days} days ago)" if stale else ""
-                lines.append(f"ROOM: TFSA remaining ${room / 100:,.0f}{suffix}")
-        elif account_type == "rrsp":
-            room = account_state.get("rrsp_room_remaining_cents")
-            if room is not None:
-                stale, age_days = _room_stale(account_state.get("rrsp_room_as_of"), now)
-                suffix = f" (stale, last updated {age_days} days ago)" if stale else ""
-                lines.append(f"ROOM: RRSP remaining ${room / 100:,.0f}{suffix}")
-        elif account_type == "trading":
+                room_items.append(f"{room_account.upper()} remaining ${room / 100:,.0f}{suffix}")
+        if room_items:
+            lines.append("ROOM: " + " | ".join(room_items))
+
+        if account_type == "trading":
             blocked = account_state.get("superficial_loss_blocked")
             ytd_losses_cents = account_state.get("trading_ytd_realized_losses_cents")
             if blocked is not None or ytd_losses_cents is not None:

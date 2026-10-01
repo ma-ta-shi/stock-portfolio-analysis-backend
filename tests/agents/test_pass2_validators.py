@@ -1241,3 +1241,36 @@ class TestTaxStrategistCitationEnforcement:
         assert len(hard) == 3
         assert any("loss_harvesting" in e for e in hard), "safety rule must stay hard"
         assert any("too short" in e for e in hard), "length is not a citation-breadth rule"
+
+class TestTaxStrategistMargToken:
+    """MARG is advertised by the prompt (rule 1) and rendered in the pre-computed block, so the
+    validator must accept it as a citation token like the other metric tokens."""
+
+    def test_key_factor_evidence_may_start_with_marg(self):
+        out = _valid_tax_output()
+        out["key_factors"][0]["evidence"] = "MARG: 29.65% combined rate values the RRSP deduction"
+        passed, errors = validate_tax_strategist(out)
+        assert passed, errors
+
+    def test_strongest_signal_may_cite_marg(self):
+        out = _valid_tax_output()
+        out["strongest_signal"] = "MARG: a 29.65% marginal rate makes the RRSP deduction worth more here."
+        passed, errors = validate_tax_strategist(out)
+        assert passed, errors
+
+    def test_marg_counts_toward_the_three_token_narrative_floor(self):
+        out = _valid_tax_output()
+        for tok in ("DOM", "LIST", "ELIG", "CGAIN", "ROOM"):
+            out["narrative"] = out["narrative"].replace(tok, "x")
+        # DIVID and WHT remain; without MARG that is two tokens and the floor fails.
+        assert any("tax-metric tokens" in e for e in validate_tax_strategist(out)[1])
+        out["narrative"] += " MARG: the 29.65% marginal rate sets the value of the deduction."
+        passed, errors = validate_tax_strategist(out)
+        assert passed, errors
+
+    def test_marg_is_word_boundary_matched(self):
+        out = _valid_tax_output()
+        for tok in ("DOM", "LIST", "ELIG", "CGAIN", "ROOM"):
+            out["narrative"] = out["narrative"].replace(tok, "x")
+        out["narrative"] += " The MARGINAL rate is high."
+        assert any("tax-metric tokens" in e for e in validate_tax_strategist(out)[1])

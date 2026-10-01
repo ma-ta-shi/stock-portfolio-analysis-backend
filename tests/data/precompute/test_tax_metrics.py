@@ -9,6 +9,7 @@ from data.precompute.tax_metrics import (
     CGAIN_BY_ACCOUNT,
     WHT_GRID,
     TaxReferenceUnavailable,
+    build_alternatives_line,
     build_precomputed_tax_metrics,
     build_tax_metrics_field,
     build_tax_rule_snapshot,
@@ -408,7 +409,8 @@ def test_build_precomputed_tax_metrics_no_dividend_still_renders_structural_fiel
         assert "DIVID: no dividend history" in block
         assert "ELIG: canadian_eligible" in block
         assert "WHT (this account" in block
-        assert "Effective after-tax yield" not in block
+        assert "effective after-tax yield" not in block
+        assert "ALTERNATIVES" not in block
 
 
 def test_build_precomputed_tax_metrics_etf_short_circuits():
@@ -921,3 +923,120 @@ def test_build_precomputed_tax_metrics_room_exactly_at_threshold_not_stale():
         now=now,
     )
     assert "(stale" not in block
+
+# --- WHT-labelled after-tax lines, ALTERNATIVES and both contribution rooms (Tax Strategist Wave 2) ---
+
+
+def _us_payer(price: float = 100.0, quarterly: float = 0.6) -> SimpleNamespace:
+    """2.4% yield at the defaults: 4 x 0.6 over 100."""
+    return _fake_bundle(
+        _company_info(name="Coca-Cola Company", industry="Beverages", country="US"),
+        [_div_record(_days_ago(d * 90 + 10), quarterly) for d in range(4)],
+        price,
+    )
+
+
+def test_after_tax_lines_sit_under_the_wht_token_not_unlabelled_line_names():
+    """The old `Effective after-tax yield:` / `Annual tax drag:` lines carried no token
+    name, so the model cited the line label, which the validator does not accept."""
+    block = build_precomputed_tax_metrics("KO", "tfsa", _us_payer())
+    assert "WHT: effective after-tax yield 2.0%" in block
+    assert "WHT: annual tax drag 0.4%" in block
+    assert "Effective after-tax yield:" not in block
+    assert "Annual tax drag:" not in block
+
+
+def test_alternatives_line_gives_the_drag_in_every_modelled_account_from_the_grid():
+    block = build_precomputed_tax_metrics("KO", "tfsa", _us_payer())
+    assert (
+        "ALTERNATIVES (withholding drag on this dividend if held in): "
+        "tfsa 0.4% (non-recoverable) | rrsp 0.0% (treaty Art. XVIII exemption) | "
+        "trading 0.4% (recoverable as a foreign tax credit)"
+    ) in block
+
+
+def test_alternatives_line_is_the_same_whichever_account_is_analysed():
+    lines = {
+        account: next(
+            line
+            for line in build_precomputed_tax_metrics("KO", account, _us_payer()).splitlines()
+            if line.startswith("ALTERNATIVES")
+        )
+        for account in ("tfsa", "rrsp", "trading")
+    }
+    assert len(set(lines.values())) == 1
+
+
+def test_alternatives_line_canadian_eligible_dividend_is_zero_everywhere():
+    bundle = _fake_bundle(
+        _company_info(name="Toronto-Dominion Bank", industry="Banking"),
+        [_div_record(_days_ago(d * 90 + 10), 1.05) for d in range(4)],
+        165.0,
+    )
+    block = build_precomputed_tax_metrics("TD.TO", "trading", bundle)
+    assert (
+        "tfsa 0.0% (no withholding) | rrsp 0.0% (no withholding) | "
+        "trading 0.0% (no withholding; eligible for the dividend tax credit)"
+    ) in block
+
+
+def test_alternatives_line_lists_only_the_accounts_the_grid_models():
+    """A Canadian REIT is modelled for the two registered accounts only (trading is
+    deliberately absent from WHT_GRID), so the line must not invent a trading entry."""
+    line = build_alternatives_line("trust_distribution", 5.0)
+    assert line is not None
+    assert "tfsa 0.0%" in line and "rrsp 0.0%" in line
+    assert "trading" not in line
+
+
+@pytest.mark.parametrize("classification", ["us_reit", "limited_partnership", "adr"])
+def test_alternatives_line_absent_when_the_grid_does_not_model_the_classification(
+    classification,
+):
+    assert build_alternatives_line(classification, 4.0) is None
+
+
+def test_alternatives_line_absent_without_a_dividend():
+    assert build_alternatives_line("us", None) is None
+
+
+def test_room_shows_both_registered_rooms_with_the_analysed_account_first():
+    bundle = _us_payer()
+    state = {"tfsa_room_remaining_cents": 3_200_000, "rrsp_room_remaining_cents": 2_800_000}
+    assert "ROOM: TFSA remaining $32,000 | RRSP remaining $28,000" in (
+        build_precomputed_tax_metrics("KO", "tfsa", bundle, account_state=state)
+    )
+    assert "ROOM: RRSP remaining $28,000 | TFSA remaining $32,000" in (
+        build_precomputed_tax_metrics("KO", "rrsp", bundle, account_state=state)
+    )
+
+
+def test_room_is_shown_for_a_trading_analysis_so_a_move_to_a_registered_account_can_be_sized():
+    state = {"tfsa_room_remaining_cents": 3_200_000, "rrsp_room_remaining_cents": 2_800_000}
+    block = build_precomputed_tax_metrics("KO", "trading", _us_payer(), account_state=state)
+    assert "ROOM: TFSA remaining $32,000 | RRSP remaining $28,000" in block
+
+
+def test_room_shows_only_the_rooms_on_file():
+    block = build_precomputed_tax_metrics(
+        "KO", "trading", _us_payer(), account_state={"rrsp_room_remaining_cents": 2_800_000}
+    )
+    assert "ROOM: RRSP remaining $28,000" in block
+    assert "TFSA remaining" not in block
+
+
+def test_room_staleness_is_flagged_per_account_not_for_the_whole_line():
+    now = datetime(2026, 9, 28)
+    block = build_precomputed_tax_metrics(
+        "KO",
+        "tfsa",
+        _us_payer(),
+        account_state={
+            "tfsa_room_remaining_cents": 3_200_000,
+            "tfsa_room_as_of": now - timedelta(days=30),
+            "rrsp_room_remaining_cents": 2_800_000,
+            "rrsp_room_as_of": now - timedelta(days=430),
+        },
+        now=now,
+    )
+    assert "ROOM: TFSA remaining $32,000 | RRSP remaining $28,000 (stale, last updated 430 days ago)" in block
