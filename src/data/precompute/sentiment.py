@@ -1,5 +1,6 @@
-"""Per-article sentiment scoring for the Sentiment Analyst agent (Pass 1),
-ClickUp 86ban0wf4.
+"""Sentiment scoring of news headlines for the Sentiment Analyst agent (Pass 1),
+ClickUp 86ban0wf4. Scored in batches of ~30 headlines per model call (BB-023; it was one call
+per article); `_score_article` remains as the single-item path for anything a batch missed.
 
 Makes an LLM call - the ticket describes this as "one of the two documented
 LLM exceptions" in the precompute layer (that framing is the ticket's own
@@ -90,11 +91,51 @@ _NUM_CTX = 8192  # Ollama silently truncates context to its own small default if
 # model's full 131072).
 _VALID_LABELS = ("positive", "negative", "neutral")
 
+# Headlines scored per model call. One call per article was ~250 calls (~16 minutes of model
+# time, about 65% of ALL model time in a run) for a busy ticker; the scored sample is now
+# ~180 articles in ~6 calls. Measured on KO's 242 saved per-article labels (2026-10-01): the
+# per-article scorer agrees with ITSELF on 75% of a re-scored sample. Batches of 30 returning a
+# plain labels array agree with the saved labels on 71% and take 24 s of model time for all
+# 242 (the same batch returning numbered {n, sentiment} objects: 70%, 52 s; saved label mix
+# 34/14/52 positive/negative/neutral vs 29/17/54 for the array and 36/20/44 for the objects).
+# Larger batches and a one-letter string were tested and rejected: batches of 60 agree on only
+# 62%, and the letter string never says "positive" (44%).
+_BATCH_SIZE = 30
+_BATCH_TIMEOUT = aiohttp.ClientTimeout(total=180)
+_BATCH_TEXT_CHARS = 300  # the summary snippet is a hint, not the article
+
 _FORMAT_SCHEMA = {
     "type": "object",
     "properties": {"sentiment": {"type": "string", "enum": list(_VALID_LABELS)}},
     "required": ["sentiment"],
 }
+
+
+def _batch_prompt(items: list[dict]) -> str:
+    lines = []
+    for number, item in enumerate(items, start=1):
+        text = (item.get("text") or "")[:_BATCH_TEXT_CHARS]
+        lines.append(f"{number}. {item['headline']}" + (f" | {text}" if text else ""))
+    return (
+        "Classify the sentiment of each news item below as positive, negative, or neutral "
+        f"(judge each item on its own). Return exactly {len(items)} labels, in the order of the items.\n\n"
+        + "\n".join(lines)
+    )
+
+
+def _batch_format_schema(count: int) -> dict:
+    return {
+        "type": "object",
+        "properties": {
+            "labels": {
+                "type": "array",
+                "minItems": count,
+                "maxItems": count,
+                "items": {"type": "string", "enum": list(_VALID_LABELS)},
+            }
+        },
+        "required": ["labels"],
+    }
 
 
 def _prompt(headline: str, text: str) -> str:
@@ -210,11 +251,105 @@ async def _score_article(
     return sentiment
 
 
+async def _score_batch(
+    session: aiohttp.ClientSession,
+    items: list[dict],
+    *,
+    capture: CaptureContext | None = None,
+) -> list[str | None]:
+    """One model call for up to `_BATCH_SIZE` headlines. Returns one label (or None) per
+    item, in order; None for every item on any request or parse failure, and for any item
+    the model skipped or labelled with something that is not a valid label. Same
+    no-fallback posture as `_score_article`: a failure is missing data, never a guess."""
+    prompt_text = _batch_prompt(items)
+    payload = {
+        "model": _MODEL,
+        "messages": [{"role": "user", "content": prompt_text}],
+        "stream": False,
+        "think": _THINK,
+        "format": _batch_format_schema(len(items)),
+        "options": {"num_ctx": _NUM_CTX},
+    }
+    try:
+        async with session.post(_OLLAMA_URL, json=payload, timeout=_BATCH_TIMEOUT) as response:
+            if response.status != 200:
+                logger.warning("sentiment_batch_http_error", status=response.status)
+                report_degradation(
+                    "ollama", "sentiment_score", LLM_REQUEST_FAILED, f"HTTP {response.status}"
+                )
+                return [None] * len(items)
+            data = await response.json()
+    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+        logger.warning("sentiment_batch_request_failed", error=str(exc))
+        report_degradation("ollama", "sentiment_score", LLM_REQUEST_FAILED, str(exc), exc=exc)
+        return [None] * len(items)
+
+    safe_data = data if isinstance(data, dict) else {}
+    message = safe_data.get("message")
+    message = message if isinstance(message, dict) else {}
+    content = message.get("content", "")
+    content = content if isinstance(content, str) else ""
+    thinking = message.get("thinking")
+    thinking = thinking if isinstance(thinking, str) else ""
+
+    labels: list[str | None] = [None] * len(items)
+    parse_error: str | None = None
+    try:
+        # Position is the alignment: the schema pins the array to exactly one label per item.
+        for index, label in enumerate(json.loads(content)["labels"][: len(items)]):
+            if label in _VALID_LABELS:
+                labels[index] = label
+    except (KeyError, TypeError, ValueError):
+        logger.warning("sentiment_batch_malformed_response")
+        parse_error = "malformed response"
+
+    if capture is not None:
+        record_call(
+            capture,
+            call_site="precompute:sentiment",
+            model=_MODEL,
+            options=payload["options"],
+            prompt_text=prompt_text,
+            response_body=data,
+            thinking_chars=len(thinking),
+            empty_content=not content.strip(),
+            parsed_ok=any(label is not None for label in labels),
+            parse_error=parse_error,
+        )
+    return labels
+
+
+async def _score_chunk(
+    session: aiohttp.ClientSession,
+    chunk: list[dict],
+    *,
+    capture: CaptureContext | None,
+) -> list[str | None]:
+    """A batch, asked again once if it produced nothing usable; whatever is still
+    unlabelled after that is scored one article at a time (a rare path: at most the
+    chunk's size in extra calls, none when the batch was fine)."""
+    labels = await _score_batch(session, chunk, capture=capture)
+    if not any(label is not None for label in labels):
+        labels = await _score_batch(session, chunk, capture=capture)
+    missing = [i for i, label in enumerate(labels) if label is None]
+    if missing:
+        singles = await asyncio.gather(
+            *(
+                _score_article(session, chunk[i]["headline"], chunk[i]["text"], capture=capture)
+                for i in missing
+            )
+        )
+        for index, label in zip(missing, singles, strict=True):
+            labels[index] = label
+    return labels
+
+
 async def summarize_news(
     id_assigned_articles: list[dict], *, capture: CaptureContext | None = None
 ) -> dict:
-    """Scores each already-ID-assigned article's sentiment via a local LLM
-    call. Returns {"articles": [...], "sentiment_source": ...} - the
+    """Scores each already-ID-assigned article's sentiment via a local LLM,
+    ~30 articles per call (the caller passes the bounded SAMPLE to score, not everything
+    fetched). Returns {"articles": [...], "sentiment_source": ...} - the
     caller distributes these two keys across DataBundle.news_with_sentiment
     and DataBundle.sentiment_source respectively.
 
@@ -226,17 +361,18 @@ async def summarize_news(
         return {"articles": [], "sentiment_source": None}
 
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
+    chunks = [
+        id_assigned_articles[start : start + _BATCH_SIZE]
+        for start in range(0, len(id_assigned_articles), _BATCH_SIZE)
+    ]
 
-    async def _score_bounded(session: aiohttp.ClientSession, article: dict) -> str | None:
+    async def _score_bounded(session: aiohttp.ClientSession, chunk: list[dict]):
         async with semaphore:
-            return await _score_article(
-                session, article["headline"], article["text"], capture=capture
-            )
+            return await _score_chunk(session, chunk, capture=capture)
 
     async with aiohttp.ClientSession() as session:
-        sentiments = await asyncio.gather(
-            *(_score_bounded(session, article) for article in id_assigned_articles)
-        )
+        chunk_labels = await asyncio.gather(*(_score_bounded(session, chunk) for chunk in chunks))
+    sentiments = [label for labels in chunk_labels for label in labels]
 
     articles = [
         {

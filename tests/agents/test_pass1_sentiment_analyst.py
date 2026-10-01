@@ -456,3 +456,86 @@ def test_anomalies_no_scored_articles_returns_empty():
          "sentiment": None, "date": datetime(2026, 9, 20, tzinfo=UTC)},
     ])
     assert _anomalies(bundle) == []
+
+
+# --- a sampled month of news: only the shown headlines are listed, the rest is statistics (BB-023) ---
+
+
+def _sample(count: int, shown_every: int = 3) -> list[dict]:
+    """A scored sample over two ISO weeks (2026-09-07 and 2026-09-14), every third one shown."""
+    out = []
+    for i in range(count):
+        day = 7 + (i % 10)  # Sep 7 to Sep 16
+        out.append(
+            {
+                "id": f"N{i + 1}",
+                "headline": f"Headline {i + 1}",
+                "source": "Yahoo",
+                "quality_tier": "secondary",
+                "sentiment": ["positive", "negative", "neutral"][i % 3],
+                "date": datetime(2026, 9, day, 12, tzinfo=UTC),
+                "shown": i % shown_every == 0,
+            }
+        )
+    return out
+
+
+def test_only_the_shown_headlines_are_listed():
+    bundle = _bundle(news_with_sentiment=_sample(30))
+
+    msg, _ = build_user_message(bundle)
+
+    assert "N1: Headline 1" in msg and "N4: Headline 4" in msg  # shown
+    assert "N2: Headline 2" not in msg and "N3: Headline 3" not in msg  # scored, not shown
+
+
+def test_the_coverage_totals_and_weekly_tone_are_reported_when_known():
+    bundle = _bundle(
+        news_with_sentiment=_sample(30), news_coverage={"window_days": 30, "fetched": 2400}
+    )
+
+    msg, _ = build_user_message(bundle)
+
+    assert "2400 articles fetched over the last 30 days; 30 sampled" in msg
+    assert "10 listed below" in msg
+    assert "Tone of the scored sample: 10 positive, 10 negative, 10 neutral." in msg
+    assert "Week of 2026-09-07:" in msg and "Week of 2026-09-14:" in msg
+    assert "sample, so they can show a large shift" in msg
+
+
+def test_weekly_counts_add_up_to_the_sample():
+    import re
+
+    bundle = _bundle(
+        news_with_sentiment=_sample(30), news_coverage={"window_days": 30, "fetched": 900}
+    )
+
+    msg, _ = build_user_message(bundle)
+
+    totals = [int(n) for n in re.findall(r"Week of [\d-]+: .*\(n=(\d+)\)", msg)]
+    assert sum(totals) == 30
+
+
+def test_without_coverage_the_payload_is_unchanged():
+    msg, _ = build_user_message(_bundle())
+
+    assert "Coverage:" not in msg and "Week of" not in msg
+    assert "N1: Apple announces new product" in msg
+
+
+def test_the_anomaly_check_uses_the_whole_scored_sample_not_just_the_shown_ones():
+    positive = [
+        {**a, "sentiment": "positive", "shown": a["id"] == "N1"} for a in _sample(30)
+    ]
+    bundle = _bundle(
+        news_with_sentiment=positive,
+        insider_activity={
+            "transactions": [
+                {"is_issuer": False, "transaction_type": "sale", "date": "2026-09-10"} for _ in range(3)
+            ]
+        },
+    )
+
+    flags = _anomalies(bundle)
+
+    assert flags and "100% positive" in flags[0]  # 30 of 30, though only 1 headline is shown

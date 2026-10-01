@@ -26,7 +26,8 @@ from data.precompute import fundamentals, risk_metrics, sentiment, technicals
 from data.precompute.canadian_data_flags import build_canadian_data_flags
 from data.precompute.macro_sources import compute_macro_sources
 from data.precompute.news_id_assignment import assign_news_ids
-from data.precompute.research_sources import build_research_sources
+from data.precompute.news_selection import select_news
+from data.precompute.research_sources import build_research_sources, company_name_variants
 from data.providers.boc import BOCMacroDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fred import FredMacroDataProvider
@@ -73,6 +74,11 @@ _CA_SECTOR_ETF: dict[str, str] = {
 # dividend_growth_5yr (needs 5y) and tax_metrics.py's compute_trailing_
 # dividend (needs 365 days) - 6y gives both a buffer.
 _DIVIDEND_HISTORY_YEARS = 6
+
+# News window for the Sentiment Analyst (docs: a fixed 30 days since v1.3) and, for now, the
+# Stock Researcher too (its documented 30 / 90 / 180-day timeline windows never worked: one
+# capped request returned the newest ~250 items for every window, BB-023, and are deferred).
+_NEWS_WINDOW_DAYS = 30
 
 
 async def _fetch_peer(router, peer_ticker: str, *, subject_is_ca: bool):
@@ -209,8 +215,16 @@ class DataPipeline:
             # News fetched once; the same id-assigned list feeds both
             # sentiment and research_sources so they cite articles under the
             # same N{n} ids.
-            raw_news = await router.get_news(ticker, days=180)
+            # `thorough`: a busy ticker's single request is cut off at ~250 items (BB-023),
+            # so the main stock's own news is fetched across the whole window (at most 12
+            # requests, however busy). The agents then get a bounded, time-balanced SELECTION
+            # of what was fetched, not all of it: see precompute/news_selection.py.
+            raw_news = await router.get_news(ticker, days=_NEWS_WINDOW_DAYS, thorough=True)
             id_assigned_articles = assign_news_ids(raw_news)
+            news_selection = select_news(
+                id_assigned_articles,
+                names=[ticker, *company_name_variants(company_info.get("name") or "")],
+            )
 
             # Fundamentals inputs. normalize_financials() is a method on the
             # market's own adapter (yfinance for CA, edgartools for US) that
@@ -331,8 +345,9 @@ class DataPipeline:
             #
             # research_sources is deliberately NOT in this gather (was, until
             # 2026-09-23) -- real bug, confirmed live via a real AAPL run:
-            # sentiment.summarize_news() calls Ollama at num_ctx=8192 (up to
-            # 10 concurrent article-scoring calls), build_research_sources()
+            # sentiment.summarize_news() calls Ollama at num_ctx=8192 (about 6
+            # batched scoring calls now, up to 10 at once; it was ~250 single-article
+            # calls when this was written), build_research_sources()
             # calls it at num_ctx=32768 (via filing_summarizer.py, itself
             # already an internal background task inside that function -- see
             # its own docstring). Both hit the SAME single-generation-slot
@@ -360,12 +375,19 @@ class DataPipeline:
             # Ollama call before Pass 1 begins (also 32768) -- no third
             # reload transitioning into Pass 1.
             sentiment_result, insider_transactions = await asyncio.gather(
-                sentiment.summarize_news(id_assigned_articles, capture=capture),
+                sentiment.summarize_news(news_selection["scored"], capture=capture),
                 router.get_insider_trading(ticker),
             )
             research_sources_bundle = await build_research_sources(
-                ticker, id_assigned_articles, stock, capture=capture
+                ticker, news_selection["researcher"], stock, capture=capture
             )
+            # The scored sample is kept whole (the Sentiment agent's tone figures and its
+            # anomaly check use all of it); only the `shown` ones are listed in its prompt.
+            shown_ids = {article["id"] for article in news_selection["shown"]}
+            news_with_sentiment = [
+                {**article, "shown": article["id"] in shown_ids}
+                for article in sentiment_result["articles"]
+            ]
 
             # 86bbwachy Phase 3: capture.call_log is fully populated now --
             # both sentiment (above) and research_sources's own filing-digest
@@ -448,8 +470,12 @@ class DataPipeline:
                 is_current=technicals_result["is_current"],
                 days_old=technicals_result["days_old"],
                 preflight_warnings=technicals_result["preflight_warnings"],
-                news_with_sentiment=sentiment_result["articles"],
+                news_with_sentiment=news_with_sentiment,
                 sentiment_source=sentiment_result["sentiment_source"],
+                news_coverage={
+                    "window_days": _NEWS_WINDOW_DAYS,
+                    "fetched": news_selection["fetched"],
+                },
                 analyst_consensus=analyst_consensus,
                 analyst_recommendation_trends=analyst_recommendation_trends,
                 insider_activity={"transactions": insider_transactions},

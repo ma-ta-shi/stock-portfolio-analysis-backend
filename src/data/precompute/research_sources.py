@@ -20,7 +20,7 @@ precompute/sentiment.py::summarize_news() (confirmed by direct read of
 that module's own docstring): this module does NOT call
 news_id_assignment.assign_news_ids() itself. It takes already-ID-assigned
 articles as an input. ID assignment happens once per run, over the widest
-window any Pass 1 agent uses (currently this module's own 180-day window),
+window any Pass 1 agent uses (currently the 30-day window both news consumers share),
 and the same assigned list is handed to every consumer - both this module
 and precompute/sentiment.py. If this module fetched and assigned its own
 IDs independently, a legitimately different fetch (timing, provider
@@ -57,11 +57,9 @@ from data.schemas.research_sources_bundle import ManagementSignals, ResearchSour
 logger = structlog.get_logger(__name__)
 
 _PEER_LIMIT = 2
-_PEER_NEWS_DAYS = 30  # deliberately narrower than this module's own 180-day news
-# window - peer recent-news is 1-2 flavor headlines embedded in a <=200-token
-# block, not a citation-tracked list. A live check during planning found AAPL
-# alone returns 245 articles in just a 30-day window; fetching a peer's full
-# 180-day window for 2 headlines would be real, unnecessary volume.
+_PEER_NEWS_DAYS = 30  # a peer's recent news is 1-2 flavor headlines embedded in a
+# <=200-token block, not a citation-tracked list, so it keeps the single capped request
+# (never `thorough`): the newest 2 headlines are all it needs (BB-023).
 _PEER_SUMMARY_TOKEN_BUDGET = 50
 _PEER_BLOCK_TOKEN_BUDGET = 200
 _NEWS_LABEL = "Recent news: "
@@ -707,6 +705,10 @@ def _name_variants(name: str) -> list[str]:
     if short:
         variants.append(short)
     return variants
+
+
+# Public name for other precompute modules (news_selection ranks headlines that name the company).
+company_name_variants = _name_variants
 
 
 def anonymize_content(text: str, company_name: str, ticker: str, peer_names: dict[str, str]) -> str:

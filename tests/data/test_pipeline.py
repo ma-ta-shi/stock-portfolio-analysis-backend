@@ -115,6 +115,8 @@ class _FakeRouter:
     quote: dict = {}
     dividend_history: list = []
     peers: list = []
+    news: list = []
+    news_calls: list = []
     price_history: object = None
     instances: list = []
     price_history_calls: list = []
@@ -142,8 +144,9 @@ class _FakeRouter:
     async def get_analyst_ratings(self, ticker):
         return {"consensus": "buy"}
 
-    async def get_news(self, ticker, days):
-        return []
+    async def get_news(self, ticker, days, thorough=False):
+        type(self).news_calls.append((ticker, days, thorough))
+        return self.news
 
     async def get_quote(self, ticker):
         return self.quote
@@ -355,6 +358,8 @@ def patched_precompute(monkeypatch):
     monkeypatch.setattr(pipeline_module, "StatsCanadaProvider", lambda: _FakeAsyncCtxProvider())
     _FakeRouter.instances = []
     _FakeRouter.price_history_calls = []
+    _FakeRouter.news = []
+    _FakeRouter.news_calls = []
     _FakeFinancialsProvider.calls = []
     _FakeFinancialsProvider.failing = set()
     yield
@@ -777,3 +782,93 @@ async def test_the_subjects_own_financials_failing_still_fails_the_run(patched_p
 
     with pytest.raises(RuntimeError, match="Company not found"):
         await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
+
+
+# --- news: fetch the window, hand each agent a bounded selection (BB-023) ---
+
+
+def _raw_busy_news(days: int = 10, per_day: int = 40) -> list[dict]:
+    from datetime import timedelta
+
+    base = datetime(2026, 9, 28, 12, 0, 0)
+    articles = []
+    for d in range(days):
+        for i in range(per_day):
+            articles.append(
+                {
+                    "headline": f"Story {d}-{i}",
+                    "summary": "",
+                    "source": "Yahoo" if i % 3 else "Benzinga",
+                    "url": f"https://x/{d}/{i}",
+                    "published_at": (base - timedelta(days=d, minutes=i)).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                }
+            )
+    return articles
+
+
+async def test_the_main_stocks_news_is_fetched_for_the_whole_window_and_the_peers_keep_one_request(
+    patched_precompute,
+):
+    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
+
+    await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
+
+    assert _FakeRouter.news_calls == [("AAPL", 30, True)]  # 30 days, thorough
+
+
+async def test_each_agent_gets_a_bounded_selection_not_everything_fetched(
+    patched_precompute, monkeypatch
+):
+    from data.precompute.news_id_assignment import assign_news_ids
+
+    monkeypatch.setattr(pipeline_module, "assign_news_ids", assign_news_ids)  # the fixture stubs it out
+    seen = {}
+
+    async def spy_summarize(articles, **kwargs):
+        seen["scored"] = list(articles)
+        return {"articles": [{**a, "sentiment": "neutral"} for a in articles], "sentiment_source": "local_llm"}
+
+    async def spy_research(ticker, articles, stock=None, **kwargs):
+        seen["researcher"] = list(articles)
+        return await _fake_build_research_sources(ticker, articles, stock=stock, **kwargs)
+
+    def spy_technicals(**kwargs):
+        seen["technicals_news"] = list(kwargs["news_ids"])
+        return _fake_technicals_compute_all(**kwargs)
+
+    monkeypatch.setattr(pipeline_module.sentiment, "summarize_news", spy_summarize)
+    monkeypatch.setattr(pipeline_module, "build_research_sources", spy_research)
+    monkeypatch.setattr(pipeline_module.technicals, "compute_all", spy_technicals)
+    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
+    _FakeRouter.news = _raw_busy_news(days=10, per_day=40)  # 400 articles
+
+    bundle = await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
+
+    assert len(seen["technicals_news"]) == 400  # price-gap explanations still see every date
+    assert len(seen["scored"]) == 10 * 6  # six a day: bounded by days, not by volume
+    assert len(seen["researcher"]) == 10 * 2
+    shown = [a for a in bundle.news_with_sentiment if a["shown"]]
+    assert len(bundle.news_with_sentiment) == 60 and len(shown) == 20
+    assert bundle.news_coverage == {"window_days": 30, "fetched": 400}
+    # the ids the agents cite are the same article everywhere
+    scored_ids = {a["id"] for a in seen["scored"]}
+    assert {a["id"] for a in shown} <= scored_ids
+
+
+async def test_a_quiet_ticker_keeps_all_its_news(patched_precompute, monkeypatch):
+    from data.precompute.news_id_assignment import assign_news_ids
+
+    async def scoring(articles, **kwargs):
+        return {"articles": [{**a, "sentiment": "neutral"} for a in articles], "sentiment_source": "local_llm"}
+
+    monkeypatch.setattr(pipeline_module, "assign_news_ids", assign_news_ids)
+    monkeypatch.setattr(pipeline_module.sentiment, "summarize_news", scoring)
+    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
+    _FakeRouter.news = _raw_busy_news(days=5, per_day=1)
+
+    bundle = await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
+
+    assert len(bundle.news_with_sentiment) == 5
+    assert bundle.news_coverage == {"window_days": 30, "fetched": 5}

@@ -494,8 +494,12 @@ class Router(StockDataProvider, NewsProvider):
 
     # ---------- NewsProvider ----------
 
-    async def get_news(self, ticker: str, days: int) -> list[dict]:
-        """CA tickers get openbb-tmx's wire coverage only, unless the ticker
+    async def get_news(self, ticker: str, days: int, *, thorough: bool = False) -> list[dict]:
+        """`thorough=True` is for the main stock's own news: Finnhub (US, and the US
+        cross-listing of a Canadian name) is then asked for the whole window instead of
+        one capped response (BB-023). openbb-tmx is not capped, so the CA feed ignores it.
+
+        CA tickers get openbb-tmx's wire coverage only, unless the ticker
         is in the CA/US crosslisting map (86bbr4azz) — then the matching
         Finnhub feed on the US symbol is fetched too and merged in, deduped
         on url. openbb-tmx's Canadian feed is ~100% company press releases
@@ -505,7 +509,10 @@ class Router(StockDataProvider, NewsProvider):
         than raising — unlike the pure-US path where Finnhub is the sole
         source and a bad key fails loud (see _try_chain), here it's an
         enhancement on top of a result that already exists."""
-        result, _ = await self._try_chain("get_news", ticker, days)
+        # Only passed when asked for, so every other caller and provider is untouched.
+        thorough_kwarg = {"thorough": True} if thorough else {}
+        extra = thorough_kwarg if not self.is_ca else {}
+        result, _ = await self._try_chain("get_news", ticker, days, **extra)
         ca_articles = result if not _is_empty(result) else []
         if not self.is_ca:
             return ca_articles
@@ -517,7 +524,7 @@ class Router(StockDataProvider, NewsProvider):
             if finnhub is None:
                 finnhub = FinnhubDataProvider()
                 self._providers["finnhub"] = finnhub
-            us_articles = await finnhub.get_news(us_ticker, days)
+            us_articles = await finnhub.get_news(us_ticker, days, **thorough_kwarg)
         except Exception as e:
             logger.warning(
                 "ca_news_merge_failed", ticker=ticker, us_ticker=us_ticker, exc_info=True

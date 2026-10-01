@@ -930,3 +930,67 @@ def test_every_stockdataprovider_and_newsprovider_method_has_both_chains():
     assert "get_filings" in CA_CHAINS
     assert "get_short_interest" in US_CHAINS
     assert "get_short_interest" in CA_CHAINS
+
+
+# --- thorough: the main stock's own news is fetched across the whole window (BB-023) ---
+
+
+def _recording_get_news(calls: list, rows=None):
+    async def get_news(ticker, days, **kwargs):
+        calls.append((ticker, days, kwargs))
+        return rows or [{"headline": "Story", "url": "https://x/1"}]
+
+    return get_news
+
+
+async def test_thorough_is_passed_to_finnhub_for_a_us_stocks_own_news():
+    calls = []
+    router, _, _ = _us_quote_router_for_news(_recording_get_news(calls))
+
+    await router.get_news("AAPL", 30, thorough=True)
+
+    assert calls == [("AAPL", 30, {"thorough": True})]
+
+
+async def test_the_default_news_call_passes_nothing_extra_so_peers_and_other_providers_are_untouched():
+    calls = []
+    router, _, _ = _us_quote_router_for_news(_recording_get_news(calls))
+
+    await router.get_news("AAPL", 30)
+
+    assert calls == [("AAPL", 30, {})]
+
+
+async def test_thorough_also_applies_to_the_us_cross_listing_of_a_canadian_name():
+    us_calls = []
+    router = _ca_router(
+        ticker="SHOP.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "CA wire", "url": "https://ca/1"}])),
+        finnhub=FakeProvider(get_news=_recording_get_news(us_calls)),
+    )
+
+    await router.get_news("SHOP.TO", 30, thorough=True)
+
+    assert us_calls == [("SHOP", 30, {"thorough": True})]
+
+
+async def test_the_canadian_feed_never_gets_the_thorough_argument():
+    """openbb-tmx's get_news takes (ticker, days) only and is not capped."""
+    router = _ca_router(
+        ticker="ZZZZ.TO",
+        openbb_tmx=FakeProvider(get_news=_ok([{"headline": "CA only", "url": "https://ca/1"}])),
+    )
+
+    result = await router.get_news("ZZZZ.TO", 30, thorough=True)  # would raise TypeError if passed
+
+    assert [a["headline"] for a in result] == ["CA only"]
+
+
+def _us_quote_router_for_news(get_news):
+    providers = {
+        "fmp": FakeProvider(),
+        "edgartools": FakeProvider(),
+        "finnhub": FakeProvider(get_news=get_news),
+        "yfinance": FakeProvider(),
+    }
+    return Router(ticker="AAPL", **providers), None, None

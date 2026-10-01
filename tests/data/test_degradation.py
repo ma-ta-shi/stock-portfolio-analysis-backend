@@ -461,12 +461,14 @@ def _article(id_):
 async def test_unscored_articles_are_counted_even_though_sentiment_source_reads_as_success(
     monkeypatch, collector
 ):
-    scores = iter(["positive", None, None, "negative", None])
+    async def fake_batch(session, items, **kwargs):
+        return ["positive", None, None, "negative", None]
 
-    async def fake_score(session, headline, text, **kwargs):
-        return next(scores)
+    async def fake_none(*args, **kwargs):
+        return None
 
-    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
+    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_none)
 
     result = await summarize_news([_article(f"N{i}") for i in range(5)])
 
@@ -486,10 +488,10 @@ async def test_unscored_articles_are_counted_even_though_sentiment_source_reads_
 
 
 async def test_fully_scored_articles_record_nothing(monkeypatch, collector):
-    async def fake_score(session, headline, text, **kwargs):
-        return "neutral"
+    async def fake_batch(session, items, **kwargs):
+        return ["neutral"] * len(items)
 
-    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
 
     await summarize_news([_article("N1"), _article("N2")])
 

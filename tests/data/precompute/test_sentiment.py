@@ -81,6 +81,11 @@ def _ollama_response(sentiment: str) -> dict:
     return {"message": {"content": json.dumps({"sentiment": sentiment})}}
 
 
+def _batch_response(labels: list) -> dict:
+    """What the batched scorer asks for: one label per item, in order."""
+    return {"message": {"content": json.dumps({"labels": labels})}}
+
+
 def _article(id_="N1", **overrides) -> dict:
     article = {
         "id": id_,
@@ -314,7 +319,7 @@ async def test_summarize_news_threads_capture_through_to_every_article(tmp_path,
     _score_article is what's under test, not just each layer in
     isolation."""
     monkeypatch.setattr(capture_module, "RUNS_DIR", str(tmp_path))
-    fake_session = FakeSession(FakeResponse(200, _ollama_response("neutral")))
+    fake_session = FakeSession(FakeResponse(200, _batch_response(["neutral", "neutral"])))
     monkeypatch.setattr(
         sentiment_module.aiohttp, "ClientSession", lambda: _FakeClientSessionCM(fake_session)
     )
@@ -324,8 +329,9 @@ async def test_summarize_news_threads_capture_through_to_every_article(tmp_path,
     result = await summarize_news(articles, capture=capture)
 
     assert [a["sentiment"] for a in result["articles"]] == ["neutral", "neutral"]
-    assert len(capture.call_log) == 2
-    assert {entry["seq"] for entry in capture.call_log} == {0, 1}
+    # both articles fit one batch: ONE call, recorded once
+    assert len(capture.call_log) == 1
+    assert {entry["seq"] for entry in capture.call_log} == {0}
 
 
 # ---------- summarize_news ----------
@@ -339,12 +345,10 @@ async def test_summarize_news_empty_input_returns_none_source():
 
 @pytest.mark.asyncio
 async def test_summarize_news_scores_each_article(monkeypatch):
-    responses = iter(["positive", "negative"])
+    async def fake_batch(session, items, **kwargs):
+        return ["positive", "negative"][: len(items)]
 
-    async def fake_score(session, headline, text, **kwargs):
-        return next(responses)
-
-    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
 
     articles = [_article(id_="N1"), _article(id_="N2")]
     result = await summarize_news(articles)
@@ -355,10 +359,10 @@ async def test_summarize_news_scores_each_article(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summarize_news_preserves_order(monkeypatch):
-    async def fake_score(session, headline, text, **kwargs):
-        return "neutral"
+    async def fake_batch(session, items, **kwargs):
+        return ["neutral"] * len(items)
 
-    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
 
     articles = [_article(id_="N1"), _article(id_="N2"), _article(id_="N3")]
     result = await summarize_news(articles)
@@ -368,10 +372,10 @@ async def test_summarize_news_preserves_order(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_summarize_news_final_shape_drops_text_and_url(monkeypatch):
-    async def fake_score(session, headline, text, **kwargs):
-        return "positive"
+    async def fake_batch(session, items, **kwargs):
+        return ["positive"] * len(items)
 
-    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
 
     result = await summarize_news([_article()])
     article = result["articles"][0]
@@ -384,10 +388,14 @@ async def test_summarize_news_source_is_local_llm_even_if_every_score_fails(monk
     success rate - it's set whenever there were articles to score, even
     if every individual call failed."""
 
-    async def fake_score(session, headline, text, **kwargs):
+    async def fake_none(*args, **kwargs):
         return None
 
-    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
+    async def fake_batch(session, items, **kwargs):
+        return [None] * len(items)
+
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
+    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_none)
 
     result = await summarize_news([_article()])
     assert result["sentiment_source"] == "local_llm"
@@ -406,10 +414,125 @@ async def test_summarize_news_does_not_call_assign_news_ids(monkeypatch):
         lambda articles: called.append(articles) or articles,
     )
 
-    async def fake_score(session, headline, text, **kwargs):
-        return "neutral"
+    async def fake_batch(session, items, **kwargs):
+        return ["neutral"] * len(items)
 
-    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_score)
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
 
     await summarize_news([_article()])
     assert called == []
+
+
+# ---------- batched scoring (BB-023) ----------
+
+
+@pytest.mark.asyncio
+async def test_batch_prompt_numbers_each_item_and_caps_the_summary_text():
+    items = [_article(id_="N1", headline="First", text="x" * 500), _article(id_="N2", headline="Second", text="")]
+
+    prompt = sentiment_module._batch_prompt(items)
+
+    assert "1. First | " + "x" * 300 in prompt and "x" * 301 not in prompt
+    assert "2. Second" in prompt and "2. Second |" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_batch_is_one_call_and_labels_line_up_with_the_items():
+    session = FakeSession(FakeResponse(200, _batch_response(["positive", "negative", "neutral"])))
+
+    labels = await sentiment_module._score_batch(
+        session, [_article(id_="N1"), _article(id_="N2"), _article(id_="N3")]
+    )
+
+    assert labels == ["positive", "negative", "neutral"]
+    assert len(session.calls) == 1
+    schema = session.calls[0]["json"]["format"]
+    assert schema["properties"]["labels"]["minItems"] == 3 == schema["properties"]["labels"]["maxItems"]
+    assert session.calls[0]["json"]["options"]["num_ctx"] == sentiment_module._NUM_CTX
+
+
+@pytest.mark.asyncio
+async def test_a_batch_label_that_is_not_a_valid_label_is_ignored_not_guessed():
+    labels = await sentiment_module._score_batch(
+        FakeSession(FakeResponse(200, _batch_response(["positive", "great"]))),
+        [_article(id_="N1"), _article(id_="N2")],
+    )
+
+    assert labels == ["positive", None]
+
+
+@pytest.mark.asyncio
+async def test_a_batch_with_too_few_or_too_many_labels_keeps_what_lines_up_and_leaves_the_rest_none():
+    items = [_article(id_="N1"), _article(id_="N2"), _article(id_="N3")]
+
+    short = await sentiment_module._score_batch(
+        FakeSession(FakeResponse(200, _batch_response(["positive", "negative"]))), items
+    )
+    long = await sentiment_module._score_batch(
+        FakeSession(FakeResponse(200, _batch_response(["a", "b", "c", "d"]))), items
+    )
+
+    assert short == ["positive", "negative", None]
+    assert long == [None, None, None]  # invalid labels, extras ignored
+
+
+@pytest.mark.asyncio
+async def test_a_failed_batch_call_gives_none_for_every_item():
+    labels = await sentiment_module._score_batch(
+        FakeSession(FakeResponse(500)), [_article(id_="N1"), _article(id_="N2")]
+    )
+    assert labels == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_summarize_news_makes_one_call_per_thirty_articles(monkeypatch):
+    calls = []
+
+    async def fake_batch(session, items, **kwargs):
+        calls.append(len(items))
+        return ["neutral"] * len(items)
+
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
+
+    result = await summarize_news([_article(id_=f"N{i}") for i in range(70)])
+
+    assert calls == [30, 30, 10]  # 70 articles, 3 calls (it used to be 70)
+    assert len(result["articles"]) == 70
+
+
+@pytest.mark.asyncio
+async def test_a_batch_that_returns_nothing_is_asked_once_more(monkeypatch):
+    replies = iter([[None, None], ["positive", "negative"]])
+    calls = []
+
+    async def fake_batch(session, items, **kwargs):
+        calls.append(1)
+        return next(replies)
+
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
+
+    result = await summarize_news([_article(id_="N1"), _article(id_="N2")])
+
+    assert len(calls) == 2
+    assert [a["sentiment"] for a in result["articles"]] == ["positive", "negative"]
+
+
+@pytest.mark.asyncio
+async def test_only_the_items_a_batch_missed_are_scored_one_by_one(monkeypatch):
+    async def fake_batch(session, items, **kwargs):
+        return ["positive", None, "negative"]
+
+    singles = []
+
+    async def fake_single(session, headline, text, **kwargs):
+        singles.append(headline)
+        return "neutral"
+
+    monkeypatch.setattr("data.precompute.sentiment._score_batch", fake_batch)
+    monkeypatch.setattr("data.precompute.sentiment._score_article", fake_single)
+    articles = [_article(id_="N1"), _article(id_="N2", headline="The skipped one"), _article(id_="N3")]
+
+    result = await summarize_news(articles)
+
+    assert singles == ["The skipped one"]
+    assert [a["sentiment"] for a in result["articles"]] == ["positive", "neutral", "negative"]
