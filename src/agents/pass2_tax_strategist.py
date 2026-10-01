@@ -71,6 +71,20 @@ from data.precompute.tax_metrics import (
 from data.schemas.data_bundle import DataBundle
 
 
+# The Pass 1 views the Tax Strategist reads. TECH, SENT and MACRO were ~1.3k tokens of its
+# prompt but none of its rules reads them, its own rule 2 calls SENT and TECH orthogonal, and
+# measured over 41 real outputs they were cited in 3, 6 and 2 (FUND 19, RSRCH 15). A 43-run A/B
+# on the same scenarios (full input vs these two) showed no DETECTABLE loss (first-attempt pass 47% vs
+# 45%, account-fit agreement with the anchors 71% vs 68%, passthrough 98% vs 99%); at that sample size
+# a difference of a few points is noise, and the oracle does not measure everything TECH/SENT/MACRO
+# might add. Revisit if Tax output quality questions come up.
+TAX_PASS1_AGENTS = ("RSRCH", "FUND")
+
+
+def _only_tax_agents(levels: dict[str, str]) -> dict[str, str]:
+    return {k: v for k, v in levels.items() if k in TAX_PASS1_AGENTS}
+
+
 def _tax_metrics_block(
     bundle: DataBundle,
     account_type: str,
@@ -94,7 +108,7 @@ def _tax_metrics_block(
     )
 
 
-def _tax_metrics_field_presence(tax_metrics_text: str) -> dict[str, bool]:
+def _tax_metrics_field_presence(tax_metrics_text: str, account_type: str) -> dict[str, bool]:
     """Reads presence directly off the already-rendered tax_metrics block
     (see build_precomputed_tax_metrics in data/precompute/tax_metrics.py)
     -- unlike every other in-scope agent, there is no structured/dict form
@@ -132,14 +146,33 @@ def _tax_metrics_field_presence(tax_metrics_text: str) -> dict[str, bool]:
     is deliberately made to read as absent here, not just annotated in the
     text, so it flows into the same material_absent/confidence-caveat gate
     below as genuine absence -- the point being that whether the agent notices
-    the caveat is not left to chance."""
+    the caveat is not left to chance.
+
+    ROOM (Tax Strategist Wave 2): the line now lists BOTH registered rooms
+    (`ROOM: TFSA remaining $X | RRSP remaining $Y`, the analysed account first),
+    so presence is read off the analysed account's own item -- another account's
+    stale or missing figure must not flip it. For a Trading analysis there is no
+    room of its own, so `room` stays False exactly as before (the runner already
+    excludes it from material_absent for trading)."""
     return {
         "divid": "DIVID:" in tax_metrics_text and "DIVID: no dividend history" not in tax_metrics_text,
         "wht": "WHT (this account," in tax_metrics_text
         and "NOT MODELLED per REF withholding grid" not in tax_metrics_text,
         "marg": "MARG:" in tax_metrics_text,
-        "room": "ROOM:" in tax_metrics_text and "(stale" not in tax_metrics_text,
+        "room": _room_present(tax_metrics_text, account_type),
     }
+
+
+def _room_present(tax_metrics_text: str, account_type: str) -> bool:
+    if account_type == "trading":
+        return False
+    wanted = f"{account_type.upper()} remaining"
+    for line in tax_metrics_text.splitlines():
+        if line.startswith("ROOM:"):
+            for item in line[len("ROOM:") :].split(" | "):
+                if item.strip().startswith(wanted):
+                    return "(stale" not in item
+    return False
 
 
 def _validate_with_caveats(
@@ -181,14 +214,18 @@ def get_system_prompt(
     account_type: str,
     account_state: AccountStateInput | None = None,
     user_tax_profile: UserTaxProfileInput | None = None,
+    tax_metrics_text: str | None = None,
 ) -> str:
+    # `tax_metrics_text`: the runner builds the block once and hands it to both this and
+    # build_user_message (the presence flags are read off the same text); omitted, it is
+    # built here, as before.
     # fill(), not .format() -- the real prompt's Output Schema block embeds
     # literal JSON, which .format() reads as placeholders and raises KeyError.
     ctx = bundle.context
-    confidence_levels = extract_confidence_levels(compressed_pass1)
+    confidence_levels = _only_tax_agents(extract_confidence_levels(compressed_pass1))
     # 86bbummwp Tier 3 -- see pass2_bull_advocate.py's own comment on this
     # same addition for why both signals are shown, never collapsed.
-    quality_levels = extract_data_quality_levels(compressed_pass1)
+    quality_levels = _only_tax_agents(extract_data_quality_levels(compressed_pass1))
     tax_rules_reference, _ = load_tax_rules_reference()
 
     template = load_template("tax_strategist")
@@ -203,8 +240,10 @@ def get_system_prompt(
             "account_type": account_type,
             "account_instruction": f"Account: {account_type.upper()}.",
             "tax_rules_reference": tax_rules_reference,
-            "precomputed_tax_metrics": _tax_metrics_block(
-                bundle, account_type, account_state, user_tax_profile
+            "precomputed_tax_metrics": (
+                tax_metrics_text
+                if tax_metrics_text is not None
+                else _tax_metrics_block(bundle, account_type, account_state, user_tax_profile)
             ),
             # 86bc8efvb deliberately leaves this "" -- Rule 13 references
             # user_tax_context.expected_retirement_marginal_rate_pct, a field
@@ -232,23 +271,16 @@ def build_user_message(
     account_type: str,
     account_state: AccountStateInput | None = None,
     user_tax_profile: UserTaxProfileInput | None = None,
+    tax_metrics_text: str | None = None,
 ) -> tuple[str, dict[str, bool]]:
-    base = build_pass2_user_message(bundle, compressed_pass1, account_type)
-    confidence_levels = extract_confidence_levels(compressed_pass1)
-    quality_levels = extract_data_quality_levels(compressed_pass1)
-    warnings = build_pass1_reliability_warnings(confidence_levels, agent_quality=quality_levels)
-    if warnings:
-        base += f"\n\nRELIABILITY WARNINGS: {warnings}"
-
-    tax_metrics_text = _tax_metrics_block(bundle, account_type, account_state, user_tax_profile)
-    base += f"""
-
-TAX-RELEVANT DATA (PRE-COMPUTED BY ORCHESTRATOR):
-{tax_metrics_text}
-
-ANALYSIS TARGET ACCOUNT: {account_type.upper()}"""
-
-    return base, _tax_metrics_field_presence(tax_metrics_text)
+    """The user message is the Pass 1 summaries only. The pre-computed tax block, the Pass 1
+    reliability warnings and the analysed account are in the system prompt (get_system_prompt)
+    and used to be appended here as well, so every call paid for each of them twice (~1k
+    tokens). The second return value is the presence flags read off the block."""
+    base = build_pass2_user_message(bundle, compressed_pass1, account_type, TAX_PASS1_AGENTS)
+    if tax_metrics_text is None:
+        tax_metrics_text = _tax_metrics_block(bundle, account_type, account_state, user_tax_profile)
+    return base, _tax_metrics_field_presence(tax_metrics_text, account_type)
 
 
 class TaxStrategistRunner(BaseRunner):
@@ -262,11 +294,12 @@ class TaxStrategistRunner(BaseRunner):
     ) -> tuple[dict, list[str]]:
         self.current_agent = "tax"
         acct = account_type or bundle.context.account_type
+        tax_metrics_text = _tax_metrics_block(bundle, acct, account_state, user_tax_profile)
         system_prompt = get_system_prompt(
-            bundle, compressed_pass1, acct, account_state, user_tax_profile
+            bundle, compressed_pass1, acct, account_state, user_tax_profile, tax_metrics_text
         )
         user_msg, field_presence = build_user_message(
-            bundle, compressed_pass1, acct, account_state, user_tax_profile
+            bundle, compressed_pass1, acct, account_state, user_tax_profile, tax_metrics_text
         )
         # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
         # failed call still records whether its own input was already

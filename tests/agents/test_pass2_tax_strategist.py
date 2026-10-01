@@ -55,15 +55,19 @@ def test_tax_metrics_block_threads_account_state_and_user_tax_profile_through():
     )
 
 
-def test_build_user_message_renders_real_tax_metrics_block():
+def test_build_user_message_is_the_pass1_summaries_only():
+    """The tax block, reliability warnings and target account live in the system prompt;
+    repeating them here cost every call ~1k tokens twice over."""
     bundle = _bundle()
     with _mock_tax_metrics(
         "DIVID: 4.1% yield, 4 payments/yr\nWHT (this account, tfsa): 15.0%, ..."
     ):
         msg, _ = build_user_message(bundle, {}, "tfsa")
-    assert "DIVID: 4.1% yield, 4 payments/yr" in msg
-    assert "WHT (this account, tfsa): 15.0%" in msg
-    assert "ANALYSIS TARGET ACCOUNT: TFSA" in msg
+    assert "DIVID: 4.1% yield" not in msg
+    assert "TAX-RELEVANT DATA" not in msg
+    assert "RELIABILITY WARNINGS" not in msg
+    assert "ANALYSIS TARGET ACCOUNT" not in msg
+    assert msg.startswith("RY.TO (Royal Bank of Canada)")
 
 
 def test_build_user_message_for_override_account_type():
@@ -75,8 +79,7 @@ def test_build_user_message_for_override_account_type():
     mock_build.assert_called_once_with(
         "RY.TO", "rrsp", bundle, account_state=None, user_tax_profile=None
     )
-    assert "WHT (this account, rrsp): 0.0%, treaty exempt" in msg
-    assert "ANALYSIS TARGET ACCOUNT: RRSP" in msg
+    assert "Account: rrsp" in msg  # the Pass 1 header already names the analysed account
 
 
 # ---------- field_presence (86bbwachy Phase 4, extended 86bc8efvb for marg/room) ----------
@@ -323,3 +326,115 @@ def test_validate_with_caveats_rule_14_not_checked_for_trading_account():
     })
     passed, errors = _validate_with_caveats(out, material_absent=[], account_type="trading")
     assert passed, errors
+
+# ---------- one copy of the block, warnings and account (Tax Strategist Wave 2) ----------
+
+
+def _capture_run(bundle, account_type, tax_metrics_text, compressed_pass1=None):
+    """Runs TaxStrategistRunner.run() with the tax block mocked and the model call
+    short-circuited; returns (system_prompt, user_message, build_tax_metrics_field mock)."""
+    runner = TaxStrategistRunner()
+    with (
+        _mock_tax_metrics(tax_metrics_text) as mock_build,
+        patch.object(runner, "call_with_validation") as mock_call,
+    ):
+
+        async def _fake_call(*_args, **_kwargs):
+            return {}, []
+
+        mock_call.side_effect = _fake_call
+        asyncio.run(runner.run(bundle, compressed_pass1 or {}, account_type))
+    system_prompt, user_message = mock_call.call_args[0][0], mock_call.call_args[0][1]
+    return system_prompt, user_message, mock_build
+
+
+def test_run_sends_the_tax_block_once_and_builds_it_once():
+    block = "DIVID: 4.1% yield, 4 payments/yr\nWHT (this account, tfsa): 15.0%, non-recoverable"
+    system_prompt, user_message, mock_build = _capture_run(_bundle(), "tfsa", block)
+    assert (system_prompt + user_message).count("DIVID: 4.1% yield, 4 payments/yr") == 1
+    assert "DIVID: 4.1% yield" in system_prompt
+    mock_build.assert_called_once()
+
+
+def test_run_sends_the_reliability_warnings_once():
+    compressed = {
+        "RSRCH": {
+            "pass2_view": {"thesis_archetype": "dividend_compounder"},
+            "analysis_confidence": "low",
+            "data_quality_assessment": "low",
+            "assessment_summary": "x",
+            "narrative_truncated": "x",
+        }
+    }
+    system_prompt, user_message, _ = _capture_run(_bundle(), "tfsa", "DIVID: 1.0%", compressed)
+    warning = "RSRCH: low"
+    assert (system_prompt + user_message).count(warning) >= 1
+    assert user_message.count("RELIABILITY WARNINGS") == 0
+    assert system_prompt.count("RSRCH: low") == 1
+
+
+def test_system_prompt_names_the_analysed_account_and_has_no_unfilled_placeholder():
+    import re
+
+    system_prompt, _, _ = _capture_run(_bundle(), "rrsp", "DIVID: 1.0%")
+    assert "Account: RRSP." in system_prompt
+    assert re.findall(r"\{[a-z_]+\}", system_prompt) == []
+
+
+# ---------- ROOM presence reads the analysed account's own item (both rooms are rendered now) ----------
+
+
+def test_field_presence_room_reads_the_analysed_accounts_item_not_the_other_accounts():
+    bundle = _bundle()
+    line = "ROOM: TFSA remaining $32,000 | RRSP remaining $28,000 (stale, last updated 430 days ago)"
+    with _mock_tax_metrics(line):
+        _, tfsa = build_user_message(bundle, {}, "tfsa")
+        _, rrsp = build_user_message(bundle, {}, "rrsp")
+    assert tfsa["room"] is True  # the stale one is RRSP's
+    assert rrsp["room"] is False
+
+
+def test_field_presence_room_false_when_only_the_other_accounts_room_is_on_file():
+    bundle = _bundle()
+    with _mock_tax_metrics("ROOM: RRSP remaining $28,000"):
+        _, presence = build_user_message(bundle, {}, "tfsa")
+    assert presence["room"] is False
+
+
+def test_field_presence_room_stays_false_for_trading_even_though_the_registered_rooms_render():
+    bundle = _bundle()
+    with _mock_tax_metrics("ROOM: TFSA remaining $32,000 | RRSP remaining $28,000"):
+        _, presence = build_user_message(bundle, {}, "trading")
+    assert presence["room"] is False
+
+def test_user_message_holds_only_the_rsrch_and_fund_views():
+    compressed = {
+        agent: {
+            "pass2_view": {"x": 1},
+            "analysis_confidence": "high",
+            "assessment_summary": f"{agent} summary",
+            "narrative_truncated": "n",
+        }
+        for agent in ("RSRCH", "FUND", "TECH", "SENT", "MACRO")
+    }
+    with _mock_tax_metrics("DIVID: 1.0%"):
+        msg, _ = build_user_message(_bundle(), compressed, "tfsa")
+    assert "(RSRCH)" in msg and "(FUND)" in msg
+    for dropped in ("(TECH)", "(SENT)", "(MACRO)"):
+        assert dropped not in msg
+
+
+def test_system_prompt_reliability_warnings_cover_only_the_agents_tax_receives():
+    compressed = {
+        agent: {
+            "pass2_view": {"thesis_archetype": "x"},
+            "analysis_confidence": "low",
+            "data_quality_assessment": "low",
+            "assessment_summary": "s",
+            "narrative_truncated": "n",
+        }
+        for agent in ("RSRCH", "FUND", "TECH", "SENT", "MACRO")
+    }
+    system_prompt, _, _ = _capture_run(_bundle(), "tfsa", "DIVID: 1.0%", compressed)
+    assert "RSRCH: low" in system_prompt and "FUND: low" in system_prompt
+    assert "TECH: low" not in system_prompt and "MACRO: low" not in system_prompt
