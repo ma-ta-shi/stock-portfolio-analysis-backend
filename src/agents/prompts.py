@@ -20,6 +20,7 @@ first commits -- retired 2026-09-18. `backend/` is a separately-deployed repo
 the only copy guaranteed to exist wherever backend code actually runs.
 """
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -138,3 +139,38 @@ def load_template(slug: str, version: int = 1, stage: str | None = None) -> str:
             f"stage={stage!r}). Has backend/scripts/split_prompt_docs.py been run for "
             f"this agent?"
         ) from exc
+
+
+def prompt_fingerprints() -> dict:
+    """Which prompt text a run used (86bc997wr bug bash, ledger BB-045).
+
+    Every agent row says `prompt_version = "v1"` however many times its template
+    file has been edited in place, so the version cannot say which text produced
+    an output, and a before/after comparison of a prompt fix cannot be attributed.
+    This hashes every file under backend/prompts (the templates AND the tax
+    reference document the Tax Strategist embeds, since that changes the prompt
+    too). The hash is of the text as `load_template` reads it (universal
+    newlines), so a Windows and a Linux checkout of the same content agree.
+
+    Returns {"files": {"technical_analyst/v1.txt": "a1b2c3d4e5f6", ...},
+    "combined": "9f8e7d6c5b4a"}. Twelve hex digits (48 bits) is plenty to tell a
+    handful of edits apart. `combined` changes if any file, or the set of files,
+    changes.
+
+    Limit: this covers the STATIC template text only. Text the model reads that is
+    written by code (the "stale data: ..." and DATA COVERAGE lines, the retry
+    message, the compression step) is not in these files; `services.code_version`
+    records a hash of the source for that, and two runs are only comparable when
+    both hashes match.
+    """
+    files: dict[str, str] = {}
+    for path in sorted(_PROMPTS_DIR.rglob("*")):
+        if path.is_file() and path.suffix in (".txt", ".md"):
+            text = path.read_text(encoding="utf-8")
+            files[path.relative_to(_PROMPTS_DIR).as_posix()] = hashlib.sha256(
+                text.encode("utf-8")
+            ).hexdigest()[:12]
+    combined = hashlib.sha256(
+        "\n".join(f"{name}:{digest}" for name, digest in files.items()).encode("utf-8")
+    ).hexdigest()[:12]
+    return {"files": files, "combined": combined}

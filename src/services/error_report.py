@@ -22,6 +22,7 @@ import re
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import UUID
 
 from sqlalchemy import func, select
 
@@ -91,6 +92,37 @@ def _traceback_tail(stack_trace: str | None, lines: int = 6) -> list[str]:
 def _ts(value: datetime | None) -> str:
     """A timestamp to the second (the stored values carry microseconds)."""
     return "N/A" if value is None else value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+async def resolve_run_id(session, text: str) -> UUID:
+    """A run id as the scripts accept it: the full id (with or without dashes) or a
+    UNIQUE prefix of at least 4 hex characters, which is what the batch table prints
+    (8 characters). Raises ValueError, with a message that says what to do, for
+    anything else. Prefixes are matched in Python over the newest 5000 runs, so it is
+    portable across SQLite (hex ids) and PostgreSQL (uuid type)."""
+    cleaned = text.strip().lower().replace("-", "")
+    if not re.fullmatch(r"[0-9a-f]{4,32}", cleaned):
+        raise ValueError(
+            f"{text!r} is not a run id: give the full id, or at least 4 hex characters of it"
+        )
+    if len(cleaned) == 32:
+        return UUID(cleaned)
+    ids = (
+        (
+            await session.execute(
+                select(AnalysisRun.run_id).order_by(AnalysisRun.triggered_at.desc()).limit(5000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    matches = [run_id for run_id in ids if run_id.hex.startswith(cleaned)]
+    if not matches:
+        raise ValueError(f"no recent run has an id starting with {cleaned!r}")
+    if len(matches) > 1:
+        options = ", ".join(str(m)[:12] for m in matches[:5])
+        raise ValueError(f"{cleaned!r} matches {len(matches)} runs ({options}...): use more characters")
+    return matches[0]
 
 
 # --- diagnose one run -------------------------------------------------------------
@@ -214,6 +246,10 @@ async def diagnose_run(session, run_id, *, now: datetime | None = None) -> dict 
             "triggered_at": run.triggered_at,
             "completed_at": run.completed_at,
             "error_log": run.error_log or [],
+            # Which prompt text this run used (ledger BB-045); None for runs made
+            # before it was recorded.
+            "prompts_hash": (run.llm_config or {}).get("prompts_hash"),
+            "code_hash": (run.llm_config or {}).get("code_hash"),
         },
         "verdict": _verdict(run, errors, agents, failing_calls, liveness),
         "errors": errors,
@@ -261,13 +297,28 @@ def _call_dict(call: LLMCall) -> dict:
     }
 
 
-def _retried_agents(agents: list[dict], failing_calls: dict) -> list[str]:
-    """Agents whose calls were rejected or malformed but that ended with an accepted
-    answer. A failed agent is excluded (it already has its own error row).
+def _last_attempt_failed(calls: list[dict]) -> bool:
+    """True when the agent's FINAL attempt still failed validation or parsing."""
+    last = calls[-1]
+    return last["validator_passed"] is False or last["parsed_ok"] is False
+
+
+def _retried_agents(agents: list[dict], failing_calls: dict) -> tuple[list[str], list[str]]:
+    """(recovered, exhausted): agents whose calls were rejected or malformed at least
+    once and then either PASSED on a later attempt (recovered), or failed on every
+    attempt and had their last output used anyway (exhausted; see agent_completed():
+    validation is a warning, not a gate, settled 2026-09-02). A failed agent is
+    excluded from both (it already has its own error row).
     agent_outputs names are upper case (FUND); call sites are lower case (agent:fund)."""
     failed = {a["agent_name"].lower() for a in agents if a["status"] == "failed"}
-    names = (site.removeprefix("agent:") for site in sorted(failing_calls))
-    return [name for name in names if name.lower() not in failed]
+    recovered: list[str] = []
+    exhausted: list[str] = []
+    for site in sorted(failing_calls):
+        name = site.removeprefix("agent:")
+        if name.lower() in failed:
+            continue
+        (exhausted if _last_attempt_failed(failing_calls[site]) else recovered).append(name)
+    return recovered, exhausted
 
 
 def _verdict(run, errors, agents, failing_calls, liveness) -> dict:
@@ -282,19 +333,25 @@ def _verdict(run, errors, agents, failing_calls, liveness) -> dict:
         return {"outcome": "FAILED", "headline": f"FAILED at {stage}: {message}"}
     if run.status == "completed":
         failed_agents = [a["agent_name"] for a in agents if a["status"] == "failed"]
-        retried = _retried_agents(agents, failing_calls)
+        retried, exhausted = _retried_agents(agents, failing_calls)
         # Low-severity events (a provider that declined and a fallback covered it, a
         # link that failed and the chain moved on) are hidden everywhere else, so
         # they must not make the verdict read "problems" either; they are counted.
         low = sum(1 for e in errors if e["severity"] == "low")
         errors = [e for e in errors if e["severity"] != "low"]
         low_note = f" ({low} low-severity event(s), see diagnose_run)" if low else ""
-        if failed_agents or errors:
+        if failed_agents or errors or exhausted:
             bits = []
             if failed_agents:
                 bits.append(f"{len(failed_agents)} agent(s) failed ({', '.join(failed_agents)})")
             if errors:
                 bits.append(f"{len(errors)} error record(s)")
+            if exhausted:
+                # Not a recovered retry: every attempt failed and the last output was used.
+                bits.append(
+                    f"{len(exhausted)} agent(s) used output that failed validation on every "
+                    f"attempt ({', '.join(exhausted)})"
+                )
             if retried:
                 bits.append(f"{len(retried)} other agent(s) needed retries")
             return {
@@ -302,7 +359,7 @@ def _verdict(run, errors, agents, failing_calls, liveness) -> dict:
                 "headline": "COMPLETED, but " + "; ".join(bits),
             }
         if retried:
-            # Not a failure (every answer was eventually accepted), but the main
+            # Not a failure (every one of these passed on a later attempt), but the main
             # source of prompt and validator fixes: named, never folded into OK.
             return {
                 "outcome": "COMPLETED WITH RETRIES",
@@ -332,6 +389,8 @@ def format_diagnosis(d: dict) -> str:
         f"RESULT: {d['verdict']['headline']}",
         f"status: {run['status']} | triggered: {_ts(run['triggered_at'])} | "
         f"completed: {_ts(run['completed_at'])}",
+        f"prompts: {_fmt(run.get('prompts_hash'), 'not recorded')} | "
+        f"code: {_fmt(run.get('code_hash'), 'not recorded')}",
     ]
     if d["liveness"]:
         lv = d["liveness"]
@@ -421,17 +480,36 @@ def format_diagnosis(d: dict) -> str:
 # --- recent errors, tracked across runs -----------------------------------------------
 
 
-def _why_rejected(calls: list[dict]) -> str:
-    """The first reason any attempt of this call was not accepted: the validator's
-    own words, else the parse error, else an abnormal finish (a truncated reply)."""
+def _why_rejected(calls: list[dict], *, limit: int = 3, width: int = 70) -> str:
+    """Every DISTINCT reason any attempt of this call was not accepted, in order:
+    each validator error (the same rule with different numbers counts once), then a
+    parse error, then an abnormal finish (a truncated reply). Showing only the first
+    error hid that a second rule (for example the Macro stale-data rule) fired in
+    every rejection. At most `limit` are shown, then a "+N more"."""
+    reasons: dict[str, str] = {}
     for c in calls:
-        if c["validator_errors"]:
-            return c["validator_errors"][0]
+        candidates = list(c["validator_errors"] or [])
         if c["parse_error"]:
-            return f"unparseable: {c['parse_error']}"
+            candidates.append(f"unparseable: {c['parse_error']}")
         if c["finish_reason"] not in _NORMAL_FINISH:
-            return f"finish_reason={c['finish_reason']}"
-    return "no reason recorded"
+            candidates.append(f"finish_reason={c['finish_reason']}")
+        for text in candidates:
+            reasons.setdefault(rule_slug(text), _short(text, width))
+    if not reasons:
+        return "no reason recorded"
+    shown = list(reasons.values())[:limit]
+    extra = len(reasons) - len(shown)
+    return "; ".join(shown) + (f"; +{extra} more" if extra else "")
+
+
+def _symbols_note(context) -> str:
+    """The symbols a data event happened for, when the hook knew them (a peer's news
+    call and the stock's own call are otherwise indistinguishable)."""
+    symbols = (context or {}).get("symbols") if isinstance(context, dict) else None
+    if not symbols:
+        return ""
+    shown = ", ".join(symbols[:5])
+    return f" [{shown}{', ...' if len(symbols) > 5 else ''}]"
 
 
 _SUMMARY_MAX_LINES = 8
@@ -466,11 +544,23 @@ def format_run_summary(d: dict) -> str:
                 f" agent={e['agent_name']}" if e["agent_name"] else ""
             )
         times = f" x{e['count']}" if e["count"] > 1 else ""
-        problems.append(f"[{e['severity']}] {who}{times}: {_short(e['message'], 110)}")
+        problems.append(
+            f"[{e['severity']}] {who}{times}: {_short(e['message'], 110)}"
+            f"{_symbols_note(e.get('context'))}"
+        )
     if not d["errors"]:
         for entry in d["run"]["error_log"]:
             problems.append(f"[{_fmt(entry.get('stage'))}] {_short(entry.get('error'), 110)}")
-    for name in _retried_agents(d["agents"], d["failing_calls"]):
+    recovered, exhausted = _retried_agents(d["agents"], d["failing_calls"])
+    # Most serious first: an agent whose every attempt failed validation and whose last
+    # output was used anyway (validation is a warning, not a gate), then recovered retries.
+    for name in exhausted:
+        calls = d["failing_calls"][f"agent:{name}"]
+        problems.append(
+            f"{name}: all {len(calls)} attempt(s) failed validation; the last output was "
+            f"used anyway ({_why_rejected(calls)})"
+        )
+    for name in recovered:
         calls = d["failing_calls"][f"agent:{name}"]
         rejected = [
             c
@@ -480,8 +570,8 @@ def format_run_summary(d: dict) -> str:
             or c["finish_reason"] not in _NORMAL_FINISH
         ]
         problems.append(
-            f"{name}: {len(rejected)} of {len(calls)} attempt(s) rejected, then accepted"
-            f" ({_short(_why_rejected(calls), 90)})"
+            f"{name}: {len(rejected)} of {len(calls)} attempt(s) rejected, then passed"
+            f" ({_why_rejected(calls)})"
         )
     if problems:
         out.append("problems:")
@@ -824,3 +914,120 @@ def _fmt_minutes(value: float | None) -> str:
         return f"{value:.0f}m"
     hours = value / 60
     return f"{hours:.1f}h" if hours < 48 else f"{hours / 24:.1f}d"
+
+
+# --- quality by prompt state (ledger BB-045) -----------------------------------------------
+
+# The template file each agent call site reads. `analysis_runs.llm_config["prompt_hashes"]` is
+# keyed by template file, and `llm_calls.call_site` names the agent, so this joins the two.
+_AGENT_TEMPLATES = {
+    "agent:rsrch": "stock_researcher/v1.txt",
+    "agent:fund": "fundamental_analyst/v1.txt",
+    "agent:tech": "technical_analyst/v1.txt",
+    "agent:sent": "sentiment_analyst/v1.txt",
+    "agent:macro": "macro_economist/v1.txt",
+    "agent:bull": "bull_advocate/v1.txt",
+    "agent:bear": "bear_advocate/v1.txt",
+    "agent:risk_stage_a": "risk_advisor/v1_stage_a.txt",
+    "agent:risk_stage_b": "risk_advisor/v1_stage_b.txt",
+    "agent:tax": "tax_strategist/v1.txt",
+    "agent:cio_stage_a": "cio/v1_stage_a.txt",
+    "agent:cio_stage_b": "cio/v1_stage_b.txt",
+    "agent:shadow_cio": "shadow_cio/v1.txt",
+}
+_NOT_RECORDED = "not recorded"
+
+
+async def prompt_comparison(session, since: datetime) -> dict:
+    """How often each agent's attempts were rejected, split by the hash of THAT agent's own
+    template, so an edit to one prompt shows as a before and after (ledger BB-045). An
+    attempt counts as rejected on a validator failure, a parse failure or a truncated reply,
+    the same test the diagnosis uses. Runs from before hashes were recorded fall in one
+    "not recorded" group per agent. `code_states` is how many different code hashes the runs
+    in a group span: a prompt comparison is only fair when it is 1, because a code change
+    alters what the agents are told as well."""
+    since = _naive_utc(since)
+    rows = (
+        await session.execute(
+            select(
+                LLMCall.run_id,
+                LLMCall.call_site,
+                LLMCall.validator_passed,
+                LLMCall.parsed_ok,
+                LLMCall.finish_reason,
+                LLMCall.validator_errors,
+                LLMCall.created_at,
+                AnalysisRun.llm_config,
+            )
+            .join(AnalysisRun, AnalysisRun.run_id == LLMCall.run_id)
+            .where(LLMCall.call_site.like("agent:%"), LLMCall.created_at >= since)
+            .order_by(LLMCall.created_at)
+        )
+    ).all()
+    groups: dict[tuple[str, str], dict] = {}
+    for run_id, site, passed, parsed, finish, errors, created, config in rows:
+        config = config or {}
+        template = _AGENT_TEMPLATES.get(site)
+        digest = (config.get("prompt_hashes") or {}).get(template) if template else None
+        group = groups.setdefault(
+            (site, digest or _NOT_RECORDED),
+            {"runs": set(), "attempts": 0, "rejected": 0, "reasons": Counter(), "code": set()},
+        )
+        group["runs"].add(run_id)
+        group["attempts"] += 1
+        group["last"] = created
+        if config.get("code_hash"):
+            group["code"].add(config["code_hash"])
+        if passed is False or parsed is False or finish not in _NORMAL_FINISH:
+            group["rejected"] += 1
+            if errors:
+                reason = rule_slug(errors[0])
+            elif parsed is False:
+                reason = "unparseable output"
+            else:
+                reason = f"finish_reason={finish}"
+            group["reasons"][reason] += 1
+    out = []
+    for (site, digest), g in groups.items():
+        out.append(
+            {
+                "agent": site.removeprefix("agent:"),
+                "site": site,
+                "template": _AGENT_TEMPLATES.get(site),
+                "prompt_hash": digest,
+                "runs": len(g["runs"]),
+                "attempts": g["attempts"],
+                "rejected": g["rejected"],
+                "rate": g["rejected"] / g["attempts"] if g["attempts"] else 0.0,
+                "top_reasons": g["reasons"].most_common(2),
+                "code_states": len(g["code"]),
+                "last": g["last"],
+            }
+        )
+    out.sort(key=lambda r: (r["agent"], -(r["last"].timestamp() if r["last"] else 0)))
+    return {"since": since, "groups": out}
+
+
+def format_prompt_comparison(d: dict) -> str:
+    lines = [
+        f"=== quality by prompt state: agent attempts since {_ts(d['since'])} UTC ===",
+        "rejected = validator failure, parse failure or truncated reply, per attempt. Compare two "
+        "rows of the same agent only when their code states are 1 (a code change alters what the "
+        "agent is told too).",
+    ]
+    if not d["groups"]:
+        lines.append("(no agent attempts in this window)")
+        return "\n".join(lines)
+    current = None
+    for g in d["groups"]:
+        if g["agent"] != current:
+            current = g["agent"]
+            lines.append(f"\n{g['agent']}  ({g['template'] or 'no template known'})")
+        code_note = "" if g["code_states"] <= 1 else f" | CODE CHANGED across {g['code_states']} states"
+        lines.append(
+            f"  {g['prompt_hash']:<14} {g['runs']:>3} run(s) {g['attempts']:>4} attempt(s) "
+            f"{g['rejected']:>3} rejected ({g['rate']:.0%})  last {_ts(g['last'])}{code_note}"
+        )
+        for reason, count in g["top_reasons"]:
+            lines.append(f"      x{count}  {_short(reason, 100)}")
+    return "\n".join(lines)

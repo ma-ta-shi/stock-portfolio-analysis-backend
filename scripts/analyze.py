@@ -55,7 +55,10 @@ from dotenv import load_dotenv
 
 # Same fix as api/main.py:30-31 (86bb7j0kh), same reason: must run before
 # anything else logs.
-sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+# line_buffering: when stdout is redirected to a file it is otherwise block-buffered, and a
+# process that dies hard (a segfault, a kill) loses everything it had printed, including the
+# run_id (ledger BB-049).
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace", line_buffering=True)
 sys.stderr.reconfigure(encoding="utf-8", errors="backslashreplace")
 
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]

@@ -34,6 +34,18 @@ import contextvars
 from dataclasses import dataclass, field
 
 _MESSAGE_LIMIT = 500
+_MAX_SYMBOLS = 10  # distinct symbols remembered per event (a peer sweep can touch many)
+
+
+def _with_symbols(context: dict | None) -> dict:
+    """A copy of the hook's context where a single `symbol` becomes a `symbols` list, so
+    later events with the same key can add theirs (BB-041: a peer's failed news call and
+    the stock's own call would otherwise be indistinguishable in one deduplicated row)."""
+    ctx = dict(context or {})
+    symbol = ctx.pop("symbol", None)
+    if symbol:
+        ctx["symbols"] = [symbol]
+    return ctx
 
 # FMP endpoints (the path FMPDataProvider._request is called with) whose Router chain
 # has another provider after FMP, so an FMP decline does not lose the data. Keep this
@@ -164,8 +176,13 @@ class DegradationCollector:
             severity = classify(provider, op, kind, context)
             key = (provider, op, kind)
             existing = self._events.get(key)
+            symbol = (context or {}).get("symbol")
             if existing is not None:
                 existing.count += 1
+                if symbol:
+                    symbols = existing.context.setdefault("symbols", [])
+                    if symbol not in symbols and len(symbols) < _MAX_SYMBOLS:
+                        symbols.append(symbol)
                 return
             self._events[key] = DegradationEvent(
                 provider=provider,
@@ -174,7 +191,7 @@ class DegradationCollector:
                 severity=severity,
                 message=str(message)[:_MESSAGE_LIMIT],
                 exc_type=type(exc).__name__ if exc is not None else None,
-                context=dict(context or {}),
+                context=_with_symbols(context),
             )
         except Exception:
             pass

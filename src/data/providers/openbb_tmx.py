@@ -428,7 +428,12 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
                     "get_filings_openbb_error", ticker=ticker, symbol=bare_symbol, error=str(e)
                 )
                 report_degradation(
-                    "openbb_tmx", "get_filings", FETCH_FAILED, f"{bare_symbol}: {e}", exc=e
+                    "openbb_tmx",
+                    "get_filings",
+                    FETCH_FAILED,
+                    f"{bare_symbol}: {e}",
+                    exc=e,
+                    context={"symbol": ticker},
                 )
                 return pd.DataFrame()
             if not result.results:

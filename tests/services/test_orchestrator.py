@@ -7,6 +7,7 @@ DataPipeline.prepare() and the benchmark Router fetch are also mocked -- no
 network calls, no real Ollama.
 """
 import asyncio
+import re
 from contextlib import ExitStack
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -2216,3 +2217,108 @@ async def test_one_runs_degradation_never_leaks_into_the_next_runs_rows():
     await _run_with(session2, run2)  # a clean run
 
     assert await _error_rows(session2) == []
+
+
+# ---------- prompt fingerprints (86bc997wr, ledger BB-045) ----------
+
+
+async def _stored_llm_config(session, run) -> dict:
+    """Read llm_config back from the database, not from the in-memory run object, so the
+    test proves it was really committed."""
+    return (
+        await session.execute(select(AnalysisRun.llm_config).where(AnalysisRun.run_id == run.run_id))
+    ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_a_run_records_which_prompt_text_it_used_even_when_it_fails_early():
+    session = await _make_session()
+    run = await _make_run(session, llm_config={"model": "gpt-oss:20b"})
+
+    with patch("services.orchestrator.DataPipeline") as MockPipeline:
+        MockPipeline.return_value.prepare = AsyncMock(side_effect=ValueError("no data"))
+        with pytest.raises(ValueError):
+            await AnalysisOrchestrator().run(run, session)
+
+    config = await _stored_llm_config(session, run)
+    assert config["model"] == "gpt-oss:20b"  # the existing entry is kept
+    assert re.fullmatch(r"[0-9a-f]{12}", config["prompts_hash"])
+    assert "technical_analyst/v1.txt" in config["prompt_hashes"]
+    assert "tax_strategist/canadian_tax_rules_reference.md" in config["prompt_hashes"]
+    assert re.fullmatch(r"[0-9a-f]{12}", config["code_hash"])
+
+
+@pytest.mark.asyncio
+async def test_changing_a_prompt_between_two_runs_changes_the_recorded_hash(monkeypatch):
+    first = await _make_session()
+    run_one = await _make_run(first)
+    second = await _make_session()
+    run_two = await _make_run(second)
+
+    with patch("services.orchestrator.DataPipeline") as MockPipeline:
+        MockPipeline.return_value.prepare = AsyncMock(side_effect=ValueError("no data"))
+        with pytest.raises(ValueError):
+            await AnalysisOrchestrator().run(run_one, first)
+        monkeypatch.setattr(
+            "services.orchestrator.prompt_fingerprints",
+            lambda: {"files": {"technical_analyst/v1.txt": "edited000000"}, "combined": "edited000000"},
+        )
+        with pytest.raises(ValueError):
+            await AnalysisOrchestrator().run(run_two, second)
+
+    one = await _stored_llm_config(first, run_one)
+    two = await _stored_llm_config(second, run_two)
+    assert one["prompts_hash"] != two["prompts_hash"]
+    assert two["prompt_hashes"] == {"technical_analyst/v1.txt": "edited000000"}
+
+
+@pytest.mark.asyncio
+async def test_a_problem_hashing_the_prompts_never_stops_the_run_or_the_code_hash():
+    session = await _make_session()
+    run = await _make_run(session, llm_config={"model": "gpt-oss:20b"})
+
+    with (
+        patch("services.orchestrator.prompt_fingerprints", side_effect=OSError("disk gone")),
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(side_effect=ValueError("no data"))
+        with pytest.raises(ValueError, match="no data"):  # the normal failure, not the OSError
+            await AnalysisOrchestrator().run(run, session)
+
+    config = await _stored_llm_config(session, run)
+    assert "prompts_hash" not in config and "prompt_hashes" not in config
+    assert config["model"] == "gpt-oss:20b" and re.fullmatch(r"[0-9a-f]{12}", config["code_hash"])
+
+
+@pytest.mark.asyncio
+async def test_a_problem_hashing_the_code_never_stops_the_run_or_the_prompt_hash():
+    session = await _make_session()
+    run = await _make_run(session, llm_config={"model": "gpt-oss:20b"})
+
+    with (
+        patch("services.orchestrator.code_fingerprint", side_effect=OSError("disk gone")),
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(side_effect=ValueError("no data"))
+        with pytest.raises(ValueError, match="no data"):
+            await AnalysisOrchestrator().run(run, session)
+
+    config = await _stored_llm_config(session, run)
+    assert "code_hash" not in config and re.fullmatch(r"[0-9a-f]{12}", config["prompts_hash"])
+
+
+@pytest.mark.asyncio
+async def test_if_neither_hash_can_be_taken_the_run_is_left_exactly_as_it_was():
+    session = await _make_session()
+    run = await _make_run(session, llm_config={"model": "gpt-oss:20b"})
+
+    with (
+        patch("services.orchestrator.prompt_fingerprints", side_effect=OSError("gone")),
+        patch("services.orchestrator.code_fingerprint", side_effect=OSError("gone")),
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(side_effect=ValueError("no data"))
+        with pytest.raises(ValueError, match="no data"):
+            await AnalysisOrchestrator().run(run, session)
+
+    assert await _stored_llm_config(session, run) == {"model": "gpt-oss:20b"}

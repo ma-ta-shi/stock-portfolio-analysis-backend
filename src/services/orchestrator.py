@@ -48,6 +48,7 @@ from agents.pass2_risk_advisor import RiskAdvisorRunner
 from agents.pass2_tax_strategist import TaxStrategistRunner
 from agents.pass3_cio import CIORunner
 from agents.pass3_shadow_cio import ShadowCIORunner
+from agents.prompts import prompt_fingerprints
 from agents.utils import (
     agent_completed,
     compute_disagreement_score,
@@ -78,6 +79,7 @@ from data.precompute.tax_metrics import (
 from data.providers.router import Router
 from data.schemas.context import AnalysisContext
 from data.schemas.data_bundle import DataBundle
+from services.code_version import code_fingerprint
 from services.error_recorder import (
     build_error_note,
     describe_exception,
@@ -627,6 +629,34 @@ class AnalysisOrchestrator:
         except Exception:
             pass
 
+    async def _record_run_fingerprints(self, run: AnalysisRun, db: AsyncSession) -> None:
+        """Store which prompt text and which code this run used (ledger BB-045), merged
+        into `llm_config` so the existing `model` entry stays: `prompts_hash` plus the
+        per-file `prompt_hashes` (the templates), and `code_hash` (the backend source,
+        which writes much of what the model reads). Done before prepare() and committed
+        straight away, on a session that is still clean, so it survives a run that
+        fails early or is cancelled. Each hash is best effort and independent: a problem
+        reading files must never stop a run, nor stop the other hash (a commit that
+        fails is not swallowed, because a broken database would fail the run at its next
+        commit anyway, and rolling back here would expire the run's attributes).
+        Limit: both are taken when the run starts, so a file edited while a run is in
+        flight is attributed to the state the run began with."""
+        recorded: dict = {}
+        try:
+            fingerprints = prompt_fingerprints()
+            recorded["prompts_hash"] = fingerprints["combined"]
+            recorded["prompt_hashes"] = fingerprints["files"]
+        except Exception:
+            logger.warning("prompt_fingerprints_failed", exc_info=True)
+        try:
+            recorded["code_hash"] = code_fingerprint()
+        except Exception:
+            logger.warning("code_fingerprint_failed", exc_info=True)
+        if not recorded:
+            return
+        run.llm_config = {**(run.llm_config or {}), **recorded}
+        await db.commit()
+
     def _drain_degradation(self) -> None:
         """Turn what the data layer collected during this run (a provider that
         raised and was skipped, an LLM sub-call that got no answer, articles left
@@ -909,6 +939,8 @@ class AnalysisOrchestrator:
         # self._gate1_passed/_gate1_reason/_gate2_passed/_gate2_reason
         # (86bbwachy Phase 5) are initialized in run(), not here -- see that
         # method's own comment on why it owns this instead of _run_pipeline.
+
+        await self._record_run_fingerprints(run, db)
 
         try:
             bundle = await DataPipeline().prepare(

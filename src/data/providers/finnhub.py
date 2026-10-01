@@ -122,7 +122,7 @@ class FinnhubDataProvider(NewsProvider):
                 body = await response.text()
                 logger.warning("finnhub_forbidden", path=path, params=params, body=body[:200])
                 report_degradation(
-                    "finnhub", path, NOT_COVERED, f"HTTP 403: {body[:200]}", context={"path": path}
+                    "finnhub", path, NOT_COVERED, f"HTTP 403: {body[:200]}", context={"path": path, "symbol": params.get("symbol")}
                 )
                 return None
             if response.status == 429:

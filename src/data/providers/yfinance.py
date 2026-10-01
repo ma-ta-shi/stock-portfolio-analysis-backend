@@ -388,7 +388,14 @@ class YFinanceDataProvider(StockDataProvider):
             info = stock.info
         except Exception as exc:
             logger.warning("yfinance_analyst_ratings_no_info", ticker=ticker)
-            report_degradation("yfinance", "get_analyst_ratings", FETCH_FAILED, str(exc), exc=exc)
+            report_degradation(
+                "yfinance",
+                "get_analyst_ratings",
+                FETCH_FAILED,
+                str(exc),
+                exc=exc,
+                context={"symbol": ticker},
+            )
             info = {}
 
         target_mean = _safe_float(info.get("targetMeanPrice"))
@@ -448,7 +455,14 @@ class YFinanceDataProvider(StockDataProvider):
             info = stock.info
         except Exception as exc:
             logger.warning("yfinance_short_interest_no_info", ticker=ticker)
-            report_degradation("yfinance", "get_short_interest", FETCH_FAILED, str(exc), exc=exc)
+            report_degradation(
+                "yfinance",
+                "get_short_interest",
+                FETCH_FAILED,
+                str(exc),
+                exc=exc,
+                context={"symbol": ticker},
+            )
             return {}
 
         shares_short = _safe_int(info.get("sharesShort"))
@@ -559,6 +573,7 @@ class YFinanceDataProvider(StockDataProvider):
                 "get_insider_trading",
                 DATA_MISSING,
                 "insider table has no Start Date or Date column",
+                context={"symbol": ticker},
             )
             return []
         df_insider[date_col] = pd.to_datetime(df_insider[date_col])
@@ -632,7 +647,9 @@ class YFinanceDataProvider(StockDataProvider):
             return peer_list
         except Exception as e:
             print(f"Error retrieving peer data: {e}")
-            report_degradation("yfinance", "get_peers", FETCH_FAILED, str(e), exc=e)
+            report_degradation(
+                "yfinance", "get_peers", FETCH_FAILED, str(e), exc=e, context={"symbol": ticker}
+            )
             return []
 
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
@@ -740,7 +757,14 @@ class YFinanceDataProvider(StockDataProvider):
             price = fi.get("lastPrice")
         except Exception as exc:
             # No log here today; the report is the only trace of this failure.
-            report_degradation("yfinance", "get_quote", FETCH_FAILED, f"{ticker}: {exc!r}", exc=exc)
+            report_degradation(
+                "yfinance",
+                "get_quote",
+                FETCH_FAILED,
+                f"{ticker}: {exc!r}",
+                exc=exc,
+                context={"symbol": ticker},
+            )
             return {}
         if price is None:
             return {}

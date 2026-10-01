@@ -119,7 +119,7 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
                     "fmp_symbol_not_available", path=path, params=params, body=body[:200]
                 )
                 report_degradation(
-                    "fmp", path, NOT_COVERED, f"HTTP 402: {body[:200]}", context={"path": path}
+                    "fmp", path, NOT_COVERED, f"HTTP 402: {body[:200]}", context={"path": path, "symbol": params.get("symbol")}
                 )
                 return None
             if response.status == 401:
@@ -138,7 +138,7 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
                         path,
                         NOT_COVERED,
                         "empty /profile (FMP's signal for a symbol it will not serve)",
-                        context={"path": path},
+                        context={"path": path, "symbol": params.get("symbol")},
                     )
                 return None
             return data

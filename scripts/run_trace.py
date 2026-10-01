@@ -26,7 +26,6 @@ import argparse
 import asyncio
 import sys
 from pathlib import Path
-from uuid import UUID
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -48,6 +47,7 @@ from api.tables.predictions import Prediction  # noqa: E402, F401
 from api.tables.recommendations import Recommendation  # noqa: E402, F401
 from api.tables.run_quality_summary import RunQualitySummary  # noqa: E402
 from api.tables.stock import Stock  # noqa: E402
+from services.error_report import resolve_run_id  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
 
@@ -60,8 +60,13 @@ def _fmt(v, na="N/A"):
     return na if v is None else v
 
 
-async def _run_trace(run_id: UUID) -> int:
+async def _run_trace(run_text: str) -> int:
     async with AsyncSessionLocal() as session:
+        try:
+            run_id = await resolve_run_id(session, run_text)  # full id or a unique prefix
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 2
         run = (
             await session.execute(select(AnalysisRun).where(AnalysisRun.run_id == run_id))
         ).scalar_one_or_none()
@@ -148,7 +153,7 @@ async def _run_trace(run_id: UUID) -> int:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("run_id", type=UUID)
+    parser.add_argument("run_id", help="the full run id, or a unique prefix of it")
     args = parser.parse_args()
     sys.exit(asyncio.run(_run_trace(args.run_id)))
 
