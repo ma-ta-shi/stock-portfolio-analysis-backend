@@ -44,7 +44,10 @@ def _has_risk_citation(text: str) -> bool:
 # tax-metric tokens"). Word-boundary matched for the same reason as the risk tokens:
 # LIST must not fire inside "LISTED", DOM not inside "DOMESTIC" or "RANDOM", LOSS not
 # inside "LOSSES", ROOM not inside "ROOMS".
-TAX_METRIC_TOKENS = {"DIVID", "LIST", "DOM", "WHT", "CGAIN", "ROOM", "LOSS", "ELIG"}
+# MARG is in the set because the prompt (rule 1) and the pre-computed block both advertise
+# it as a citation token; it was missing here, so evidence starting `MARG:` was rejected and
+# MARG never counted toward the narrative's three-token floor.
+TAX_METRIC_TOKENS = {"DIVID", "LIST", "DOM", "WHT", "CGAIN", "ROOM", "LOSS", "ELIG", "MARG"}
 _TAX_TOKEN_RE = re.compile(r"\b(?:" + "|".join(sorted(TAX_METRIC_TOKENS)) + r")\b")
 _REF_RE = re.compile(r"\bREF\b")
 # Rule 9: "Evidence starts with a valid citation token followed by `:`". Anchored,
@@ -671,11 +674,14 @@ def validate_tax_strategist(
                 f"key_factors[{i}].sentiment: must be positive|negative|neutral, got {sent!r}"
             )
 
-    # narrative: 1200-3200 chars
+    # narrative: 1000-3200 chars. The floor was 1200 (derived from the old "300-500 words" spec); lowered
+    # 2026-10-01 (Tax Strategist Wave 2) because the real content gates are the >=3 metric tokens and the
+    # REF below, the model lands near the floor of any length it is given, and complete 9-item narratives
+    # came out at 1,166-1,190 chars and were rejected for length alone. The prompt still aims at 1,800-2,500.
     narrative = output.get("narrative", "")
     nc = char_count(narrative)
-    if nc < 1200:
-        errors.append(f"narrative: too short ({nc} chars, min 1200)")
+    if nc < 1000:
+        errors.append(f"narrative: too short ({nc} chars, min 1000)")
     if nc > 3200:
         errors.append(f"narrative: too long ({nc} chars, max 3200)")
 

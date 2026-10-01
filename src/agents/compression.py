@@ -102,8 +102,12 @@ def build_pass2_user_message(
     bundle: DataBundle,
     compressed_pass1: dict[str, dict | None],
     account_type: str | None = None,
+    agent_ids: tuple[str, ...] | None = None,
 ) -> str:
     """Builds the user message payload for Pass 2 agents from compressed Pass 1.
+
+    `agent_ids` limits which Pass 1 agents are included (default: all five, in the
+    canonical order). The Tax Strategist asks for RSRCH and FUND only.
 
     `bundle` is the real DataBundle for this analysis run, standing in for the
     harness's `fixture` dict -- see this module's docstring for the field mapping.
@@ -132,7 +136,7 @@ def build_pass2_user_message(
     }
 
     missing_agents = []
-    for agent_id in ["RSRCH", "FUND", "TECH", "SENT", "MACRO"]:
+    for agent_id in agent_ids or ["RSRCH", "FUND", "TECH", "SENT", "MACRO"]:
         out = compressed_pass1.get(agent_id)
         label = agent_labels[agent_id]
         if out is None:
