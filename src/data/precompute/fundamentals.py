@@ -29,12 +29,16 @@ ClickUp 86ban0wcr for the full reasoning):
 
 import statistics
 
+import structlog
+
 from data.providers.base import (
     NormalizedAnalystEstimates,
     NormalizedDividendRecord,
     NormalizedFinancials,
     NormalizedQuote,
 )
+
+logger = structlog.get_logger(__name__)
 
 # Fields both the sector-median PEER block and each peer_records entry need —
 # a subset of valuation/profitability/balance_sheet_metrics, not the full
@@ -588,6 +592,12 @@ def compute_peer_comparison(
         # peer_records, so this fixes both the medians and the per-peer
         # {peer_data_block} lines. A rejected value stores None (renders N/A).
         record.update({key: _valid_peer_value(key, merged.get(key)) for key in _SECTOR_MEDIAN_KEYS})
+        if all(record[key] is None for key in _SECTOR_MEDIAN_KEYS):
+            # Nothing usable (a delisted peer that Finnhub still lists, a ticker the
+            # provider has no statements for): it would only render as a metric-less
+            # "PEER_n (TICKER)" line. No median can change: they ignore None.
+            logger.info("peer_dropped_no_usable_metrics", peer_ticker=ticker)
+            continue
         peer_records.append(record)
 
     sector_medians = {}

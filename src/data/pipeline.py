@@ -13,12 +13,15 @@ from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agents.capture import CaptureContext
 from api.tables.llm_calls import LLMCall
 from api.tables.stock import Stock
+from data.degradation import FETCH_FAILED
+from data.degradation import report as report_degradation
 from data.precompute import fundamentals, risk_metrics, sentiment, technicals
 from data.precompute.canadian_data_flags import build_canadian_data_flags
 from data.precompute.macro_sources import compute_macro_sources
@@ -27,11 +30,13 @@ from data.precompute.research_sources import build_research_sources
 from data.providers.boc import BOCMacroDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fred import FredMacroDataProvider
-from data.providers.router import Router
+from data.providers.router import Router, is_canadian_ticker
 from data.providers.stats_canada import StatsCanadaProvider
 from data.schemas.common import StockRef
 from data.schemas.context import AnalysisContext
 from data.schemas.data_bundle import DataBundle, build_data_freshness, get_benchmark
+
+logger = structlog.get_logger(__name__)
 
 # US sector -> SPDR sector ETF, keyed on the real yfinance/FMP-style sector
 # strings (confirmed live 2026-09-15, e.g. RY.TO -> "Finance" vs JPM ->
@@ -68,6 +73,38 @@ _CA_SECTOR_ETF: dict[str, str] = {
 # dividend_growth_5yr (needs 5y) and tax_metrics.py's compute_trailing_
 # dividend (needs 365 days) - 6y gives both a buffer.
 _DIVIDEND_HISTORY_YEARS = 6
+
+
+async def _fetch_peer(router, peer_ticker: str, *, subject_is_ca: bool):
+    """One peer's financials and quote, or None when they cannot be fetched (BB-030).
+
+    The financials source follows the PEER's market, not the subject's: edgartools is
+    SEC EDGAR and has no Canadian company, so a `.TO` peer of a US stock (Finnhub
+    returned PRMW.TO for KO) raised CompanyNotFoundError inside the shared gather and
+    failed the whole run. Canadian subjects already used yfinance for every peer, US
+    ones included, so only a US subject with a Canadian peer changes.
+
+    A peer that still raises is dropped and reported (it shows in the run summary), not
+    allowed to fail the analysis: one comparison company is not worth the run. The
+    subject's own fetches are not guarded this way; those should still fail it."""
+    provider_key = "yfinance" if subject_is_ca or is_canadian_ticker(peer_ticker) else "edgartools"
+    try:
+        peer_fin, peer_quote = await asyncio.gather(
+            router._providers[provider_key].normalize_financials(peer_ticker),
+            router.get_quote(peer_ticker),
+        )
+    except Exception as exc:
+        logger.warning("pipeline_peer_fetch_failed", peer_ticker=peer_ticker, exc_info=True)
+        report_degradation(
+            "pipeline",
+            "peer_financials",
+            FETCH_FAILED,
+            f"{peer_ticker}: {exc}",
+            exc=exc,
+            context={"symbol": peer_ticker},
+        )
+        return None
+    return peer_ticker, peer_fin, peer_quote
 
 
 def resolve_sector_etf(sector: str | None, is_ca: bool) -> str | None:
@@ -209,15 +246,9 @@ class DataPipeline:
             # underlying APIs is already the provider libraries' own job
             # (pyrate_limiter), not something this loop needs to hand-roll.
             peer_results = await asyncio.gather(
-                *(
-                    asyncio.gather(fin_provider.normalize_financials(t), router.get_quote(t))
-                    for t in peer_tickers
-                )
+                *(_fetch_peer(router, t, subject_is_ca=is_ca) for t in peer_tickers)
             )
-            peer_data = [
-                (peer_ticker, peer_fin, peer_quote)
-                for peer_ticker, (peer_fin, peer_quote) in zip(peer_tickers, peer_results)
-            ]
+            peer_data = [result for result in peer_results if result is not None]
 
             fundamentals_result = fundamentals.compute_all(
                 fin=fin,

@@ -89,10 +89,18 @@ def _price_df(n=5):
 
 
 class _FakeFinancialsProvider:
-    def __init__(self, fin):
+    # Class-level so a test can see which provider handled which ticker, and make one fail.
+    calls: list = []
+    failing: set = set()
+
+    def __init__(self, fin, name="fake"):
         self._fin = fin
+        self._name = name
 
     async def normalize_financials(self, ticker):
+        type(self).calls.append((self._name, ticker))
+        if ticker in type(self).failing:
+            raise RuntimeError(f"Company not found: {ticker!r}")
         return self._fin
 
 
@@ -114,8 +122,8 @@ class _FakeRouter:
     def __init__(self, stock=None, ticker=None, **provider_overrides):
         self.sources_used = {"get_price_history": "yfinance"}
         self._providers = {
-            "yfinance": _FakeFinancialsProvider(self.fin),
-            "edgartools": _FakeFinancialsProvider(self.fin),
+            "yfinance": _FakeFinancialsProvider(self.fin, "yfinance"),
+            "edgartools": _FakeFinancialsProvider(self.fin, "edgartools"),
         }
         type(self).instances.append(self)
 
@@ -347,9 +355,13 @@ def patched_precompute(monkeypatch):
     monkeypatch.setattr(pipeline_module, "StatsCanadaProvider", lambda: _FakeAsyncCtxProvider())
     _FakeRouter.instances = []
     _FakeRouter.price_history_calls = []
+    _FakeFinancialsProvider.calls = []
+    _FakeFinancialsProvider.failing = set()
     yield
     _FakeRouter.instances = []
     _FakeRouter.price_history_calls = []
+    _FakeFinancialsProvider.calls = []
+    _FakeFinancialsProvider.failing = set()
 
 
 def _make_stock(is_ca: bool):
@@ -685,3 +697,83 @@ async def test_prepare_with_run_id_adds_llm_call_rows_from_both_precompute_sourc
     # 0-based ones -- confirms the run-wide sequencing this ticket's own
     # design requires (see AnalysisOrchestrator.run()'s own comment on why).
     assert {row.seq for row in db.added} == {0, 1}
+
+
+# --- peers: the financials source follows the PEER's market; one bad peer never fails the run (BB-030) ---
+
+
+def _capture_peer_data(monkeypatch):
+    seen = {}
+
+    def fake_compute_all(**kwargs):
+        seen["peer_data"] = kwargs["peer_data"]
+        return _fake_fundamentals_compute_all(**kwargs)
+
+    monkeypatch.setattr(pipeline_module.fundamentals, "compute_all", fake_compute_all)
+    return seen
+
+
+def _prepare_inputs(*, subject_is_ca: bool, peers: list[str]):
+    _FakeRouter.is_ca = subject_is_ca
+    _FakeRouter.fin = SimpleNamespace(currency="CAD" if subject_is_ca else "USD", quarters=[])
+    _FakeRouter.quote = {"current_price": 10.0, "market_cap": 1e9, "currency": "USD"}
+    _FakeRouter.price_history = _price_df()
+    _FakeRouter.dividend_history = []
+    _FakeRouter.peers = peers
+    stock = _make_stock(is_ca=subject_is_ca)
+    context = AnalysisContext(account_type="tfsa", timeline="medium_term")
+    return stock, context
+
+
+@pytest.mark.parametrize(
+    "subject_is_ca, peer, expected_provider",
+    [
+        (False, "PEP", "edgartools"),  # US subject, US peer: unchanged
+        (False, "PRMW.TO", "yfinance"),  # US subject, Canadian peer: the KO crash
+        (True, "TRP.TO", "yfinance"),  # Canadian subject, Canadian peer: unchanged
+        (True, "WIX", "yfinance"),  # Canadian subject, US peer: unchanged (the common case)
+    ],
+)
+async def test_each_peer_uses_the_financials_source_for_its_own_market(
+    patched_precompute, monkeypatch, subject_is_ca, peer, expected_provider
+):
+    seen = _capture_peer_data(monkeypatch)
+    stock, context = _prepare_inputs(subject_is_ca=subject_is_ca, peers=[peer])
+
+    await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
+
+    peer_calls = [call for call in _FakeFinancialsProvider.calls if call[1] == peer]
+    assert peer_calls == [(expected_provider, peer)]
+    assert [p[0] for p in seen["peer_data"]] == [peer]
+
+
+@pytest.mark.parametrize("subject_is_ca, bad_peer", [(False, "PRMW.TO"), (True, "WIX")])
+async def test_a_peer_that_cannot_be_fetched_is_dropped_and_reported_not_fatal(
+    patched_precompute, monkeypatch, subject_is_ca, bad_peer
+):
+    from data.degradation import DegradationCollector, reset_collector, set_collector
+
+    seen = _capture_peer_data(monkeypatch)
+    stock, context = _prepare_inputs(subject_is_ca=subject_is_ca, peers=["GOOD", bad_peer])
+    _FakeFinancialsProvider.failing = {bad_peer}
+    collector = DegradationCollector()
+    token = set_collector(collector)
+    try:
+        await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
+    finally:
+        reset_collector(token)
+
+    assert [p[0] for p in seen["peer_data"]] == ["GOOD"]  # the run finished without the bad peer
+    events = collector.drain()
+    assert [e.key for e in events] == [("pipeline", "peer_financials", "fetch_failed")]
+    assert events[0].context["symbols"] == [bad_peer]
+    assert bad_peer in events[0].message
+
+
+async def test_the_subjects_own_financials_failing_still_fails_the_run(patched_precompute):
+    """Only PEER fetches are isolated: no financials for the stock itself is a real failure."""
+    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
+    _FakeFinancialsProvider.failing = {"AAPL"}
+
+    with pytest.raises(RuntimeError, match="Company not found"):
+        await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))

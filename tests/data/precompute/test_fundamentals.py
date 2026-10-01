@@ -770,3 +770,40 @@ def test_compute_all_wires_analyst_estimates_and_earnings_surprises():
     assert result["valuation_metrics"]["forward_pe"] == pytest.approx(50.0 / 5.0)
     assert result["growth_metrics"]["earnings_surprises"] == earnings_surprises
     assert "valuation_metrics.forward_pe" not in result["missing_fields"]
+
+
+# --- a peer with nothing usable is dropped, and no median moves (BB-030) ---
+
+
+def _no_statements() -> NormalizedFinancials:
+    """What yfinance returns for a delisted ticker: a currency and nothing else."""
+    return _fin(quarters=[], annual=[], balance_sheet={})
+
+
+def test_a_peer_with_no_usable_metrics_is_dropped_and_medians_do_not_move():
+    """A delisted ticker that a provider still lists (KO's PRMW.TO) comes back with a
+    currency and nothing else: it must not render as a metric-less PEER line."""
+    good = _fin(quarters=_QUARTERS, annual=_ANNUAL, balance_sheet=_BALANCE_SHEET)
+    price = _price_info(current_price=25.0, market_cap=2500.0)
+    empty = _no_statements()
+    with_empty = compute_peer_comparison(
+        [("A", good, price), ("DELISTED.TO", empty, price), ("B", good, price)]
+    )
+    without = compute_peer_comparison([("A", good, price), ("B", good, price)])
+
+    assert [r["ticker"] for r in with_empty["peer_records"]] == ["A", "B"]
+    assert with_empty["sector_medians"] == without["sector_medians"]
+
+
+def test_a_peer_with_some_metrics_is_kept():
+    good = _fin(quarters=_QUARTERS, annual=_ANNUAL, balance_sheet=_BALANCE_SHEET)
+    price = _price_info(current_price=25.0, market_cap=2500.0)
+    result = compute_peer_comparison([("A", good, price)])
+    assert [r["ticker"] for r in result["peer_records"]] == ["A"]
+    assert any(v is not None for k, v in result["peer_records"][0].items() if k != "ticker")
+
+
+def test_all_peers_empty_gives_no_records_and_no_medians():
+    result = compute_peer_comparison([("X", _no_statements(), _price_info())])
+    assert result["peer_records"] == []
+    assert all(v is None for v in result["sector_medians"].values())
