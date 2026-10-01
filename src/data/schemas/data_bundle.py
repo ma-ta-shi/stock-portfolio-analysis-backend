@@ -141,6 +141,10 @@ class DataBundle(ContractModel):
     # 3-value duplicate, since it would always hold this exact same value for a CA stock (one
     # precompute/sentiment.py call scores both markets, no CA-specific branch). None only when
     # news_with_sentiment is None/empty — no articles were scored.
+    # BB-023: how much news the window really held, so the Sentiment Analyst can be told
+    # "N fetched, M scored, K shown" instead of mistaking a sample for the whole.
+    # {"window_days": int, "fetched": int}; None when not recorded (older callers).
+    news_coverage: dict | None = None
     analyst_consensus: dict
     analyst_recommendation_trends: list[dict] | None  # Finnhub: US only
     insider_activity: dict

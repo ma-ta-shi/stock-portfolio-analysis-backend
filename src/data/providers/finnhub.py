@@ -1,12 +1,13 @@
 import asyncio
 import os
+import re
 from datetime import datetime, timedelta
 
 import aiohttp
 import pandas as pd
 import structlog
 
-from data.degradation import NOT_COVERED
+from data.degradation import FETCH_FAILED, NOT_COVERED
 from data.degradation import report as report_degradation
 from data.providers.base import NewsProvider
 
@@ -15,6 +16,20 @@ logger = structlog.get_logger(__name__)
 BASE_URL = "https://finnhub.io/api/v1"
 
 # Confirmed live against a real free-tier key (2026-07-26 — see ClickUp 86bagzcv5).
+
+# /company-news returns at most ~250 of the NEWEST rows for the window asked, whatever its
+# width (BB-023, measured live 2026-09-30: MSFT 65-106 articles a day, so a "180 day"
+# request returned 2 days; KO 28 days; even a 7-day window is capped for MSFT and AAPL).
+# A response at or above this size may have been cut off.
+_NEWS_CAP_SUSPECT = 240
+# The window width when re-asking a busy name is the number of days that fit under the cap at
+# the density the first answer showed, but never narrower than this. A capped 3-day window of
+# a ~100-a-day name returns its newest ~2.5 days, so the month is covered ~83% of days and
+# evenly, which serves a trend better than 100% of only the newest 25 days. A quieter name
+# (~10 a day) fits a ~20-day window under the cap, so its missing tail is one request.
+_NEWS_WINDOW_DAYS = 3
+_NEWS_WINDOW_TARGET_ROWS = 150  # per window: headroom under the ~250 cap for busier days
+_NEWS_WINDOW_CONCURRENCY = 3  # well inside the free tier's 60 calls a minute
 
 _RECOMMENDATION_RENAME = {
     "period": "period",
@@ -134,8 +149,59 @@ class FinnhubDataProvider(NewsProvider):
             response.raise_for_status()
             return await response.json()
 
-    async def get_news(self, ticker: str, days: int) -> list[dict]:
-        """Confirmed path is /company-news, not /stock/company-news."""
+    async def _news_window(self, ticker: str, start, end) -> list[dict]:
+        data = await self._request(
+            "company-news",
+            {"symbol": ticker, "from": start.isoformat(), "to": end.isoformat()},
+        )
+        return data or []
+
+    async def _news_windows(self, ticker: str, from_date, to_date, width_days: int) -> list[dict]:
+        """Raw rows for every `width_days` window from `from_date` to `to_date` (inclusive
+        on both ends, as Finnhub treats from/to). A window that fails is skipped and
+        reported once; the rest still count."""
+        windows = []
+        start = from_date
+        while start <= to_date:
+            end = min(start + timedelta(days=width_days - 1), to_date)
+            windows.append((start, end))
+            start = end + timedelta(days=1)
+        semaphore = asyncio.Semaphore(_NEWS_WINDOW_CONCURRENCY)
+
+        async def bounded(window):
+            async with semaphore:
+                return await self._news_window(ticker, *window)
+
+        results = await asyncio.gather(*(bounded(w) for w in windows), return_exceptions=True)
+        rows: list[dict] = []
+        failed = 0
+        for window, result in zip(windows, results, strict=True):
+            if isinstance(result, Exception):
+                failed += 1
+                logger.warning("finnhub_news_window_failed", ticker=ticker, window=str(window), error=str(result))
+                continue
+            rows.extend(result)
+        if failed:
+            report_degradation(
+                "finnhub",
+                "get_news_windows",
+                FETCH_FAILED,
+                f"{failed} of {len(windows)} news windows failed",
+                context={"symbol": ticker},
+            )
+        return rows
+
+    async def get_news(self, ticker: str, days: int, *, thorough: bool = False) -> list[dict]:
+        """Confirmed path is /company-news, not /stock/company-news.
+
+        One request, which Finnhub cuts off at the ~250 newest rows. `thorough=True`
+        (the main stock's own news, never a peer's two headlines) notices when the
+        answer looks cut off and re-asks, in 3-day windows, only for the part of the
+        span the first answer did NOT reach (it holds the newest ~250 rows, so everything
+        older than its oldest row is missing), so a busy ticker's month is covered instead
+        of its last few days (BB-023). A window that came back complete costs exactly one
+        request, as before; a mid-volume ticker whose first answer already reached nearly
+        the start of the window costs two."""
         _reject_ca_ticker(ticker)
         to_date = datetime.now().date()
         from_date = to_date - timedelta(days=days)
@@ -145,16 +211,42 @@ class FinnhubDataProvider(NewsProvider):
         )
         if not data:
             return []
+        if thorough and len(data) >= _NEWS_CAP_SUSPECT:
+            reached = [
+                datetime.fromtimestamp(item["datetime"]).date()
+                for item in data
+                if item.get("datetime") is not None
+            ]
+            # Rows run newest first and the cut falls on the old end, so the span still
+            # missing is from_date up to the oldest day the probe reached (inclusive: that
+            # day was only partly returned). No dates at all: re-ask the whole span.
+            missing_to = min(reached) if reached else to_date
+            if missing_to >= from_date:
+                days_reached = max(1, (to_date - missing_to).days + 1)
+                rows_per_day = len(data) / days_reached
+                width = max(_NEWS_WINDOW_DAYS, int(_NEWS_WINDOW_TARGET_ROWS / rows_per_day))
+                data = [*data, *await self._news_windows(ticker, from_date, missing_to, width)]
         # Belt-and-suspenders cutoff on `datetime`, same pattern as yfinance.py's
         # get_news — the from/to query params should already cover this, but
         # filtering client-side too costs nothing and guards against any
         # server-side date-boundary looseness.
         cutoff = (datetime.now() - timedelta(days=days)).timestamp()
         articles = []
+        seen_urls: set[str] = set()
+        seen_headlines: set[str] = set()
         for item in data:
             published_at = item.get("datetime")
             if published_at is None or published_at < cutoff:
                 continue
+            if thorough:
+                # The probe and the windows overlap, and the same story is syndicated
+                # under several URLs: drop repeats by URL, then by normalised headline.
+                url = item.get("url") or ""
+                headline_key = re.sub(r"[^a-z0-9]+", " ", (item.get("headline") or "").lower()).strip()
+                if (url and url in seen_urls) or (headline_key and headline_key in seen_headlines):
+                    continue
+                seen_urls.add(url)
+                seen_headlines.add(headline_key)
             articles.append(
                 {
                     "headline": item.get("headline", "N/A"),

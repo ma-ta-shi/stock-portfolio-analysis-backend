@@ -216,12 +216,57 @@ def _anomalies(bundle: DataBundle) -> list[str]:
     return flags
 
 
+def _article_day(article: dict) -> date:
+    value = article["date"]
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value)[:10])
+
+
+def _tone_counts(articles: list[dict]) -> str:
+    counts = {label: 0 for label in ("positive", "negative", "neutral")}
+    for a in articles:
+        if a.get("sentiment") in counts:
+            counts[a["sentiment"]] += 1
+    return f"{counts['positive']} positive, {counts['negative']} negative, {counts['neutral']} neutral"
+
+
+def _coverage_lines(articles: list[dict], shown: list[dict], coverage: dict) -> list[str]:
+    """What the prompt promises ("article_count, distribution counts") and a sentiment trend
+    the agent can read across the whole window, not only from the headlines listed. The
+    listed headlines are a small slice of a scored SAMPLE of what was fetched (BB-023);
+    saying so keeps the sample from being mistaken for everything that was published."""
+    lines = [
+        f"  Coverage: {coverage['fetched']} articles fetched over the last {coverage['window_days']} days; "
+        f"{len(articles)} sampled evenly across the days and scored; {len(shown)} listed below.",
+        f"  Tone of the scored sample: {_tone_counts(articles)}.",
+    ]
+    weeks: dict[date, list[dict]] = {}
+    for a in articles:
+        day = _article_day(a)
+        weeks.setdefault(day - timedelta(days=day.weekday()), []).append(a)
+    for week_start in sorted(weeks):
+        week = weeks[week_start]
+        lines.append(f"  Week of {week_start.isoformat()}: {_tone_counts(week)} (n={len(week)})")
+    lines.append(
+        "  Weekly counts come from a sample, so they can show a large shift in tone, not a small one."
+    )
+    return lines
+
+
 def _news_block(bundle: DataBundle) -> RenderedField:
     articles = bundle.news_with_sentiment or []
     if not articles:
         return RenderedField(text="  (no news articles available)", present=False)
+    # `shown` marks the headlines the agent lists; items without the key (older callers) are all shown.
+    shown = [a for a in articles if a.get("shown", True)]
     lines = []
-    for a in articles:
+    coverage = getattr(bundle, "news_coverage", None)
+    if coverage:
+        lines.extend(_coverage_lines(articles, shown, coverage))
+    for a in shown:
         lines.append(
             f"  {a['id']}: {a['headline']} ({a['source']}, {a['quality_tier']}, "
             f"sentiment={a.get('sentiment') or 'unscored'})"

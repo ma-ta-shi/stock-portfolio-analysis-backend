@@ -447,3 +447,162 @@ async def test_a_429_that_recovers_reports_nothing(provider, collector, monkeypa
     monkeypatch.setattr("data.providers.finnhub.asyncio.sleep", lambda *_: _noop())
     assert await provider._request("company-news", {"symbol": "AAPL"}) == [1]
     assert collector.drain() == []
+
+
+# --- get_news(thorough=True): the ~250-row cap on one response (BB-023) ---
+
+
+class _BusySession:
+    """A Finnhub that, like the real one, answers any from/to window with only the newest
+    ~250 matching rows. `per_day` is how many articles each day (0 = today) really has."""
+
+    CAP = 250
+
+    def __init__(self, per_day: dict[int, int], fail_windows: int = 0) -> None:
+        from datetime import date, datetime, timedelta
+
+        self.calls: list[dict] = []
+        self._fail_left = fail_windows
+        self.rows: list[dict] = []
+        today = date.today()
+        n = 0
+        for offset, count in per_day.items():
+            day = today - timedelta(days=offset)
+            for i in range(count):
+                n += 1
+                stamp = datetime(day.year, day.month, day.day, 23, 59) - timedelta(minutes=i)
+                self.rows.append(
+                    {
+                        "headline": f"Story {n}",
+                        "summary": "",
+                        "source": "Yahoo",
+                        "url": f"https://x/{n}",
+                        "datetime": stamp.timestamp(),
+                        "_day": day.isoformat(),
+                    }
+                )
+
+    def get(self, url: str, params: dict | None = None):
+        self.calls.append(params)
+        window = [r for r in self.rows if params["from"] <= r["_day"] <= params["to"]]
+        window.sort(key=lambda r: r["datetime"], reverse=True)
+        if self._fail_left and params["from"] != params["to"] and len(self.calls) > 1:
+            self._fail_left -= 1
+            return FakeResponse(500, json_data=None)
+        return FakeResponse(200, json_data=[{k: v for k, v in r.items() if k != "_day"} for r in window[: self.CAP]])
+
+
+def _days_covered(articles) -> int:
+    return len({a["published_at"][:10] for a in articles})
+
+
+async def test_get_news_default_is_one_request_even_when_the_answer_is_capped(provider):
+    """Peers and every other caller keep the single request."""
+    session = _BusySession({d: 100 for d in range(0, 30)})
+    provider.session = session
+
+    result = await provider.get_news("MSFT", 30)
+
+    assert len(session.calls) == 1
+    assert len(result) == 250  # the cut-off answer, as before
+
+
+async def test_thorough_a_complete_window_costs_one_request(provider):
+    session = _BusySession({d: 3 for d in range(0, 30)})  # 90 articles: nothing cut off
+    provider.session = session
+
+    result = await provider.get_news("RDDT", 30, thorough=True)
+
+    assert len(session.calls) == 1
+    assert len(result) == 90
+
+
+async def test_thorough_a_capped_window_is_re_asked_in_three_day_windows(provider):
+    """MSFT-like: ~100 articles a day. One request sees about 2 days; the windows cover
+    the month, in a fixed number of requests that does not grow with the volume."""
+    session = _BusySession({d: 100 for d in range(0, 30)})
+    provider.session = session
+
+    result = await provider.get_news("MSFT", 30, thorough=True)
+
+    # 1 probe (newest ~2.5 days) + one request per 3 days over the ~29 days it did not reach
+    assert len(session.calls) == 1 + 10
+    assert _days_covered(result) >= 28
+    assert len({a["url"] for a in result}) == len(result)  # the probe's rows are not repeated
+
+
+async def test_thorough_call_count_is_bounded_whatever_the_volume(provider):
+    small = _BusySession({d: 20 for d in range(0, 30)})  # 600 articles, capped
+    huge = _BusySession({d: 400 for d in range(0, 30)})  # 12,000 articles
+    provider.session = small
+    await provider.get_news("A", 30, thorough=True)
+    provider.session = huge
+    await provider.get_news("B", 30, thorough=True)
+
+    assert len(small.calls) <= len(huge.calls) <= 12  # never more than probe + 11 windows
+
+
+async def test_thorough_a_mid_volume_ticker_that_nearly_fits_costs_two_requests(provider):
+    """KO-like: ~10 a day, ~310 in the month. The first answer already reaches back almost
+    to the start of the window, so only the missing tail is re-asked (it used to be 12)."""
+    session = _BusySession({d: 10 for d in range(0, 31)})
+    provider.session = session
+
+    result = await provider.get_news("KO", 30, thorough=True)
+
+    assert len(session.calls) == 2
+    assert _days_covered(result) >= 30
+    assert len({a["url"] for a in result}) == len(result)
+
+
+async def test_thorough_drops_the_same_story_under_a_second_url_or_headline_spelling(provider):
+    now = time.time()
+    rows = [
+        {"headline": "Apple, Inc. beats!", "summary": "", "source": "A", "url": "u1", "datetime": now},
+        {"headline": "apple inc beats", "summary": "", "source": "B", "url": "u2", "datetime": now - 5},
+        {"headline": "Other", "summary": "", "source": "A", "url": "u1", "datetime": now - 9},
+        {"headline": "Different", "summary": "", "source": "C", "url": "u3", "datetime": now - 20},
+    ]
+    capped = rows + [
+        {"headline": f"Filler {i}", "summary": "", "source": "A", "url": f"f{i}", "datetime": now - 30 - i}
+        for i in range(240)
+    ]
+    session = FakeSession(FakeResponse(200, json_data=capped))
+    provider.session = session
+
+    result = await provider.get_news("AAPL", 30, thorough=True)
+
+    headlines = [a["headline"] for a in result]
+    assert "Apple, Inc. beats!" in headlines and "apple inc beats" not in headlines  # same headline
+    assert "Other" not in headlines  # same url as the first
+    assert "Different" in headlines
+
+
+async def test_thorough_a_failed_window_is_reported_and_the_rest_still_count(provider):
+    from data.degradation import DegradationCollector, reset_collector, set_collector
+
+    session = _BusySession({d: 100 for d in range(0, 30)}, fail_windows=2)
+    provider.session = session
+    collector = DegradationCollector()
+    token = set_collector(collector)
+    try:
+        result = await provider.get_news("MSFT", 30, thorough=True)
+    finally:
+        reset_collector(token)
+
+    assert _days_covered(result) >= 22  # two 3-day windows lost, the rest kept
+    events = collector.drain()
+    assert [e.key for e in events] == [("finnhub", "get_news_windows", "fetch_failed")]
+    assert "2 of 10" in events[0].message
+
+
+async def test_thorough_treats_the_cap_threshold_as_cut_off_and_one_below_as_complete(provider):
+    complete = _BusySession({0: 239})
+    provider.session = complete
+    await provider.get_news("A", 30, thorough=True)
+    assert len(complete.calls) == 1  # 239 rows: not suspected
+
+    cut_off = _BusySession({0: 240})
+    provider.session = cut_off
+    await provider.get_news("B", 30, thorough=True)
+    assert len(cut_off.calls) > 1  # 240 rows: re-asked
