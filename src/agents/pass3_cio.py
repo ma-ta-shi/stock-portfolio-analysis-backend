@@ -350,6 +350,21 @@ def _render_tax_optimization_actions(actions: list | None) -> str:
     )
 
 
+def _render_loss_harvesting(lh: object) -> str:
+    """The Tax Strategist's loss_harvesting_opportunity is an object (or null/"not_applicable"
+    -- always null in a TFSA/RRSP, where losses are not claimable). One compact line."""
+    if not lh or lh == "not_applicable":
+        return ""
+    if not isinstance(lh, dict):
+        return str(lh)
+    return (
+        f"available={lh.get('available', 'N/A')}, "
+        f"estimated_tax_savings={lh.get('estimated_tax_savings_pct', 'N/A')}%, "
+        f"superficial_loss_window_safe={lh.get('superficial_loss_window_safe', 'N/A')}, "
+        f"remediation={lh.get('remediation_suggestion') or 'none'}; {lh.get('reasoning', '')}"
+    ).strip()
+
+
 def _build_tax_strategist_summary(tax_result: dict | None) -> str:
     """Tax Strategist's structured fields, for the CIO's own Stage B call --
     the ticket's actual core ask (86bbt1k1p names this "the highest-value
@@ -384,6 +399,29 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
 
     actions_text = _render_tax_optimization_actions(tp.get("tax_optimization_actions"))
 
+    # Fields Tax computes that used to stop here (Tax Strategist Wave 2): the contribution-room
+    # impacts, loss-harvesting, the data-gap caveats and the narrative. Each line appears only
+    # when there is something to say, so a TFSA/RRSP run with no room action or loss opportunity
+    # adds nothing. The structured fields above stay authoritative (v1_stage_b.txt rule 2).
+    detail_lines = []
+    caveats = [str(c) for c in (tax_result.get("caveats") or []) if str(c).strip()]
+    if caveats:
+        detail_lines.append(f"caveats: {'; '.join(caveats)}")
+    for field in ("tfsa_contribution_room_impact", "rrsp_contribution_room_impact"):
+        value = tp.get(field)
+        if value and str(value).strip().lower() != "null":
+            detail_lines.append(f"{field}: {value}")
+    loss_text = _render_loss_harvesting(tp.get("loss_harvesting_opportunity"))
+    if loss_text:
+        detail_lines.append(f"loss_harvesting_opportunity: {loss_text}")
+    detail_block = "".join(f"{line}\n" for line in detail_lines)
+    narrative = str(tax_result.get("narrative") or "").strip()
+    narrative_line = (
+        f"\ntax_narrative (supporting context; the fields above are authoritative): {narrative}"
+        if narrative
+        else ""
+    )
+
     return (
         f"groundedness_score: {tax_result.get('groundedness_score', 'N/A')}/100\n"
         f"tax_efficiency_for_account: {tp.get('tax_efficiency_for_account', 'N/A')}\n"
@@ -398,7 +436,9 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
         f"capital_gains_treatment_summary: {tp.get('capital_gains_treatment_summary', 'N/A')}\n"
         f"cross_account_recommendation: {cross_text}\n"
         f"key_tax_risks: {risks_text}\n"
+        f"{detail_block}"
         f"tax_optimization_actions: {actions_text}"
+        f"{narrative_line}"
     )
 
 

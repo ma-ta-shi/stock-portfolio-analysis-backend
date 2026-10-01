@@ -212,3 +212,60 @@ def test_build_user_message_has_zero_tax_strategist_input():
     assert "capital_gains_treatment_summary" not in msg
     assert "cross_account_recommendation" not in msg
     assert "tax_optimization_actions" not in msg
+
+# ---------- Tax Strategist fields that used to stop short of the CIO (Tax Strategist Wave 2) ----------
+
+
+def _tax_result_with_detail() -> dict:
+    return {
+        "groundedness_score": 80,
+        "thesis_summary": "Trading holding.",
+        "strongest_signal": "WHT: 15% withheld, recoverable as a foreign tax credit",
+        "caveats": ["ROOM not on file for RRSP.", "WHT not modelled for the REIT sleeve."],
+        "narrative": "WHT: 15% is withheld on the US dividend in Trading and is recoverable as a credit.",
+        "tax_profile": {
+            "tax_efficiency_for_account": "neutral",
+            "account_fit_score": "fair",
+            "tfsa_contribution_room_impact": "A sell here frees $4,200 of TFSA room on Jan 1.",
+            "rrsp_contribution_room_impact": None,
+            "loss_harvesting_opportunity": {
+                "available": True,
+                "estimated_tax_savings_pct": 1.2,
+                "superficial_loss_window_safe": True,
+                "dual_listed_check_applied": "not_applicable",
+                "remediation_suggestion": "wait 31 days",
+                "reasoning": "LOSS: window open, YTD gains to offset.",
+            },
+            "tax_optimization_actions": [],
+        },
+    }
+
+
+def test_tax_strategist_summary_passes_narrative_caveats_room_impact_and_loss_harvesting():
+    summary = _build_tax_strategist_summary(_tax_result_with_detail())
+    assert "caveats: ROOM not on file for RRSP.; WHT not modelled for the REIT sleeve." in summary
+    assert "tfsa_contribution_room_impact: A sell here frees $4,200 of TFSA room on Jan 1." in summary
+    assert "loss_harvesting_opportunity: available=True, estimated_tax_savings=1.2%" in summary
+    assert "remediation=wait 31 days; LOSS: window open, YTD gains to offset." in summary
+    assert (
+        "tax_narrative (supporting context; the fields above are authoritative): "
+        "WHT: 15% is withheld on the US dividend in Trading and is recoverable as a credit."
+    ) in summary
+
+
+def test_tax_strategist_summary_omits_a_null_room_impact_and_an_inapplicable_loss_harvest():
+    result = _tax_result_with_detail()
+    result["tax_profile"]["loss_harvesting_opportunity"] = None
+    result["tax_profile"]["tfsa_contribution_room_impact"] = "null"
+    result["caveats"] = []
+    summary = _build_tax_strategist_summary(result)
+    assert "rrsp_contribution_room_impact" not in summary
+    assert "tfsa_contribution_room_impact" not in summary
+    assert "loss_harvesting_opportunity" not in summary
+    assert "caveats:" not in summary
+
+
+def test_tax_strategist_summary_keeps_the_structured_fields_before_the_narrative():
+    summary = _build_tax_strategist_summary(_tax_result_with_detail())
+    assert summary.index("account_fit_score: fair") < summary.index("tax_optimization_actions:")
+    assert summary.index("tax_optimization_actions:") < summary.index("tax_narrative")
