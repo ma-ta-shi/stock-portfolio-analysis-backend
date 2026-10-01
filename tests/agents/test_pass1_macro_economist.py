@@ -307,25 +307,26 @@ def test_stale_data_daily_threshold_not_applied_to_monthly_series():
 
 
 def test_stale_data_flags_stale_monthly_series_past_normal_lag():
-    bundle = _bundle(is_ca=True, cpi_age_days=50, unemployment_age_days=50)
+    bundle = _bundle(is_ca=True, cpi_age_days=60, unemployment_age_days=60)
     result = _stale_data(bundle)
     assert "cpi" in result
     assert "employment" in result
 
 
 def test_stale_data_monthly_series_within_normal_lag_not_flagged():
-    """CPI age of 40 days is within a normal release cycle -- not stale."""
-    bundle = _bundle(is_ca=True, cpi_age_days=40)
+    """CPI age (from period end) of 50 days is inside the 55-day limit -- the
+    slowest first release since 2022 was 48 days -- not stale."""
+    bundle = _bundle(is_ca=True, cpi_age_days=50)
     assert "cpi" not in _stale_data(bundle)
 
 
 def test_stale_data_flags_stale_gdp_past_quarterly_lag():
-    bundle = _bundle(is_ca=True, gdp_age_days=110)
+    bundle = _bundle(is_ca=True, gdp_age_days=140)
     assert "gdp" in _stale_data(bundle)
 
 
 def test_stale_data_gdp_within_normal_quarterly_lag_not_flagged():
-    bundle = _bundle(is_ca=True, gdp_age_days=85)
+    bundle = _bundle(is_ca=True, gdp_age_days=125)
     assert "gdp" not in _stale_data(bundle)
 
 
@@ -338,10 +339,32 @@ def test_stale_data_fetch_failure_not_flagged_as_stale():
 
 def test_stale_data_commodities_only_flagged_when_relevant():
     bundle = _bundle(
-        is_ca=True, sector_commodity_relevant=True, sector_commodity_name="WTI Crude",
-        sector_commodity_age_days=10,
+        is_ca=True, sector_commodity_relevant=True, sector_commodity_name="WTI Crude Oil",
+        sector_commodity_age_days=20,
     )
     assert "commodities" in _stale_data(bundle)
+
+
+def test_stale_data_oil_a_week_old_is_normal_for_the_weekly_eia_feed():
+    """WTI posts about a week late (median 6d, max 13d): 8 days old was flagged on a
+    real ENB.TO run and forced a wasted retry."""
+    bundle = _bundle(
+        is_ca=True, sector_commodity_relevant=True, sector_commodity_name="WTI Crude Oil",
+        sector_commodity_age_days=8,
+    )
+    assert "commodities" not in _stale_data(bundle)
+
+
+def test_stale_data_monthly_copper_uses_its_own_limit():
+    def flagged(age):
+        bundle = _bundle(
+            is_ca=False, sector_commodity_relevant=True, sector_commodity_name="Copper",
+            sector_commodity_age_days=age,
+        )
+        return "commodities" in _stale_data(bundle)
+
+    assert not flagged(61)  # July's price, seen on Sep 30
+    assert flagged(120)
 
 
 def test_stale_data_commodities_not_flagged_when_not_relevant():
@@ -482,3 +505,13 @@ def test_validate_with_caveats_passes_high_confidence_stale_data_with_caveat_pre
         out, material_absent=[], anomalies=[], stale_data=["rate", "cpi", "gdp", "employment"]
     )
     assert passed, errors
+
+
+def test_every_sector_commodity_has_an_explicit_stale_limit():
+    """The limits are keyed by the commodity's display name; a renamed commodity would
+    silently fall to the 14-day default (and monthly copper would be flagged always)."""
+    from agents.pass1_macro_economist import _STALE_COMMODITY_DAYS
+    from data.precompute.macro_sources import _SECTOR_COMMODITY
+
+    names = {name for name, _series_id in _SECTOR_COMMODITY.values()}
+    assert names <= set(_STALE_COMMODITY_DAYS)
