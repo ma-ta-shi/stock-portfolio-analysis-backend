@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from agents.pass1_sentiment_analyst import (
     _anomalies,
     _data_coverage_line,
+    _insider_counts,
     _stale_data,
     _validate_with_caveats,
     build_user_message,
@@ -28,6 +29,7 @@ def _bundle(**overrides) -> SimpleNamespace:
                             "buy_count": 30, "hold_count": 8, "sell_count": 2},
         analyst_recommendation_trends=None,
         insider_activity={"transactions": []},
+        price_info={"market_cap": 3.0e12},
         short_interest={"short_interest_pct": 1.2, "days_to_cover": 1.8,
                          "shares_short": 50_000_000, "shares_short_prior_month": 55_000_000},
         peer_sentiment=[],
@@ -72,8 +74,8 @@ def test_insider_counts_exclude_issuer_and_non_directional_rows():
         {"date": recent, "is_issuer": False, "transaction_type": "exercise", "shares": 10, "value": 100},
     ]})
     msg, _ = build_user_message(bundle)
-    assert "Insider buys (90d): 2" in msg
-    assert "Insider sells (90d): 1" in msg
+    assert "Insider activity (90d): " in msg
+    assert _insider_counts(bundle) == (2, 1)
 
 
 def test_insider_counts_exclude_stale_transactions():
@@ -82,7 +84,8 @@ def test_insider_counts_exclude_stale_transactions():
         {"date": stale, "is_issuer": False, "transaction_type": "purchase", "shares": 100, "value": 1000},
     ]})
     msg, _ = build_user_message(bundle)
-    assert "Insider buys (90d): 0" in msg
+    assert _insider_counts(bundle) == (0, 0)
+    assert "no qualifying insider purchases or sales" in msg
 
 
 def test_short_interest_renders_real_fields():
@@ -539,3 +542,12 @@ def test_the_anomaly_check_uses_the_whole_scored_sample_not_just_the_shown_ones(
     flags = _anomalies(bundle)
 
     assert flags and "100% positive" in flags[0]  # 30 of 30, though only 1 headline is shown
+
+
+def test_insider_line_keeps_only_notable_transactions_for_the_companys_size():
+    recent = (datetime.now(UTC).date() - timedelta(days=5)).isoformat()
+    sale = {"date": recent, "is_issuer": False, "transaction_type": "sale", "shares": 100, "value": 6_000_000}
+    # $28.3B: threshold 0.001% = $283K, so the $6M sale is notable; at $3.0T the threshold is $30M, so it is routine.
+    big, small = build_user_message(_bundle(insider_activity={"transactions": [sale]}, price_info={"market_cap": 28.3e9}))[0],         build_user_message(_bundle(insider_activity={"transactions": [sale]}, price_info={"market_cap": 3.0e12}))[0]
+    assert "Insider activity (90d): net selling $6.0M from 1 notable of 1 transactions" in big
+    assert "none above the notable threshold of $30.0M: routine" in small

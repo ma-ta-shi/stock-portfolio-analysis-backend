@@ -252,12 +252,15 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     sector_medians = bundle.peer_metrics.get("sector_medians", {})
     earnings_surprises = _earnings_surprises_text(bundle)
     peers = _peers_text(bundle)
+    # The median is over the few named peers that have a P/E, not a sector benchmark (MSFT's 'Technology
+    # median' of 61.8 was one peer's P/E), so the count goes beside it.
+    pe_peer_count = sum(1 for p in bundle.peer_metrics.get("peer_records", []) if p.get("pe_ratio") is not None)
 
     text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}
 
 VALUATION (VAL):
-  P/E: {_fmt(val.get('pe_ratio'))} vs Sector median: {_fmt(sector_medians.get('sector_median_pe'))}
+  P/E: {_fmt(val.get('pe_ratio'))} vs Peer median: {_fmt(sector_medians.get('sector_median_pe'))} ({pe_peer_count} peers with a P/E)
   Forward P/E: {_fmt(val.get('forward_pe'))} | PEG: {_fmt(val.get('peg_ratio'))}
   Current price: {price.get('current_price')} {bundle.stock.currency} | Market cap: {_fmt(price.get('market_cap'))}
   52w range: {price.get('low_52w')} - {price.get('high_52w')}

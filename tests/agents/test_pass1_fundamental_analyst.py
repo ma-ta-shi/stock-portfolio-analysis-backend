@@ -54,13 +54,13 @@ def test_renders_percentage_fields_as_percent_not_raw_fraction():
 
 def test_renders_sector_median_from_peer_metrics_not_a_stale_key_name():
     msg, _ = build_user_message(_bundle())
-    assert "vs Sector median: 20.1" in msg
+    assert "vs Peer median: 20.1" in msg
 
 
 def test_missing_sector_median_renders_honestly():
     bundle = _bundle(peer_metrics={"sector_medians": {}, "peer_records": []})
     msg, _ = build_user_message(bundle)
-    assert "vs Sector median: N/A" in msg
+    assert "vs Peer median: N/A (0 peers with a P/E)" in msg
 
 
 def test_renders_analyst_consensus_from_real_field_names():

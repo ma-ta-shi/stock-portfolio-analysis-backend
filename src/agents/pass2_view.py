@@ -116,7 +116,9 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             # Bull's key_metrics / growth / margins lines render these. All are
             # "Numeric passthrough from DataBundle" per the FUND prompt -- the LLM
             # produces only interpretive_fields, never a number.
-            "sector_pe_median": b.get("sector_pe_median"),
+            "peer_pe_median": b.get("peer_pe_median"),
+            "peer_pe_count": b.get("peer_pe_count"),
+            "pe_vs_peer_median_pct": b.get("pe_vs_peer_median_pct"),
             "roe": b.get("roe"),
             "debt_to_equity": b.get("debt_to_equity"),
             "net_margin": b.get("net_margin"),
@@ -153,6 +155,9 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             "news_sentiment_overall": news.get("overall"),
             "sentiment_trend": news.get("sentiment_trend"),
             "insider_activity_interpretation": c.get("insider_activity_interpretation"),
+            # Code-computed, in dollars and against market cap; the interpretation above is the model's own words.
+            "insider_activity_90d": b.get("insider_activity_90d"),
+            "insider_materiality": b.get("insider_materiality"),
             "short_interest_interpretation": c.get("short_interest_interpretation"),
             "peer_sentiment_comparison": c.get("peer_sentiment_comparison"),
             # Orchestrator numeric passthrough, merged into analyst_sentiment.

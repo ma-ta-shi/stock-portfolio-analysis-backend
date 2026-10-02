@@ -21,24 +21,12 @@ from agents.validators.pass2 import validate_bull_advocate
 from data.schemas.data_bundle import DataBundle
 
 
-def build_user_message(
-    bundle: DataBundle,
-    compressed_pass1: dict,
-    account_type: str | None = None,
-) -> str:
-    base = build_pass2_user_message(bundle, compressed_pass1, account_type)
-    confidence_levels = extract_confidence_levels(compressed_pass1)
-    quality_levels = extract_data_quality_levels(compressed_pass1)
-    warnings = build_pass1_reliability_warnings(confidence_levels, agent_quality=quality_levels)
-    if warnings:
-        base += f"\n\nRELIABILITY WARNINGS: {warnings}"
-    # Same lookup the system prompt's {researcher_thesis_archetype} fill uses
-    # below -- one shared implementation (agents/utils.py), not a second,
-    # independently-maintained copy.
-    archetype = researcher_thesis_archetype(compressed_pass1)
-    base += f"\n\nRESEARCHER ARCHETYPE FOR THIS STOCK: {archetype}"
-    base += f"\nFOCUS: {bundle.context.timeline} | ACCOUNT: {account_type or bundle.context.account_type}"
-    return base
+def build_user_message(bundle: DataBundle, compressed_pass1: dict) -> str:
+    """The Pass 1 summaries only, and account-neutral: Bull is one result per ticker and timeline, shared
+    by every account's CIO run. The reliability warnings and the researcher archetype used to be appended
+    here as well as sent in the system prompt (so every call paid for them twice), and the account used
+    to be named (a header and a FOCUS line) though the prompt never uses it."""
+    return build_pass2_user_message(bundle, compressed_pass1, account_neutral=True)
 
 
 class BullAdvocateRunner(BaseRunner):
@@ -46,11 +34,10 @@ class BullAdvocateRunner(BaseRunner):
         self,
         bundle: DataBundle,
         compressed_pass1: dict,
-        account_type: str | None = None,
     ) -> tuple[dict, list[str]]:
         self.current_agent = "bull"
         ctx = bundle.context
-        user_msg = build_user_message(bundle, compressed_pass1, account_type)
+        user_msg = build_user_message(bundle, compressed_pass1)
         confidence_levels = extract_confidence_levels(compressed_pass1)
         # 86bbummwp Tier 3 -- D6 section 3's mechanical per-agent data quality,
         # shown alongside analysis_confidence (never collapsed into it) so this

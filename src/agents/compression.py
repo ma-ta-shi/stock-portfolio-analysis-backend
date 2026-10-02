@@ -98,6 +98,30 @@ def compress_pass1_outputs(
     return compressed
 
 
+def _rounded(value):
+    """Shorten the long floats Pass 1 views carry (0.9986728136350936) before they are shown to a model.
+
+    Integers, bools and floats with 4 or fewer decimals are untouched; a longer float is rounded to one
+    decimal from 1,000 up, otherwise to 4 significant digits (0.00031234 becomes 0.0003123, never 0.0).
+    Before this the model copied the raw digits into user-visible evidence, and each cost about 10 tokens."""
+    if isinstance(value, bool) or isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return value
+        # numpy floats subclass float but repr as "np.float64(1.5)", which Decimal cannot parse (a real
+        # MSFT run crashed all three Pass 2 agents on it), so convert to a plain float first.
+        plain = float(value)
+        if round(plain, 4) == plain:
+            return plain
+        return round(plain, 1) if abs(plain) >= 1000 else float(f"{plain:.4g}")
+    if isinstance(value, dict):
+        return {k: _rounded(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_rounded(v) for v in value]
+    return value
+
+
 def build_pass2_user_message(
     bundle: DataBundle,
     compressed_pass1: dict[str, dict | None],
@@ -167,6 +191,7 @@ def build_pass2_user_message(
 
         # Serialize pass2_view fields compactly
         for k, v in p2v.items():
+            v = _rounded(v)
             if isinstance(v, dict):
                 lines.append(f"  {k}: {json.dumps(v)}")
             elif isinstance(v, list):
