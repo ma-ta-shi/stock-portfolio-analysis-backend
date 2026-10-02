@@ -14,6 +14,8 @@ class Recommendation(Base):
     stock_outlook_direction: Mapped[str] = mapped_column(String(20))  # bullish|somewhat_bullish|neutral|somewhat_bearish|bearish
     overall_confidence: Mapped[int]  # 0-100
     account_recommendation: Mapped[dict] = mapped_column(JSON)  # {action, rationale}
+    # Unused since 2026-10-01: position sizing was removed from the pipeline (the Portfolio Optimizer
+    # owns sizing). Never written; kept so no migration is needed.
     position_size_suggestion: Mapped[Optional[str]] = mapped_column(String(50))
     key_drivers: Mapped[list] = mapped_column(JSON)  # from stock_outlook.key_drivers
     key_risks: Mapped[list] = mapped_column(JSON)

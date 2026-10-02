@@ -314,3 +314,29 @@ def test_risk_advisor_summary_omits_flags_and_caveats_on_a_clean_run():
     out["risk_profile"]["data_sanity_flags"] = []
     summary = build_risk_advisor_stage_a_summary(out)
     assert "data_sanity_flags" not in summary and "caveats" not in summary
+
+
+# ---------- CIO stage B: no Risk Advisor input, no sizing (removed 2026-10-01) ----------
+
+
+async def test_stage_b_prompt_is_filled_without_a_risk_advisor_input_or_sizing():
+    import re
+
+    from agents.pass3_cio import CIORunner
+
+    sent = {}
+
+    async def fake_call(self, system_prompt, user_msg, validator, **kw):
+        sent["system"] = system_prompt
+        return {"expected_return_tier": "market_perform"}, []
+
+    runner = CIORunner()
+    runner.call_with_validation = fake_call.__get__(runner)
+    stage_a = {"stock_outlook": "neutral", "confidence": 60, "expected_return_tier": "market_perform"}
+    await runner.run_stage_b(_bundle(), stage_a, {"tax_profile": {"tax_efficiency_for_account": "neutral"}}, "tfsa")
+
+    system = sent["system"]
+    assert not re.findall(r"\{[a-z_]+\}", system), "unfilled template placeholder"
+    assert "RISK ADVISOR" not in system
+    assert "position_sizing_recommendation" not in system.split("Produce valid JSON")[1]
+    assert "risk_profile_summary" not in system

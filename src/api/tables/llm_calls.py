@@ -29,7 +29,7 @@ class LLMCall(Base):
     # agents/base.py's call_model/_call_generate). Confirmed live, not
     # guessed: agent:fund, agent:tech, agent:rsrch, agent:sent, agent:macro
     # (Pass 1's own short codes), agent:bull, agent:bear, agent:tax,
-    # agent:risk_stage_a, agent:risk_stage_b, agent:cio_stage_a,
+    # agent:risk_stage_a, agent:cio_stage_a,
     # agent:cio_stage_b, agent:shadow_cio; precompute:sentiment/
     # precompute:filing_summarizer from Phase 3. CIO/Risk Advisor get an
     # explicit _stage_a/_stage_b suffix -- the same ambiguity

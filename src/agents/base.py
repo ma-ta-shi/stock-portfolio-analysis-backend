@@ -31,14 +31,13 @@ the `thinking` field from `content` before the JSON grammar is applied, so
 the two don't collide. See docs/technical/ollama-generate-format-json-finding.md.
 
 `_call_generate`/`call_with_validation_start`/`call_with_validation_continue`
-(86bc2d414) are the one exception: Risk Advisor's Stage A->B needs raw
-`/api/generate` context-array continuation (Stage B's stop-loss grounding
-cites TECH price levels that live only in Stage A's *prompt*, not its JSON
-output) -- see docs/technical/two-turn-execution-mechanism.md. Nothing else
-in this pipeline uses continuation, including the CIO's own Stage A->B, which
-that doc's own "Why CIO doesn't use this mechanism" section explains; do not
-route other two-stage agents through this primitive without re-checking that
-reasoning first.
+(86bc2d414) were the one exception: Risk Advisor's Stage A->B used raw
+`/api/generate` context-array continuation. That Stage B was removed 2026-10-01
+(with position sizing), so nothing in this pipeline uses continuation now (Risk
+Advisor's stage A still goes through `/api/generate` and discards the returned
+context) -- see docs/technical/two-turn-execution-mechanism.md; do not route
+other two-stage agents through this primitive without re-checking the reasoning
+in that doc first.
 """
 
 import asyncio

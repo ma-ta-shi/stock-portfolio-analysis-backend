@@ -120,7 +120,7 @@ def _patch_pass1(session_scope=True):
 
 class _StubRunner:
     """Stand-in for a runner class -- constructing it returns an instance
-    whose .run()/.run_stage_b() return the given canned (result, errors),
+    whose .run()/.run_stage_b() (CIO only) return the given canned (result, errors),
     and whose last_timing/current_agent/session match BaseRunner's real
     shape."""
 
@@ -134,8 +134,8 @@ class _StubRunner:
         self._stage_b_errors = stage_b_errors or []
         self._raises = raises
         self._stage_b_raises = stage_b_raises
+        self.stage_b_calls = []  # positional args of every run_stage_b() call
         self.last_timing = {"total_duration_s": 1.0, "eval_count": 100}
-        self.last_stage_a_context = [1, 2, 3] if stage_b_result is not None else None
         self.current_agent = None
         # BaseRunner's real per-attempt call record list (86bbwachy Phase 2)
         # -- empty by default since these tests only assert on
@@ -187,6 +187,7 @@ class _StubRunner:
         return self._result, self._errors
 
     async def run_stage_b(self, *a, **kw):
+        self.stage_b_calls.append(a)
         if self._stage_b_raises:
             raise self._stage_b_raises
         return self._stage_b_result, self._stage_b_errors
@@ -374,9 +375,8 @@ async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
     )
     cio_stage_b = {
         "synthesis_narrative": "Buy on strength.",
-        "position_sizing_recommendation": "3-5%",
         "expected_return_tier": "outperform",
-        "tax_summary": {}, "risk_profile_summary": {},
+        "tax_summary": {},
     }
     shadow_result = _completed(stock_outlook="neutral", expected_return_tier="market_perform")
 
@@ -392,7 +392,7 @@ async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
         patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
         patch(
             "services.orchestrator.RiskAdvisorRunner",
-            _StubRunner(_completed(risk_profile={}), stage_b_result={"position_size_recommendation": "3-5%"}),
+            _StubRunner(_completed(risk_profile={})),
         ),
         patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
         patch("services.orchestrator.ShadowCIORunner", _StubRunner(shadow_result)),
@@ -420,7 +420,7 @@ async def test_full_pipeline_happy_path_creates_recommendation_and_prediction():
 
     rec = (await session.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))).scalar_one()
     assert rec.stock_outlook_direction == "somewhat_bullish"
-    assert rec.position_size_suggestion == "3-5%"
+    assert rec.position_size_suggestion is None  # sizing removed 2026-10-01; column kept, never written
     assert rec.synthesis_narrative == "Buy on strength."
     assert rec.expected_return_tier == "outperform"  # 86bbt1kpj: 5-tier vocabulary stored as-is, no lossy DB collapse
 
@@ -515,8 +515,8 @@ async def test_full_pipeline_real_user_profile_reaches_tax_runner():
         thesis_summary="Mixed signals.", key_decision_factors=[{"factor": "valuation"}],
     )
     cio_stage_b = {
-        "synthesis_narrative": "Hold.", "position_sizing_recommendation": "2-3%",
-        "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
+        "synthesis_narrative": "Hold.",
+        "expected_return_tier": "market_perform", "tax_summary": {},
     }
     shadow_result = _completed(stock_outlook="neutral", expected_return_tier="market_perform")
 
@@ -532,7 +532,7 @@ async def test_full_pipeline_real_user_profile_reaches_tax_runner():
         patch("services.orchestrator.TaxStrategistRunner", tax_stub),
         patch(
             "services.orchestrator.RiskAdvisorRunner",
-            _StubRunner(_completed(risk_profile={}), stage_b_result={"position_size_recommendation": "2-3%"}),
+            _StubRunner(_completed(risk_profile={})),
         ),
         patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
         patch("services.orchestrator.ShadowCIORunner", _StubRunner(shadow_result)),
@@ -569,9 +569,8 @@ async def test_strong_underperform_expected_return_tier_persists_without_lossy_c
     )
     cio_stage_b = {
         "synthesis_narrative": "Exit position.",
-        "position_sizing_recommendation": "0%",
         "expected_return_tier": "strong_underperform",
-        "tax_summary": {}, "risk_profile_summary": {},
+        "tax_summary": {},
     }
     shadow_result = _completed(stock_outlook="somewhat_bearish", expected_return_tier="underperform")
 
@@ -587,7 +586,7 @@ async def test_strong_underperform_expected_return_tier_persists_without_lossy_c
         patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
         patch(
             "services.orchestrator.RiskAdvisorRunner",
-            _StubRunner(_completed(risk_profile={}), stage_b_result={"position_size_recommendation": "0%"}),
+            _StubRunner(_completed(risk_profile={})),
         ),
         patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
         patch("services.orchestrator.ShadowCIORunner", _StubRunner(shadow_result)),
@@ -694,8 +693,8 @@ async def test_one_pass1_agent_exception_does_not_abort_the_others():
                 _completed(stock_outlook="neutral", expected_return_tier="market_perform",
                            thesis_summary="t", key_decision_factors=[]),
                 stage_b_result={
-                    "synthesis_narrative": "n", "position_sizing_recommendation": "1-2%",
-                    "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
+                    "synthesis_narrative": "n",
+                    "expected_return_tier": "market_perform", "tax_summary": {},
                 },
             ),
         ),
@@ -718,78 +717,6 @@ async def test_one_pass1_agent_exception_does_not_abort_the_others():
     assert rsrch_row.status == "failed"
     fund_row = next(r for r in outputs if r.agent_name == "FUND")
     assert fund_row.status == "completed"
-
-
-@pytest.mark.asyncio
-async def test_risk_stage_b_exception_does_not_destroy_stage_a_result():
-    """Real bug this locks in, found during a 2026-09-23 review while
-    deduplicating _run_pass1/_run_pass2's near-identical try/except
-    wrappers: the pre-fix code wrapped Risk Advisor's Stage A call AND its
-    Stage B call in the SAME try/except, so a non-Ollama exception from
-    Stage B (a bug, a validation crash, anything) discarded Stage A's own
-    already-successful result entirely -- the exact failure mode the tax
-    passthrough check's own isolation was already fixed for earlier this
-    session, just missed for Risk's Stage B at the time."""
-    session = await _make_session()
-    run = await _make_run(session)
-    bundle = _fake_bundle()
-
-    cio_stage_a = _completed(
-        stock_outlook="neutral", expected_return_tier="market_perform",
-        thesis_summary="t", key_decision_factors=[],
-    )
-    cio_stage_b = {
-        "synthesis_narrative": "n", "position_sizing_recommendation": "1-2%",
-        "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
-    }
-
-    with (
-        patch("services.orchestrator.DataPipeline") as MockPipeline,
-        patch("services.orchestrator.StockResearcherRunner", _StubRunner(_completed())),
-        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(_completed())),
-        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(_completed())),
-        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(_completed())),
-        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(_completed())),
-        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(_completed(recommendation="bullish"))),
-        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
-        patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
-        patch(
-            "services.orchestrator.RiskAdvisorRunner",
-            # stage_b_result must be non-None so the stub's own
-            # last_stage_a_context becomes truthy (matching a real Stage A
-            # success) -- stage_b_raises then fires instead of returning it.
-            _StubRunner(
-                _completed(risk_profile={"beta": 1.1}),
-                stage_b_result={"stop_loss_suggestion": 100.0},
-                stage_b_raises=ValueError("stage b bug"),
-            ),
-        ),
-        patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
-        patch("services.orchestrator.ShadowCIORunner", _StubRunner(_completed(stock_outlook="neutral"))),
-        patch("services.orchestrator.Router") as MockRouter,
-    ):
-        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
-        router_instance = AsyncMock()
-        router_instance.get_quote = AsyncMock(return_value={"current_price": 5800.0})
-        MockRouter.return_value.__aenter__ = AsyncMock(return_value=router_instance)
-        MockRouter.return_value.__aexit__ = AsyncMock(return_value=False)
-
-        await AnalysisOrchestrator().run(run, session)
-
-    # The whole run still completes -- Risk's Stage B bug degrades only
-    # Risk's own stage_b data, never the run overall.
-    assert run.status == RunStatus.COMPLETED
-
-    outputs = (await session.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))).scalars().all()
-    risk_row = next(r for r in outputs if r.agent_name == "risk")
-    # Stage A's real result must survive: still "completed", still carrying
-    # its own real risk_profile data.
-    assert risk_row.status == "completed"
-    assert risk_row.structured_output["risk_profile"] == {"beta": 1.1}
-    # Stage B never ran to completion -- no stage_b key was added, and the
-    # failure is recorded rather than silently swallowed.
-    assert "stage_b" not in risk_row.structured_output
-    assert "stage b bug" in risk_row.error_detail
 
 
 @pytest.mark.asyncio
@@ -833,7 +760,7 @@ async def test_ollama_unavailable_aborts_the_whole_run():
 
 
 async def test_ollama_unavailable_mid_pass2_still_writes_completed_agents():
-    """Same bug, Pass 2 side -- covers _run_bull_bear_tax's and _run_risk's
+    """Same bug, Pass 2 side -- covers _run_bull_bear_tax's and the Risk Advisor's
     independently-fixed OllamaUnavailable handling."""
     session = await _make_session()
     run = await _make_run(session)
@@ -971,8 +898,8 @@ async def test_shadow_cio_failure_does_not_fail_the_primary_run():
         thesis_summary="t", key_decision_factors=[],
     )
     cio_stage_b = {
-        "synthesis_narrative": "n", "position_sizing_recommendation": "1-2%",
-        "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
+        "synthesis_narrative": "n",
+        "expected_return_tier": "market_perform", "tax_summary": {},
     }
 
     class _RaisingShadowRunner(_StubRunner):
@@ -1028,8 +955,8 @@ async def test_shadow_cio_db_write_failure_does_not_break_the_session_for_later_
         thesis_summary="t", key_decision_factors=[],
     )
     cio_stage_b = {
-        "synthesis_narrative": "n", "position_sizing_recommendation": "1-2%",
-        "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
+        "synthesis_narrative": "n",
+        "expected_return_tier": "market_perform", "tax_summary": {},
     }
     shadow_result = _completed(stock_outlook="somewhat_bearish", expected_return_tier="underperform")
 
@@ -1121,9 +1048,8 @@ async def test_run_quality_summary_written_on_happy_path():
     )
     cio_stage_b = {
         "synthesis_narrative": "Buy on strength.",
-        "position_sizing_recommendation": "3-5%",
         "expected_return_tier": "outperform",
-        "tax_summary": {}, "risk_profile_summary": {},
+        "tax_summary": {},
     }
     shadow_result = _completed(stock_outlook="neutral", expected_return_tier="market_perform")
 
@@ -1139,7 +1065,7 @@ async def test_run_quality_summary_written_on_happy_path():
         patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
         patch(
             "services.orchestrator.RiskAdvisorRunner",
-            _StubRunner(_completed(risk_profile={}), stage_b_result={"position_size_recommendation": "3-5%"}),
+            _StubRunner(_completed(risk_profile={})),
         ),
         patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
         patch("services.orchestrator.ShadowCIORunner", _StubRunner(shadow_result)),
@@ -1390,8 +1316,8 @@ _CIO_A = dict(
     thesis_summary="t", key_decision_factors=[],
 )
 _CIO_B = {
-    "synthesis_narrative": "n", "position_sizing_recommendation": "1-2%",
-    "expected_return_tier": "market_perform", "tax_summary": {}, "risk_profile_summary": {},
+    "synthesis_narrative": "n",
+    "expected_return_tier": "market_perform", "tax_summary": {},
 }
 
 
@@ -1668,26 +1594,6 @@ async def test_error_records_shadow_with_no_outlook_to_compare():
     assert run.status == RunStatus.COMPLETED
     assert _kinds(await _error_rows(session)) == [
         ("agent", "output_validation_failed", "shadow_cio", "missing_outlook")
-    ]
-
-
-@pytest.mark.asyncio
-async def test_error_records_risk_stage_b_exception_from_inside_the_gather():
-    """Recorded from inside an asyncio.gather coroutine, where an AsyncSession
-    must never be written to -- which is exactly why notes are queued, not
-    written, at the point of failure."""
-    session = await _make_session()
-    run = await _make_run(session)
-    risk = _StubRunner(
-        _completed(risk_profile={}), stage_b_result={"x": 1},
-        stage_b_raises=RuntimeError("stage b bug"),
-    )
-
-    await _run_with(session, run, {"RiskAdvisorRunner": risk})
-
-    assert run.status == RunStatus.COMPLETED
-    assert _kinds(await _error_rows(session)) == [
-        ("agent", "agent_exception", "risk", "RuntimeError@services/orchestrator.py:_run_risk")
     ]
 
 
@@ -2322,3 +2228,50 @@ async def test_if_neither_hash_can_be_taken_the_run_is_left_exactly_as_it_was():
             await AnalysisOrchestrator().run(run, session)
 
     assert await _stored_llm_config(session, run) == {"model": "gpt-oss:20b"}
+
+
+@pytest.mark.asyncio
+async def test_the_cio_stage_b_gets_no_risk_input_and_no_position_size_is_stored():
+    """Position sizing and the Risk Advisor's stage B were removed 2026-10-01: Risk feeds the CIO's
+    stage A only, and the stored recommendation carries no position size."""
+    session = await _make_session()
+    run = await _make_run(session)
+    bundle = _fake_bundle()
+    cio_stage_a = _completed(
+        stock_outlook="neutral", expected_return_tier="market_perform",
+        thesis_summary="t", key_decision_factors=[],
+    )
+    cio_stage_b = {"synthesis_narrative": "n", "expected_return_tier": "market_perform", "tax_summary": {}}
+    cio = _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)
+    risk = _StubRunner(_completed(risk_profile={"beta": 1.1}))
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch("services.orchestrator.StockResearcherRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(_completed(recommendation="bullish"))),
+        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
+        patch("services.orchestrator.TaxStrategistRunner", _StubRunner(_completed(tax_profile={}))),
+        patch("services.orchestrator.RiskAdvisorRunner", risk),
+        patch("services.orchestrator.CIORunner", cio),
+        patch("services.orchestrator.ShadowCIORunner", _StubRunner(_completed(stock_outlook="neutral"))),
+        patch("services.orchestrator.Router") as MockRouter,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        router_instance = AsyncMock()
+        router_instance.get_quote = AsyncMock(return_value={"current_price": 5800.0})
+        MockRouter.return_value.__aenter__ = AsyncMock(return_value=router_instance)
+        MockRouter.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await AnalysisOrchestrator().run(run, session)
+
+    assert run.status == RunStatus.COMPLETED
+    assert not hasattr(risk, "stage_b_calls") or risk.stage_b_calls == []  # Risk makes no stage B call
+    assert len(cio.stage_b_calls) == 1
+    # run_stage_b(bundle, stage_a_result, tax_result, account_type): no Risk argument
+    assert len(cio.stage_b_calls[0]) == 4
+    rec = (await session.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))).scalar_one()
+    assert rec.position_size_suggestion is None

@@ -89,6 +89,14 @@ def test_the_prompt_does_not_mention_a_stop_loss():
     assert not re.search(r"stop.?loss", STAGE_A, re.I)
 
 
+def test_there_is_no_stage_b_prompt_and_no_sizing_in_stage_a():
+    """Position sizing and the account-specific stage B were removed 2026-10-01: Risk has no loss
+    budget or portfolio to size against (the Portfolio Optimizer owns sizing)."""
+    with pytest.raises(FileNotFoundError):
+        load_template("risk_advisor", stage="b")
+    assert not re.search(r"position.?siz", STAGE_A, re.I)
+
+
 def test_the_prompt_explains_what_beta_is_and_what_a_low_r_squared_means():
     assert "WHAT BETA IS" in STAGE_A
     assert "NOT how volatile it is" in STAGE_A

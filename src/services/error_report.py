@@ -929,7 +929,6 @@ _AGENT_TEMPLATES = {
     "agent:bull": "bull_advocate/v1.txt",
     "agent:bear": "bear_advocate/v1.txt",
     "agent:risk_stage_a": "risk_advisor/v1_stage_a.txt",
-    "agent:risk_stage_b": "risk_advisor/v1_stage_b.txt",
     "agent:tax": "tax_strategist/v1.txt",
     "agent:cio_stage_a": "cio/v1_stage_a.txt",
     "agent:cio_stage_b": "cio/v1_stage_b.txt",

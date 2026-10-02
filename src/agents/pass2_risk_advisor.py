@@ -28,8 +28,6 @@ Uses groundedness_score (NOT confidence).
 NO recommendation field.
 beta and max_drawdown_1yr are orchestrator-injected (NOT LLM-produced).
 downside_scenarios: 2-4 items, no two within ±2% estimated_impact_pct.
-stop_loss_suggestion: null for TFSA/RRSP medium/long-term; numeric for Trading short-term.
-position_size_recommendation format: "X-Y%".
 key_factors: sentiment must be negative|neutral only.
 
 86bbummwp follow-on: Stage A's own `_validate_with_caveats()` now composes
@@ -53,7 +51,7 @@ from agents.validators.common import (
     GROUNDEDNESS_HIGH_THRESHOLD,
     validate_confidence_requires_caveat_when_flagged,
 )
-from agents.validators.pass2 import validate_risk_advisor_stage_a, validate_risk_advisor_stage_b
+from agents.validators.pass2 import validate_risk_advisor_stage_a
 from data.schemas.data_bundle import DataBundle
 
 
@@ -174,9 +172,9 @@ def build_user_message(
     (get_system_prompt) and used to be appended here as well, so every call paid
     for them twice. The account used to appear here too (a header line, an
     `ACCOUNT | TIMELINE` line and a code-generated STOP-LOSS NOTE) although stage A
-    is the account-neutral half of the agent: one read per ticker and timeline,
-    shared by every account.
-    Stage B states its own account in its own prompt.
+    is account-neutral: one read per ticker and timeline, shared by every account.
+    (Position sizing and the Risk Advisor's account-specific stage B were removed
+    2026-10-01: Risk has no loss budget or portfolio to size against.)
     The second return value is the presence map for the risk metrics."""
     base = build_pass2_user_message(bundle, compressed_pass1, account_neutral=True)
     _, field_presence = _precomputed_risk_metrics(bundle)
@@ -184,23 +182,14 @@ def build_user_message(
 
 
 class RiskAdvisorRunner(BaseRunner):
-    def __init__(self, session=None):
-        super().__init__(session=session)
-        # Set for real by run() (context=None on total Stage A exhaustion, never a
-        # failed attempt's own context -- see BaseRunner._retry_loop's docstring).
-        self.last_stage_a_context: list[int] | None = None
-
     async def run(
         self,
         bundle: DataBundle,
         compressed_pass1: dict,
-        account_type: str | None = None,
     ) -> tuple[dict, list[str]]:
         # call_site (86bbwachy Phase 2) is derived from current_agent; the agent id
         # is still "risk_stage_a" so historical llm_calls rows keep the same name.
         self.current_agent = "risk_stage_a"
-        # `account_type` is accepted for call-site compatibility only: stage A is
-        # account-neutral and uses none of it (see build_user_message).
         user_msg, field_presence = build_user_message(bundle, compressed_pass1)
         # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
         # failed call still records whether its own input was already
@@ -208,17 +197,13 @@ class RiskAdvisorRunner(BaseRunner):
         self.last_field_coverage = field_presence
         system_prompt = get_system_prompt(bundle, compressed_pass1)
         material_absent = [k for k, v in field_presence.items() if not v]
-        result, errors, context = await self.call_with_validation_start(
+        result, errors, _context = await self.call_with_validation_start(
             system_prompt,
             user_msg,
             partial(_validate_with_caveats, material_absent=material_absent),
             max_tokens=5000,
             temperature=0.3,
         )
-        # context is None on total exhaustion (never a failed attempt's own context --
-        # see BaseRunner._retry_loop's docstring); run_stage_b() must not be called
-        # when this is None.
-        self.last_stage_a_context = context
         # Orchestrator injects beta and max_drawdown_1yr
         if result and "risk_profile" in result:
             rm = bundle.risk_metrics
@@ -227,39 +212,3 @@ class RiskAdvisorRunner(BaseRunner):
         if result and "recommendation" in result:
             del result["recommendation"]
         return result, errors
-
-    async def run_stage_b(
-        self,
-        bundle: DataBundle,
-        context: list[int],
-        account_type: str | None = None,
-    ) -> tuple[dict, list[str]]:
-        """Account-specific sizing/stop-loss overlay, continuing from Stage
-        A's own context (see run()'s last_stage_a_context). `context` must
-        be a real, success-only context -- callers get this from
-        self.last_stage_a_context after confirming run()'s own errors == [].
-
-        No portfolio system exists yet, so portfolio_context is genuinely
-        "(none provided)" for every real scenario today -- not a stand-in
-        for missing wiring.
-        """
-        self.current_agent = "risk_stage_b"  # see run()'s own comment on why
-        ctx = bundle.context
-        acct = account_type or ctx.account_type
-        stage_b_prompt = fill(
-            load_template("risk_advisor", stage="b"),
-            {
-                "account_type": acct,
-                "timeline": ctx.timeline,
-                "account_instruction": f"Account: {acct.upper()}.",
-                "portfolio_context": "(none provided)",
-                "precomputed_portfolio_fit_metrics": "(none -- no portfolio_context provided)",
-            },
-        )
-        return await self.call_with_validation_continue(
-            stage_b_prompt,
-            context,
-            validate_risk_advisor_stage_b,
-            max_tokens=1500,
-            temperature=0.3,
-        )

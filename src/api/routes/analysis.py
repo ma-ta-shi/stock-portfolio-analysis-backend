@@ -400,7 +400,6 @@ async def get_analysis_result(analysis_id: UUID, db: AsyncSession = Depends(get_
         result.stock_outlook_direction = recommendation.stock_outlook_direction
         result.overall_confidence = recommendation.overall_confidence
         result.account_recommendation = recommendation.account_recommendation
-        result.position_size_suggestion = recommendation.position_size_suggestion
         result.expected_return_tier = recommendation.expected_return_tier
         result.key_drivers = recommendation.key_drivers
         result.synthesis_narrative = recommendation.synthesis_narrative
