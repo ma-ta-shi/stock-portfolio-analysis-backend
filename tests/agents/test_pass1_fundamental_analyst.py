@@ -34,6 +34,8 @@ def _bundle(**overrides) -> SimpleNamespace:
         peer_metrics={"sector_medians": {"sector_median_pe": 20.1}, "peer_records": []},
         missing_fields=[],
         latest_financials_period_end="2026-06-30",  # 86bbummwp Tier 2 -- well within threshold
+        currency_mismatch=None,
+        not_applicable=None,
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -365,3 +367,44 @@ def test_validate_with_caveats_passes_high_confidence_stale_data_with_caveat_pre
         out, material_absent=[], anomalies=[], stale_data=["financials"]
     )
     assert passed, errors
+
+
+def test_a_banks_nonexistent_metrics_read_not_applicable_not_n_a():
+    bundle = _bundle(
+        profitability_metrics={"gross_margin": None, "operating_margin": None, "net_margin": 0.32, "roe": 0.15,
+                               "fcf_to_net_income": 1.1},
+        balance_sheet_metrics={"debt_to_equity": 4.1, "current_ratio": None, "interest_coverage": None, "cash_position": 5.2e9},
+        not_applicable={"reason": "bank", "fields": ["gross_margin", "operating_margin", "current_ratio", "interest_coverage"]},
+    )
+    msg, _ = build_user_message(bundle)
+    assert "Gross margin: not applicable (bank) | Operating margin: not applicable (bank)" in msg
+    assert "Current ratio: not applicable (bank)" in msg and "Interest coverage: not applicable (bank)" in msg
+    assert "N/A" not in msg.split("PROFITABILITY")[1].split("BALANCE SHEET")[0]
+
+
+def test_a_gap_that_is_not_on_the_not_applicable_list_still_reads_n_a():
+    bundle = _bundle(balance_sheet_metrics={"debt_to_equity": 0.4, "current_ratio": 1.8, "interest_coverage": None,
+                                            "cash_position": 5.2e9})
+    msg, _ = build_user_message(bundle)
+    assert "Interest coverage: N/A" in msg
+
+
+def test_a_converted_currency_is_stated_in_the_payload_and_the_de_convention_is_labelled():
+    bundle = _bundle(currency_mismatch={"financials_currency": "USD", "quote_currency": "CAD", "converted": True, "usd_cad": 1.4243})
+    msg, _ = build_user_message(bundle)
+    assert "NOTE: statements are reported in USD and shown here converted to CAD at 1.4243 CAD per USD (Bank of Canada)." in msg
+    assert "D/E (financial debt, excluding leases):" in msg
+
+
+def test_an_unconvertible_currency_mismatch_says_the_multiples_are_omitted():
+    bundle = _bundle(currency_mismatch={"financials_currency": "EUR", "quote_currency": "CAD", "converted": False, "usd_cad": None})
+    msg, _ = build_user_message(bundle)
+    assert "no exchange rate was available, so price-based multiples are omitted" in msg
+
+
+def test_revenue_growth_shows_its_basis_and_the_fiscal_year_figure():
+    bundle = _bundle(growth_metrics={"revenue_growth_yoy": 0.0674, "revenue_growth_yoy_basis": "quarter ended 2026-07-03 vs 2025-06-27",
+                                     "revenue_growth_annual": 0.0187, "revenue_growth_3yr_cagr": 0.11, "eps_growth_yoy": 0.08,
+                                     "earnings_surprises": []})
+    msg, _ = build_user_message(bundle)
+    assert "Revenue growth YoY: 6.74% (quarter ended 2026-07-03 vs 2025-06-27) | Last fiscal year: 1.87%" in msg

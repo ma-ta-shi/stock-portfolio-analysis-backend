@@ -82,6 +82,7 @@ from agents.prompts import fill, load_template
 from agents.utils import (
     RenderedField,
     compute_data_quality_assessment,
+    currency_note,
     render_data_coverage_line,
     render_data_warnings,
     to_data_coverage,
@@ -255,31 +256,41 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     # The median is over the few named peers that have a P/E, not a sector benchmark (MSFT's 'Technology
     # median' of 61.8 was one peer's P/E), so the count goes beside it.
     pe_peer_count = sum(1 for p in bundle.peer_metrics.get("peer_records", []) if p.get("pe_ratio") is not None)
+    # Metrics that do not exist for this kind of company (banks have no operating margin, REIT earnings multiples
+    # mislead) read "not applicable", not as a data gap.
+    na = bundle.not_applicable or {}
+    na_fields = set(na.get("fields", []))
+    na_label = f"not applicable ({na.get('reason')})"
+
+    def nv(key, value, suffix="", pct=False):
+        return na_label if value is None and key in na_fields else _fmt(value, suffix, pct)
+
+    fx_note = currency_note(bundle.currency_mismatch)
 
     text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
-Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}
+Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{fx_note}
 
 VALUATION (VAL):
-  P/E: {_fmt(val.get('pe_ratio'))} vs Peer median: {_fmt(sector_medians.get('sector_median_pe'))} ({pe_peer_count} peers with a P/E)
-  Forward P/E: {_fmt(val.get('forward_pe'))} | PEG: {_fmt(val.get('peg_ratio'))}
+  P/E: {nv('pe_ratio', val.get('pe_ratio'))} vs Peer median: {_fmt(sector_medians.get('sector_median_pe'))} ({pe_peer_count} peers with a P/E)
+  Forward P/E: {_fmt(val.get('forward_pe'))} | PEG: {nv('peg_ratio', val.get('peg_ratio'))}
   Current price: {price.get('current_price')} {bundle.stock.currency} | Market cap: {_fmt(price.get('market_cap'))}
   52w range: {price.get('low_52w')} - {price.get('high_52w')}
 
 GROWTH (GROWTH):
-  Revenue growth YoY: {_fmt(growth.get('revenue_growth_yoy'), '%', pct=True)} | 3yr CAGR: {_fmt(growth.get('revenue_growth_3yr_cagr'), '%', pct=True)}
+  Revenue growth YoY: {_fmt(growth.get('revenue_growth_yoy'), '%', pct=True)} ({growth.get('revenue_growth_yoy_basis') or 'period unknown'}) | Last fiscal year: {_fmt(growth.get('revenue_growth_annual'), '%', pct=True)} | 3yr CAGR: {_fmt(growth.get('revenue_growth_3yr_cagr'), '%', pct=True)}
   EPS growth YoY: {_fmt(growth.get('eps_growth_yoy'), '%', pct=True)}
 
 PROFITABILITY (PROF):
-  Gross margin: {_fmt(prof.get('gross_margin'), '%', pct=True)} | Operating margin: {_fmt(prof.get('operating_margin'), '%', pct=True)} | Net margin: {_fmt(prof.get('net_margin'), '%', pct=True)}
+  Gross margin: {nv('gross_margin', prof.get('gross_margin'), '%', True)} | Operating margin: {nv('operating_margin', prof.get('operating_margin'), '%', True)} | Net margin: {_fmt(prof.get('net_margin'), '%', pct=True)}
   ROE: {_fmt(prof.get('roe'), '%', pct=True)}
   FCF to net income: {_fmt(prof.get('fcf_to_net_income'))}
 
 BALANCE SHEET (BAL):
-  D/E: {_fmt(bal.get('debt_to_equity'))} | Current ratio: {_fmt(bal.get('current_ratio'))}
-  Interest coverage: {_fmt(bal.get('interest_coverage'))} | Cash: {_fmt(bal.get('cash_position'))}
+  D/E (financial debt, excluding leases): {_fmt(bal.get('debt_to_equity'))} | Current ratio: {nv('current_ratio', bal.get('current_ratio'))}
+  Interest coverage: {nv('interest_coverage', bal.get('interest_coverage'))} | Cash: {_fmt(bal.get('cash_position'))}
 
 DIVIDEND (DIV):
-  Yield: {_fmt(div.get('dividend_yield'), '%', pct=True)} | Payout: {_fmt(div.get('payout_ratio'), '%', pct=True)}
+  Yield: {_fmt(div.get('dividend_yield'), '%', pct=True)} | Payout: {nv('payout_ratio', div.get('payout_ratio'), '%', True)}
   5yr dividend growth: {_fmt(div.get('dividend_growth_5yr'), '%', pct=True)} | Regularity: {div.get('dividend_regularity', 'N/A')}
 
 ANALYST CONSENSUS (ANALYST):

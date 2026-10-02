@@ -124,6 +124,8 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             "net_margin": b.get("net_margin"),
             "operating_margin": b.get("operating_margin"),
             "revenue_growth_yoy": b.get("revenue_growth_yoy"),
+            "revenue_growth_yoy_basis": b.get("revenue_growth_yoy_basis"),
+            "revenue_growth_annual": b.get("revenue_growth_annual"),
             "revenue_growth_3yr_cagr": b.get("revenue_growth_3yr_cagr"),
             "fcf_to_net_income": b.get("fcf_to_net_income"),
         }
@@ -147,7 +149,6 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
 
     if agent_id == "SENT":
         news = _obj(c.get("news_sentiment"))
-        analyst = _obj(c.get("analyst_sentiment"))
         return {
             # Flat names, per the prompt's explicit "a flat pass2_view dict".
             # The validator's old nested "news_sentiment"/"analyst_sentiment" names
@@ -160,9 +161,9 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             "insider_materiality": b.get("insider_materiality"),
             "short_interest_interpretation": c.get("short_interest_interpretation"),
             "peer_sentiment_comparison": c.get("peer_sentiment_comparison"),
-            # Orchestrator numeric passthrough, merged into analyst_sentiment.
-            "consensus_rating": analyst.get("consensus_rating"),
-            "average_price_target": analyst.get("average_price_target"),
+            # Provider data passed through from the bundle, never the model.
+            "consensus_rating": b.get("consensus_rating"),
+            "average_price_target": b.get("average_price_target"),
         }
 
     if agent_id == "MACRO":

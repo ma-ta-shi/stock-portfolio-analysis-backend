@@ -128,6 +128,11 @@ def _pe_vs_peer_median_pct(pe: float | None, median: float | None) -> float | No
     return round((pe / median - 1) * 100, 1)
 
 
+def _plain(value):
+    """A numpy scalar as a plain Python number; anything else unchanged."""
+    return value.item() if hasattr(value, "item") and not isinstance(value, (list, dict, str)) else value
+
+
 def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     """Per-agent orchestrator-owned field slices for agents/pass2_view.py's
     build_pass2_view() -- the fields each Pass 1 agent's own prompt never
@@ -142,13 +147,14 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     sector_medians = bundle.peer_metrics.get("sector_medians", {})
     peer_records = bundle.peer_metrics.get("peer_records", [])
     insider = summarize_insider_activity(
-        bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap")
+        bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap"),
+        bundle.insider_activity.get("value_currency"), bundle.price_info.get("currency"),
     )
     ti = bundle.technical_indicators
     sr = bundle.support_resistance
     m = bundle.macro_sources
 
-    return {
+    views = {
         "FUND": {
             "pe_ratio": fund.get("pe_ratio"),
             "margin_trend": prof.get("margin_trend"),
@@ -162,16 +168,23 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
             "net_margin": prof.get("net_margin"),
             "operating_margin": prof.get("operating_margin"),
             "revenue_growth_yoy": growth.get("revenue_growth_yoy"),
+            "revenue_growth_yoy_basis": growth.get("revenue_growth_yoy_basis"),
+            "revenue_growth_annual": growth.get("revenue_growth_annual"),
             "revenue_growth_3yr_cagr": growth.get("revenue_growth_3yr_cagr"),
             "fcf_to_net_income": prof.get("fcf_to_net_income"),
         },
         "SENT": {
             "insider_activity_90d": insider["text"],
             "insider_materiality": insider["materiality"],
+            # The Pass 2 view used to read these from the model's own output, which never contains them
+            # (empty in 44 of 46 real runs); they are provider data, so they come from the bundle.
+            "consensus_rating": bundle.analyst_consensus.get("consensus_rating"),
+            "average_price_target": bundle.analyst_consensus.get("target_mean"),
         },
         "TECH": {
-            "nearest_support": sr.get("nearest_support"),
-            "nearest_resistance": sr.get("nearest_resistance"),
+            # numpy scalars from the indicator maths; a real run once crashed on their repr, so plain floats here
+            "nearest_support": _plain(sr.get("nearest_support")),
+            "nearest_resistance": _plain(sr.get("nearest_resistance")),
             "volatility_regime_derived": ti.get("volatility_regime_derived"),
         },
         "MACRO": {
@@ -182,6 +195,15 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
             "volatility_regime": m.vix_regime,
         },
     }
+    # A metric that does not exist for this kind of company (a bank's operating margin, a REIT's P/E) is passed as
+    # "not_applicable", not None, so Pass 2 does not read it as missing data.
+    na_fields = set((bundle.not_applicable or {}).get("fields", []))
+    if "pe_ratio" in na_fields:
+        na_fields |= {"peer_pe_median", "pe_vs_peer_median_pct"}
+    for key in na_fields:
+        if key in views["FUND"] and views["FUND"][key] is None:
+            views["FUND"][key] = "not_applicable"
+    return views
 
 
 def _llm_call_rows(run_id, agent_pass: str, runner) -> list[LLMCall]:
