@@ -527,7 +527,7 @@ async def test_statcan_called_and_populated_for_a_canadian_stock():
 
 
 @pytest.mark.asyncio
-async def test_statcan_outage_degrades_gracefully_instead_of_crashing():
+async def test_statcan_outage_degrades_gracefully_instead_of_crashing(no_statcan_retry_delay):
     """Real gap found live (86bawpty3): a StatsCanada network failure used
     to propagate uncaught out of compute_macro_sources(), crashing the
     whole CA pipeline instead of degrading to statcan_available=False the
@@ -909,3 +909,51 @@ async def test_copper_ages_from_the_end_of_its_month_and_oil_from_its_observatio
 
     assert await age("Basic Materials") == 61  # Jul 31 -> Sep 30
     assert await age("Energy") == 8  # Sep 22 -> Sep 30
+
+
+@pytest.fixture
+def no_statcan_retry_delay(monkeypatch):
+    monkeypatch.setattr("data.precompute.macro_sources._STATCAN_RETRY_DELAY_SECONDS", 0.0)
+
+
+@pytest.mark.asyncio
+async def test_one_failing_statcan_metric_does_not_blank_the_others(no_statcan_retry_delay):
+    """2026-10-02: 2 of 4 Canadian bundles had no Canadian macro data at all though every call worked when repeated;
+    the five calls were sequential in one try block, so one failure nulled all of them."""
+
+    class _OneBroken(_FakeStatsCanada):
+        async def get_housing_starts(self):
+            raise RuntimeError("timeout")
+
+    sc = _OneBroken(unemployment={"value": 6.4, "delta_6m_pp": -0.3, "released": "2026-07-04"})
+    bundle = await _compute(is_canadian_stock=True, stats_canada=sc)
+    assert bundle.statcan_unemployment_ca == 6.4  # survived
+    assert bundle.statcan_housing_starts is None  # the one that failed
+
+
+@pytest.mark.asyncio
+async def test_a_transient_statcan_failure_is_retried_and_recovers(no_statcan_retry_delay):
+    calls = {"n": 0}
+
+    class _Flaky(_FakeStatsCanada):
+        async def get_unemployment_rate(self):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise ConnectionError("temporary")
+            return {"value": 6.4, "delta_6m_pp": -0.3, "released": "2026-07-04"}
+
+    bundle = await _compute(is_canadian_stock=True, stats_canada=_Flaky())
+    assert calls["n"] == 3 and bundle.statcan_unemployment_ca == 6.4
+
+
+@pytest.mark.asyncio
+async def test_a_permanently_failing_statcan_metric_gives_up_after_three_attempts(no_statcan_retry_delay):
+    calls = {"n": 0}
+
+    class _Down(_FakeStatsCanada):
+        async def get_unemployment_rate(self):
+            calls["n"] += 1
+            raise RuntimeError("down")
+
+    bundle = await _compute(is_canadian_stock=True, stats_canada=_Down())
+    assert calls["n"] == 3 and bundle.statcan_unemployment_ca is None

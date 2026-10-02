@@ -197,7 +197,8 @@ class BOCMacroDataProvider(MacroDataProvider):
             }
 
             series_id = series_map.get(pair.upper(), f"FX{pair.upper()}")
-            url = f"{self.BASE_URL}/observations/{series_id}/json"
+            # recent=1: only the latest observation is used (the full series is thousands of rows).
+            url = f"{self.BASE_URL}/observations/{series_id}/json?recent=1"
             data = await self._fetch_json(url)
 
             result = {"pair": pair}

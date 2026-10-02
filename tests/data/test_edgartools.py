@@ -645,6 +645,22 @@ async def test_get_insider_trading_maps_form4_codes(provider, monkeypatch, code,
     assert result[0]["is_issuer"] is False  # Form 4 is always person-level, never the issuer
 
 
+async def test_a_form4_without_a_transaction_table_does_not_wipe_out_the_other_filings(provider, monkeypatch):
+    """NVDA 2026-10-02: one of the 20 most recent Form 4s had only Date/Form/Issuer/Insider/Position/Remarks
+    columns; the KeyError on "Shares" escaped and the ticker came back with zero insider rows."""
+    now = pd.Timestamp.now()
+    good = {"Date": now - pd.Timedelta(days=3), "Shares": 50, "Price": 10.0, "Insider": "Jane Doe", "Code": "S"}
+    no_table = {"Date": now - pd.Timedelta(days=2), "Form": "4", "Issuer": "NVIDIA", "Insider": "Someone",
+                "Position": "Director", "Remarks": ""}
+    fake = FakeCompany(filings=[FakeFiling("0001-1", form4_df=_form4_df([no_table])),
+                                FakeFiling("0001-2", form4_df=_form4_df([good]))])
+    _patch_company(monkeypatch, lambda ticker: fake)
+
+    result = await provider.get_insider_trading("NVDA", days=90)
+
+    assert len(result) == 1 and result[0]["transaction_type"] == "sale" and result[0]["value"] == 500.0
+
+
 async def test_get_insider_trading_skips_unparseable_filing_and_logs(provider, monkeypatch):
     now = pd.Timestamp.now()
     good_row = {
@@ -865,3 +881,39 @@ async def test_healthy_edgar_calls_report_nothing(provider, monkeypatch, collect
 
     assert not df.empty
     assert collector.drain() == []
+
+
+# --- the balance sheet is the newest one either filing covers ---
+
+
+def _balance_frame(period: str, equity: float) -> pd.DataFrame:
+    """The raw-XBRL shape _latest_balance reads: metadata columns plus one value column per period."""
+    return pd.DataFrame({
+        "concept": ["us-gaap_StockholdersEquity", "us-gaap_Assets"],
+        "dimension": [False, False],
+        period: [equity, equity * 2],
+    })
+
+
+def test_the_annual_balance_sheet_is_used_when_the_10k_is_newer_than_the_last_10q():
+    """MSFT 2026-10: fiscal year ended 2026-06-30 (10-K), last 10-Q 2026-03-31. Equity 414B (March) vs 443B (June):
+    P/B, ROE, D/E and the current ratio were 4 to 24% off an independent calculation."""
+    from data.providers.edgartools import _newest_balance
+
+    out = _newest_balance(_balance_frame("2026-03-31", 414.0), _balance_frame("2026-06-30", 443.0))
+    assert out["total_equity"] == 443.0
+
+
+def test_the_quarterly_balance_sheet_is_used_when_it_is_newer_than_the_annual_one():
+    from data.providers.edgartools import _newest_balance
+
+    out = _newest_balance(_balance_frame("2026-07-03", 36.0), _balance_frame("2025-12-31", 35.0))
+    assert out["total_equity"] == 36.0
+
+
+def test_a_missing_quarterly_balance_falls_back_to_the_annual_one_and_vice_versa():
+    from data.providers.edgartools import _newest_balance
+
+    assert _newest_balance(pd.DataFrame(), _balance_frame("2025-12-31", 35.0))["total_equity"] == 35.0
+    assert _newest_balance(_balance_frame("2026-03-31", 36.0), pd.DataFrame())["total_equity"] == 36.0
+    assert _newest_balance(pd.DataFrame(), pd.DataFrame()) == {}

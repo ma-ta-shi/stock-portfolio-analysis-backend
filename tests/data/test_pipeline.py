@@ -97,6 +97,11 @@ class _FakeFinancialsProvider:
         self._fin = fin
         self._name = name
 
+    reported_currency = None
+
+    async def get_financial_currency(self, ticker):
+        return type(self).reported_currency
+
     async def normalize_financials(self, ticker):
         type(self).calls.append((self._name, ticker))
         if ticker in type(self).failing:
@@ -180,7 +185,11 @@ class _FakeRouter:
         return {"short_percent_of_float": 1.2}
 
 
+_FAKE_FUNDAMENTALS_KWARGS: list[dict] = []
+
+
 def _fake_fundamentals_compute_all(**kwargs):
+    _FAKE_FUNDAMENTALS_KWARGS.append(kwargs)
     return {
         "valuation_metrics": {"pe_ratio": 20.0},
         "growth_metrics": {"revenue_growth_yoy": 0.1},
@@ -190,6 +199,7 @@ def _fake_fundamentals_compute_all(**kwargs):
         "peer_metrics": {},
         "missing_fields": [],
         "currency_mismatch": None,
+        "not_applicable": None,
         "latest_financials_period_end": "2026-06-30",
     }
 
@@ -353,6 +363,9 @@ def patched_precompute(monkeypatch):
         async def __aexit__(self, *exc):
             return None
 
+        async def get_exchange_rates(self, pair="USDCAD"):
+            return {"pair": pair, "rate": 1.4, "date": "2026-10-01"}
+
     monkeypatch.setattr(pipeline_module, "BOCMacroDataProvider", lambda: _FakeAsyncCtxProvider())
     monkeypatch.setattr(pipeline_module, "FinnhubDataProvider", lambda: _FakeAsyncCtxProvider())
     monkeypatch.setattr(pipeline_module, "StatsCanadaProvider", lambda: _FakeAsyncCtxProvider())
@@ -439,7 +452,7 @@ async def test_prepare_us_stock_populates_every_field(patched_precompute):
     assert bundle.canadian_data_flags is None
     assert bundle.analyst_recommendation_trends is not None
     assert bundle.short_interest == {"short_percent_of_float": 1.2}
-    assert bundle.insider_activity == {"transactions": []}
+    assert bundle.insider_activity == {"transactions": [], "value_currency": "USD"}
     assert bundle.peer_sentiment == []
     assert bundle.data_freshness["get_price_history"]
     assert bundle.data_freshness["get_price_history:benchmark"]
@@ -489,6 +502,52 @@ async def test_prepare_ca_stock_populates_every_field(patched_precompute):
     assert ("RY.TO", "5y", "1d") in _FakeRouter.price_history_calls
     assert ("^GSPTSE", "5y", "1d") in _FakeRouter.price_history_calls
     assert len(_FakeRouter.instances) == 3
+
+
+async def test_a_canadian_stock_gets_insider_values_in_cad_and_the_rate_reaches_the_fundamentals(patched_precompute, monkeypatch):
+    """yfinance reports every Canadian insider trade in USD (RY.TO, SHOP.TO, CAR-UN.TO ... checked 2026-10-02); the
+    Bank of Canada rate (the fake provider returns 1.4) converts them, and the same rate goes to compute_all."""
+    stock = _make_stock(is_ca=True)
+    _FakeRouter.is_ca = True
+    _FakeRouter.fin = SimpleNamespace(currency="USD", quarters=[])
+    _FakeRouter.quote = {"current_price": 120.0, "market_cap": 2e11, "currency": "CAD", "high_52w": 130.0, "low_52w": 90.0}
+    _FakeRouter.price_history = _price_df()
+    recent = pipeline_module.datetime.now(pipeline_module.UTC).date().isoformat()
+    monkeypatch.setattr(
+        _FakeRouter, "get_insider_trading",
+        lambda self, ticker: _async_value([{"date": recent, "is_issuer": False, "transaction_type": "sale",
+                                            "shares": 10.0, "value": 1000.0, "insider_name": "A"}]),
+    )
+    _FAKE_FUNDAMENTALS_KWARGS.clear()
+
+    bundle = await DataPipeline().prepare(stock.stock_id, AnalysisContext(account_type="tfsa", timeline="long_term"), _FakeDB(stock))
+
+    assert bundle.insider_activity["value_currency"] == "CAD"
+    assert bundle.insider_activity["transactions"][0]["value"] == pytest.approx(1400.0)
+    assert _FAKE_FUNDAMENTALS_KWARGS[-1]["usd_cad"] == 1.4
+
+
+async def _async_value(value):
+    return value
+
+
+async def test_a_us_ticker_whose_statements_are_in_cad_gets_the_reported_currency_so_it_is_converted(patched_precompute):
+    """ENB (US ticker) 2026-10-02: edgartools labelled CAD statements USD, so the conversion never triggered."""
+    stock = _make_stock(is_ca=False)
+    _FakeRouter.is_ca = False
+    from data.providers.base import NormalizedFinancials
+
+    _FakeRouter.fin = NormalizedFinancials(quarters=[], annual=[], balance_sheet={}, currency="USD")
+    _FakeRouter.quote = {"current_price": 40.0, "market_cap": 8e10, "currency": "USD", "high_52w": 45.0, "low_52w": 30.0}
+    _FakeRouter.price_history = _price_df()
+    _FAKE_FUNDAMENTALS_KWARGS.clear()
+    _FakeFinancialsProvider.reported_currency = "CAD"
+    try:
+        await DataPipeline().prepare(stock.stock_id, AnalysisContext(account_type="tfsa", timeline="long_term"), _FakeDB(stock))
+    finally:
+        _FakeFinancialsProvider.reported_currency = None
+
+    assert _FAKE_FUNDAMENTALS_KWARGS[-1]["fin"].currency == "CAD"
 
 
 async def test_prepare_stock_not_found_raises(patched_precompute):

@@ -332,6 +332,23 @@ def _latest_balance(balance: pd.DataFrame) -> dict:
     return out
 
 
+def _newest_balance(quarterly: pd.DataFrame, annual: pd.DataFrame) -> dict:
+    """The balance sheet as of the most recent date either filing covers.
+
+    The latest 10-Q used to be the only source, so for the months between a company's fiscal year-end and its next
+    10-Q (a Q4 has no 10-Q, its balance sheet is in the 10-K) every balance-sheet figure was a quarter stale: MSFT in
+    October 2026 showed March equity while the June 30 annual report existed, putting P/B, ROE, D/E and the current ratio
+    4 to 24% off an independent calculation."""
+
+    def newest_date(df):
+        columns = _period_columns(df, exclude_ytd=False) if df is not None and not df.empty else []
+        return _column_date(columns[0]) if columns else None
+
+    quarterly_date, annual_date = newest_date(quarterly), newest_date(annual)
+    use_annual = annual_date is not None and (quarterly_date is None or annual_date >= quarterly_date)
+    return _latest_balance(annual if use_annual else quarterly)
+
+
 def _compute_ttm(
     ki: pd.DataFrame, kc: pd.DataFrame, qi: pd.DataFrame, qc: pd.DataFrame
 ) -> dict | None:
@@ -464,6 +481,7 @@ class EdgarToolsDataProvider(StockDataProvider):
         qi = await self._statement_df(qf, "income")
         qc = await self._statement_df(qf, "cashflow")
         qb = await self._statement_df(qf, "balance")
+        kb = await self._statement_df(kf, "balance")
         ki = await self._statement_df(kf, "income")
         kc = await self._statement_df(kf, "cashflow")
         annual_inc, annual_cf = await self._highlevel_annual(company)
@@ -471,7 +489,7 @@ class EdgarToolsDataProvider(StockDataProvider):
         return NormalizedFinancials(
             quarters=_quarters_from(qi),
             annual=_annual_periods(annual_inc, annual_cf, _fiscal_month_day(company)),
-            balance_sheet=_latest_balance(qb),
+            balance_sheet=_newest_balance(qb, kb),
             currency="USD",  # edgartools/SEC EDGAR covers US filers only
             ttm=_compute_ttm(ki, kc, qi, qc),
         )
@@ -556,7 +574,10 @@ class EdgarToolsDataProvider(StockDataProvider):
                     context={"symbol": ticker},
                 )
                 continue
-            if df is None or df.empty or "Date" not in df.columns:
+            # A Form 4 with no transaction table (only Date/Form/Issuer/Insider/Position/Remarks) used to pass
+            # the "Date" check and then raise KeyError on "Shares", which escaped the per-filing try above and
+            # aborted the whole fetch: one such filing in NVDA's 20 most recent left it with zero rows.
+            if df is None or df.empty or not {"Date", "Shares"} <= set(df.columns):
                 continue
             for _, row in df[df["Date"] >= cutoff].iterrows():
                 shares = float(row["Shares"]) if pd.notna(row["Shares"]) else None

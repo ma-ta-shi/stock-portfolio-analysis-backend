@@ -28,9 +28,11 @@ ClickUp 86ban0wcr for the full reasoning):
 """
 
 import statistics
+from datetime import date
 
 import structlog
 
+from data.precompute.currency import PRICE_BASED_MULTIPLES, convert_earnings_surprises, to_quote_currency
 from data.providers.base import (
     NormalizedAnalystEstimates,
     NormalizedDividendRecord,
@@ -289,13 +291,53 @@ def _consecutive_years_paid(years_with_payments: set[int]) -> int:
     return count
 
 
+def _is_about_a_year_apart(newer: str | None, older: str | None) -> bool:
+    try:
+        return 340 <= (date.fromisoformat(newer) - date.fromisoformat(older)).days <= 390
+    except (TypeError, ValueError):
+        return False
+
+
+def _latest_revenue_yoy(fin: NormalizedFinancials) -> tuple[float | None, str | None]:
+    """Revenue growth over the most recent period the statements cover, and a label saying which period.
+
+    The latest quarter against the same quarter a year earlier, or the last fiscal year against the year before,
+    whichever ended more recently (a company that has just filed its annual report has a newer fiscal year than
+    quarter; MSFT in 2026-10: fiscal year ended 2026-06-30, last 10-Q quarter 2026-03-31). Before this the metric was
+    always the last two fiscal years, so for any company whose year ended months ago it was months stale: KO showed
+    1.87% (FY2025 vs FY2024) while the latest quarter had grown 6.74%; RY.TO 15.7% against 8.9%; CAR-UN.TO -9.8% against
+    -3.2%. edgartools supplies the latest quarter plus its prior-year comparative; yfinance supplies five quarters."""
+    candidates: list[tuple[str, float, str]] = []
+    quarters, annual = fin.quarters, fin.annual
+    if quarters and quarters[0].get("revenue") is not None:
+        latest = quarters[0]
+        prior = next(
+            (q for q in quarters[1:] if q.get("revenue") and _is_about_a_year_apart(latest.get("period_end"), q.get("period_end"))),
+            None,
+        )
+        if prior is not None:
+            candidates.append((
+                latest["period_end"], latest["revenue"] / prior["revenue"] - 1,
+                f"quarter ended {latest['period_end']} vs {prior['period_end']}",
+            ))
+    if len(annual) >= 2 and annual[0].get("revenue") is not None and annual[1].get("revenue"):
+        candidates.append((
+            annual[0]["period_end"], annual[0]["revenue"] / annual[1]["revenue"] - 1,
+            f"fiscal year ended {annual[0]['period_end']}",
+        ))
+    if not candidates:
+        return None, None
+    _, growth, basis = max(candidates, key=lambda c: c[0])
+    return growth, basis
+
+
 def compute_growth_metrics(
     fin: NormalizedFinancials, earnings_surprises: list[dict] | None = None
 ) -> dict:
-    """revenue_growth_yoy/eps_growth_yoy use annual[0] vs annual[1] — the
-    simplest well-defined YoY, always available once 2+ years of annual
-    data exist. Quarterly YoY would need quarters[4], not guaranteed by
-    the ticket's own minimum-data threshold (>=2 quarters).
+    """revenue_growth_yoy is the most recent period's growth with its basis spelled out in
+    revenue_growth_yoy_basis (see _latest_revenue_yoy); revenue_growth_annual is always last fiscal year against the
+    year before, kept beside it so a noisy quarter can be read against the annual trend. eps_growth_yoy stays
+    annual[0] vs annual[1] (it feeds the PEG, which should not swing on one quarter).
 
     earnings_surprises (86bbdu04a) is passed through directly, not
     collapsed to None when empty — None means "no data source wired for
@@ -308,17 +350,20 @@ def compute_growth_metrics(
     silent last-write-wins collision in compute_peer_comparison's
     dict merge)."""
     annual = fin.annual
-    revenue_growth_yoy = None
+    revenue_growth_annual = None
     eps_growth_yoy = None
     if len(annual) >= 2:
         prev_revenue = annual[1].get("revenue")
         if prev_revenue and annual[0].get("revenue") is not None:
-            revenue_growth_yoy = (annual[0]["revenue"] - prev_revenue) / prev_revenue
+            revenue_growth_annual = (annual[0]["revenue"] - prev_revenue) / prev_revenue
         prev_eps = annual[1].get("eps")
         if prev_eps and annual[0].get("eps") is not None:
             eps_growth_yoy = (annual[0]["eps"] - prev_eps) / prev_eps
+    revenue_growth_yoy, revenue_growth_yoy_basis = _latest_revenue_yoy(fin)
     return {
         "revenue_growth_yoy": revenue_growth_yoy,
+        "revenue_growth_yoy_basis": revenue_growth_yoy_basis,
+        "revenue_growth_annual": revenue_growth_annual,
         "revenue_growth_3yr_cagr": _cagr(annual, "revenue"),
         "eps_growth_yoy": eps_growth_yoy,
         "earnings_surprises": earnings_surprises,
@@ -388,6 +433,13 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
     not this module's job (docs/decision-log.md 2026-08-07)."""
     bs = fin.balance_sheet
     total_debt, total_equity = bs.get("total_debt"), bs.get("total_equity")
+    periods = [*fin.quarters[:4], *fin.annual[:2]]
+    if total_debt is None and total_equity and periods and not any(p.get("interest_expense") for p in periods):
+        # No debt line and no interest expense in any recent period: a company with no borrowings (RDDT 2026-10-02,
+        # Yahoo D/E 0.006) rather than missing data. If any interest expense exists the debt really is unknown.
+        total_debt = 0.0
+    # Financial debt only: operating-lease liabilities are not included (MSFT 0.097 here against Yahoo's 0.291, which
+    # counts them), and the Fundamental payload says so.
     debt_to_equity = total_debt / total_equity if total_debt is not None and total_equity else None
 
     current_assets, current_liabilities = bs.get("current_assets"), bs.get("current_liabilities")
@@ -397,15 +449,14 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
         else None
     )
 
+    # Operating income over interest expense for the latest quarter, else for the last fiscal year when the quarterly
+    # filing carries no interest line (a 10-Q often omits it: MSFT's did, its annual report has 3.05B against 155B).
     interest_coverage = None
-    if fin.quarters:
-        latest = fin.quarters[0]
-        operating_income, interest_expense = (
-            latest.get("operating_income"),
-            latest.get("interest_expense"),
-        )
+    for period in [*fin.quarters[:1], *fin.annual[:1]]:
+        operating_income, interest_expense = period.get("operating_income"), period.get("interest_expense")
         if operating_income is not None and interest_expense:
             interest_coverage = operating_income / interest_expense
+            break
 
     return {
         "debt_to_equity": debt_to_equity,
@@ -558,8 +609,45 @@ def compute_dividend_info(
     }
 
 
+# Metrics that do not exist for a kind of company, so an empty value is not a data gap. Banks have no gross or operating
+# margin, current ratio or EBITDA and no interest coverage (interest is their cost of goods); REIT earnings are
+# depreciation-distorted (the figure that matters, FFO, is unavailable), so earnings multiples and payout read as gaps.
+_NOT_APPLICABLE = {
+    "bank": ("operating_margin", "gross_margin", "current_ratio", "interest_coverage", "ev_ebitda"),
+    "REIT": ("pe_ratio", "peg_ratio", "payout_ratio"),
+}
+
+
+def _company_kind(industry: str | None) -> str | None:
+    """"bank" or "REIT" from the industry string either provider uses ("Banking" / "Banks - Diversified",
+    "REITs" / "REIT - Residential"), else None."""
+    text = (industry or "").lower()
+    if "bank" in text:
+        return "bank"
+    if "reit" in text:
+        return "REIT"
+    return None
+
+
+def _not_applicable(industry: str | None, **buckets: dict) -> dict | None:
+    """{"reason": kind, "fields": [...]}: the not-applicable metrics for this kind of company that came out empty
+    (a value that exists is left alone), or None."""
+    kind = _company_kind(industry)
+    if kind is None:
+        return None
+    empty = []
+    for field in _NOT_APPLICABLE[kind]:
+        for bucket in buckets.values():
+            if field in bucket:
+                if bucket[field] is None:
+                    empty.append(field)
+                break
+    return {"reason": kind, "fields": empty} if empty else None
+
+
 def compute_peer_comparison(
     peer_data: list[tuple[str, NormalizedFinancials, NormalizedQuote]],
+    usd_cad: float | None = None,
 ) -> dict:
     """Reuses compute_valuation_metrics/compute_profitability_metrics/
     compute_balance_sheet_metrics per peer rather than a parallel
@@ -582,11 +670,16 @@ def compute_peer_comparison(
 
     peer_records = []
     for ticker, peer_fin, peer_price_info in peer_data:
+        # A peer that reports in a different currency than it trades in (a CAD-listed USD reporter) gets its
+        # statements converted first, the same as the subject (see data/precompute/currency.py).
+        peer_fin, peer_mismatch = to_quote_currency(peer_fin, peer_price_info.get("currency"), usd_cad)
         peer_growth = compute_growth_metrics(peer_fin)
         peer_valuation = compute_valuation_metrics(peer_fin, peer_price_info, peer_growth)
         peer_profitability = compute_profitability_metrics(peer_fin)
         peer_balance_sheet = compute_balance_sheet_metrics(peer_fin)
         merged = {**peer_valuation, **peer_growth, **peer_profitability, **peer_balance_sheet}
+        if peer_mismatch is not None and not peer_mismatch["converted"]:
+            merged.update({key: None for key in PRICE_BASED_MULTIPLES})
         record = {"ticker": ticker}
         # Sanitize once, here (86bbq04wm): the median loop reads from
         # peer_records, so this fixes both the medians and the per-peer
@@ -617,6 +710,8 @@ def compute_all(
     peer_data: list[tuple[str, NormalizedFinancials, NormalizedQuote]],
     analyst_estimates: NormalizedAnalystEstimates | None = None,
     earnings_surprises: list[dict] | None = None,
+    usd_cad: float | None = None,
+    industry: str | None = None,
 ) -> dict:
     """Public entry point. Order matters: growth before valuation (PEG
     needs eps_growth_yoy). analyst_estimates/earnings_surprises (86bbdu04a)
@@ -628,26 +723,29 @@ def compute_all(
     the quote currency agree, else {financials_currency, quote_currency}. The
     price-vs-statement multiples are still computed in that case but are
     FX-distorted — see the note below and ClickUp 86bbxucf0."""
-    # A Canadian-listed company that reports in USD (ATD.TO, NTR.TO, BN.TO,
-    # CSU.TO, ...) has USD statements but a CAD quote. Every price-vs-statement
-    # metric below (pe_ratio, pb_ratio, ps_ratio, ev_ebitda, peg_ratio, and the
-    # eps-path payout_ratio) is then off by the CAD/USD rate (~1.37). We still
-    # emit them for now — coverage first — and mark the mismatch so the payload
-    # builder / reliability scorer can flag or suppress the affected multiples.
-    # FX-aware reconciliation is ClickUp 86bbxucf0.
-    currency_mismatch = None
-    if fin.currency != price_info.get("currency"):
-        currency_mismatch = {
-            "financials_currency": fin.currency,
-            "quote_currency": price_info.get("currency"),
-        }
+    # A Canadian-listed company that reports in USD (ATD.TO, NTR.TO, BN.TO, CSU.TO, SHOP.TO ...) has USD statements
+    # but a CAD quote: every price-versus-statement multiple (pe_ratio, pb_ratio, ps_ratio, ev_ebitda, peg_ratio,
+    # and the eps-path payout_ratio) was off by the exchange rate (SHOP.TO showed P/E 144, true 103; BB-021).
+    # The statements are converted into the quote currency at the Bank of Canada rate before anything is computed,
+    # so one currency runs through the whole bundle (data/precompute/currency.py). Where no conversion is possible
+    # the multiples are dropped below instead of shown distorted.
+    fin, currency_mismatch = to_quote_currency(fin, price_info.get("currency"), usd_cad)
+    earnings_surprises = convert_earnings_surprises(earnings_surprises, currency_mismatch)
 
     growth = compute_growth_metrics(fin, earnings_surprises)
     profitability = compute_profitability_metrics(fin)
     balance_sheet = compute_balance_sheet_metrics(fin)
     valuation = compute_valuation_metrics(fin, price_info, growth, analyst_estimates)
     dividend = compute_dividend_info(fin, price_info, dividend_history)
-    peer = compute_peer_comparison(peer_data)
+    peer = compute_peer_comparison(peer_data, usd_cad)
+    if currency_mismatch is not None and not currency_mismatch["converted"]:
+        valuation.update({key: None for key in PRICE_BASED_MULTIPLES if key in valuation})
+        dividend["payout_ratio"] = None
+
+    not_applicable = _not_applicable(
+        industry, valuation=valuation, profitability=profitability, balance_sheet=balance_sheet, dividend=dividend
+    )
+    skip = set(not_applicable["fields"]) if not_applicable else set()
 
     missing_fields = [
         f"{bucket_name}.{key}"
@@ -658,7 +756,7 @@ def compute_all(
             ("balance_sheet_metrics", balance_sheet),
         )
         for key, value in bucket.items()
-        if value is None
+        if value is None and key not in skip
     ]
 
     return {
@@ -671,8 +769,14 @@ def compute_all(
         "quarters_available": len(fin.quarters),
         "missing_fields": missing_fields,
         "currency_mismatch": currency_mismatch,
+        "not_applicable": not_applicable,
         # 86bbummwp Tier 2 -- already fetched on every quarter (NormalizedFinancials'
         # own docstring), never forwarded past this function before now. Fundamental
         # Analyst's only real freshness signal for stale_data.
-        "latest_financials_period_end": fin.quarters[0]["period_end"] if fin.quarters else None,
+        # The newest period any statement covers: an annual report can be newer than the last 10-Q (MSFT).
+        "latest_financials_period_end": max(
+            [p for p in (fin.quarters[0]["period_end"] if fin.quarters else None,
+                         fin.annual[0]["period_end"] if fin.annual else None) if p],
+            default=None,
+        ),
     }
