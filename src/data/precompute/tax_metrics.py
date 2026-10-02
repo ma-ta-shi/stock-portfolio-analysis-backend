@@ -239,44 +239,6 @@ def resolve_withholding(
     return WHT_GRID.get((dividend_classification, account_type))
 
 
-def compute_effective_after_tax_yield(
-    yield_pct: float | None, wht_rate_pct: float | None
-) -> tuple[float | None, float | None]:
-    """(effective_after_tax_yield_pct, annual_tax_drag_pct) = (yield *
-    (1 - wht/100), yield * wht/100) - the mechanical definition confirmed
-    against the live prompt's own testing checklist ("drag_delta_pct ≈
-    -(yield × 0.15)" for a 15%-WHT US dividend in a TFSA). Returns
-    (None, None) when yield or wht_rate_pct is None - there is no honest
-    value to compute either when there's no dividend at all or when WHT
-    isn't modelled for this classification; DIVID's/WHT's own lines state
-    which reason applies, this function doesn't need to distinguish them."""
-    if yield_pct is None or wht_rate_pct is None:
-        return None, None
-    drag = yield_pct * wht_rate_pct / 100
-    return round(yield_pct - drag, 1), round(drag, 1)
-
-
-def build_alternatives_line(dividend_classification: str, yield_pct: float | None) -> str | None:
-    """The same holding's withholding drag in each account, straight from WHT_GRID
-    (yield x grid rate, the same measure as the `WHT: annual tax drag` line), so the
-    cross-account comparison the prompt's rules 4 and 6 ask for is arithmetic on
-    numbers the agent is given instead of a look-up it must do from prose. Each
-    account carries the grid's own note verbatim; no new tax logic (no dividend-tax-
-    credit or foreign-tax-credit maths). None when there is no dividend or fewer than
-    two accounts are modelled -- there is nothing to compare."""
-    if yield_pct is None:
-        return None
-    parts = []
-    for account in ("tfsa", "rrsp", "trading"):
-        entry = resolve_withholding(dividend_classification, account)
-        if entry is not None:
-            rate, note = entry
-            parts.append(f"{account} {yield_pct * rate / 100:.1f}% ({note})")
-    if len(parts) < 2:
-        return None
-    return "ALTERNATIVES (withholding drag on this dividend if held in): " + " | ".join(parts)
-
-
 # CGAIN_BY_ACCOUNT: quoted verbatim from the reference's own TFSA/RRSP/Taxable capital-gains
 # sections - account-keyed deliberately, not one shared line. An earlier draft (in the audit
 # rig this ported logic from) rendered one hardcoded taxable-account line for every account,
@@ -394,18 +356,247 @@ def compute_marginal_tax_rate(
     federal_rate = _marginal_rate(income_annual, FEDERAL_BRACKETS_2026)
     ontario_rate = _marginal_rate(income_annual, ONTARIO_BRACKETS_2026)
 
+    return round(federal_rate + ontario_rate * _ontario_surtax_multiplier(income_annual), 2)
+
+
+# ---------------------------------------------------------------------------------------------
+# Per-account dividend tax cost, the verdict derived from it, and the TAXCOST block lines
+# (Tax Strategist part 2). Before this the block's only quantitative measure was withholding
+# alone, which is wrong for a Trading account (the US withholding is recovered as a foreign tax
+# credit while the dividend itself is taxed as income) and shows a Canadian eligible dividend as
+# free of tax everywhere. The fit, efficiency and cross-account move are now computed here, so the
+# model explains a verdict instead of making one (it gave a different label for the same input in
+# 13 of 15 stock/account cells). The agent assesses fit for the account it is looking at; it does not
+# compare accounts or choose where money should go.
+# ---------------------------------------------------------------------------------------------
+
+# Eligible-dividend tax credit: gross-up and federal rate are the reference's own figures
+# ("Eligible Canadian dividends" in prompts/tax_strategist/canadian_tax_rules_reference.md); the
+# Ontario rate is 10.0% of the grossed-up amount for 2020-2026, from
+# https://www.ontario.ca/page/ontario-dividend-tax-credit (checked 2026-10-01).
+ELIGIBLE_DIVIDEND_GROSS_UP = 0.38
+FEDERAL_ELIGIBLE_DTC_PCT = 15.0198
+ONTARIO_ELIGIBLE_DTC_PCT = 10.0
+US_DIVIDEND_WITHHOLDING_PCT = 15.0  # WHT_GRID's ("us", "tfsa") rate; the floor of Trading's tax
+
+# Fit: how well this holding suits this account, from the annual tax on its dividend in this account
+# (percentage points of the holding). Capital gains are not scored: their treatment is a property of the
+# account (TFSA and RRSP shelter them, Trading taxes them at 50% inclusion), not of the ticker, and
+# scoring them needs an expected return we do not have; they are described on the CGAIN line. Efficiency
+# is the three-level summary of fit (it feeds the CIO, where `unfavorable` can lower the tier).
+FIT_EXCELLENT_MAX = 0.10
+FIT_GOOD_MAX = 0.50
+FIT_FAIR_MAX = 1.50
+
+def _ontario_surtax_multiplier(income_annual: float) -> float:
     ontario_tax_before_credit = _bracket_tax(income_annual, ONTARIO_BRACKETS_2026)
     bpa_credit = ONTARIO_BPA_2026 * ONTARIO_LOWEST_RATE_PCT / 100
     t4_approx = ontario_tax_before_credit - bpa_credit
-
     if t4_approx <= ONTARIO_SURTAX_THRESHOLD_1:
-        surtax_multiplier = 1.0
-    elif t4_approx <= ONTARIO_SURTAX_THRESHOLD_2:
-        surtax_multiplier = 1.0 + ONTARIO_SURTAX_RATE_1
-    else:
-        surtax_multiplier = 1.0 + ONTARIO_SURTAX_RATE_1 + ONTARIO_SURTAX_RATE_2
+        return 1.0
+    if t4_approx <= ONTARIO_SURTAX_THRESHOLD_2:
+        return 1.0 + ONTARIO_SURTAX_RATE_1
+    return 1.0 + ONTARIO_SURTAX_RATE_1 + ONTARIO_SURTAX_RATE_2
 
-    return round(federal_rate + ontario_rate * surtax_multiplier, 2)
+
+def compute_eligible_dividend_tax_rate(
+    province: str | None,
+    income_annual: float | None,
+    override_pct: float | None = None,
+) -> float | None:
+    """Tax on the next dollar of eligible Canadian dividend in a taxable account, as a percentage.
+
+    Per $1 of dividend the taxable amount is grossed up by 38%; federal tax is the bracket rate on
+    that amount less the 15.0198% credit, and Ontario tax is the bracket rate (times the same
+    surtax approximation MARG uses) less the 10% credit. At $85,000 this is about 6.4%, against
+    29.65% on ordinary income. Floored at zero: the credits are non-refundable.
+
+    None means not modelled: a marginal-rate override is in use (it carries no bracket, so no
+    eligible rate can be derived from it), the province is not Ontario, or income is unknown."""
+    if override_pct is not None or province != "ON" or income_annual is None:
+        return None
+    federal_rate = _marginal_rate(income_annual, FEDERAL_BRACKETS_2026)
+    ontario_rate = _marginal_rate(income_annual, ONTARIO_BRACKETS_2026)
+    gross = 1 + ELIGIBLE_DIVIDEND_GROSS_UP
+    federal = gross * (federal_rate - FEDERAL_ELIGIBLE_DTC_PCT)
+    # Ontario's surtax applies to the tax before the dividend credit, which is subtracted after it
+    # (checked against the published top-bracket rate on eligible dividends, 39.34%).
+    ontario = gross * (ontario_rate * _ontario_surtax_multiplier(income_annual) - ONTARIO_ELIGIBLE_DTC_PCT)
+    return round(max(federal + ontario, 0.0), 2)
+
+
+def dividend_tax_rate_pct(
+    classification: str,
+    account: Literal["tfsa", "rrsp", "trading"],
+    marginal_rate_pct: float | None,
+    eligible_rate_pct: float | None,
+) -> tuple[float, str] | None:
+    """Annual tax rate on a dividend held in `account`, and a one-line note. None = not modelled.
+
+    Registered accounts come straight from WHT_GRID (the only annual tax there is withholding; an
+    RRSP's tax on withdrawal is deferred and, at equal rates, equivalent to the TFSA's up-front
+    tax, so it is described, not scored). Trading: a US dividend is ordinary income and the 15%
+    withholding is credited against the Canadian tax on it (so the tax is the marginal rate, or
+    the 15% if the marginal rate is lower); a Canadian eligible dividend is taxed at the
+    eligible-dividend rate after the dividend tax credit. Everything else stays not modelled."""
+    if account != "trading":
+        grid = resolve_withholding(classification, account)
+        if grid is None:
+            return None
+        rate, _ = grid
+        if account == "tfsa":
+            note = "no tax" if rate == 0 else f"{rate:.0f}% withholding, non-recoverable"
+        else:
+            note = "no annual tax; later withdrawals taxed as ordinary income, not scored"
+        return rate, note
+    if classification == "us" and marginal_rate_pct is not None:
+        rate = max(marginal_rate_pct, US_DIVIDEND_WITHHOLDING_PCT)
+        return rate, (
+            f"ordinary income at {rate:.2f}%; the {US_DIVIDEND_WITHHOLDING_PCT:.0f}% withholding is "
+            f"credited against it"
+        )
+    if classification == "canadian_eligible" and eligible_rate_pct is not None:
+        return eligible_rate_pct, f"{eligible_rate_pct:.2f}% after the dividend tax credit"
+    return None
+
+
+def _fit_label(cost: float) -> str:
+    if cost <= FIT_EXCELLENT_MAX:
+        return "excellent"
+    if cost <= FIT_GOOD_MAX:
+        return "good"
+    if cost <= FIT_FAIR_MAX:
+        return "fair"
+    return "poor"
+
+
+_EFFICIENCY_BY_FIT = {"excellent": "favorable", "good": "favorable", "fair": "neutral", "poor": "unfavorable"}
+
+
+class AccountVerdict(TypedDict, total=False):
+    """What the code decides about this holding in this account. `mode` is computed | no_dividend |
+    not_computed; not_computed carries the fixed defaults (fit fair, efficiency neutral)."""
+
+    mode: str
+    reason: str | None
+    this_cost: float | None  # annual dividend tax in this account, points of the holding
+    after_tax_yield: float | None
+    note: str | None
+    fit: str
+    efficiency: str
+
+
+def compute_account_verdict(
+    account_type: Literal["tfsa", "rrsp", "trading"],
+    classification: str,
+    yield_pct: float | None,
+    marginal_rate_pct: float | None,
+    eligible_rate_pct: float | None,
+) -> AccountVerdict:
+    """Fit and efficiency of this holding in this account (no comparison with other accounts).
+
+    No dividend: no dividend tax, so the best fit the account allows. Not modelled (a class outside the
+    grid, or the rate this account needs is unknown): fixed defaults, never a judgement call. Otherwise
+    the fit comes from the annual tax on the dividend here. Trading is capped at `good`: it shelters
+    nothing, and its capital gains are always taxed (described, not scored)."""
+    if yield_pct is None:
+        fit = "good" if account_type == "trading" else "excellent"
+        return AccountVerdict(
+            mode="no_dividend", reason=None, this_cost=0.0, after_tax_yield=None, note=None,
+            fit=fit, efficiency=_EFFICIENCY_BY_FIT[fit],
+        )
+    entry = dividend_tax_rate_pct(classification, account_type, marginal_rate_pct, eligible_rate_pct)
+    if entry is None:
+        if classification not in ("us", "canadian_eligible", "trust_distribution"):
+            reason = f"dividend class {classification!r} is outside the modelled combinations"
+        elif account_type == "trading" and classification == "canadian_eligible":
+            reason = "the eligible-dividend rate needs the province and income on file (and no marginal-rate override)"
+        elif account_type == "trading" and classification == "us":
+            reason = "the marginal rate needs the province and income on file"
+        else:
+            reason = f"{classification} dividends in a {account_type} account are not modelled"
+        return AccountVerdict(
+            mode="not_computed", reason=reason, this_cost=None, after_tax_yield=None, note=None,
+            fit="fair", efficiency="neutral",
+        )
+    rate, note = entry
+    cost = round(yield_pct * rate / 100, 2)
+    fit = _fit_label(cost)
+    if account_type == "trading" and fit == "excellent":
+        fit = "good"
+    return AccountVerdict(
+        mode="computed", reason=None, this_cost=cost, after_tax_yield=round(yield_pct - cost, 2),
+        note=note, fit=fit, efficiency=_EFFICIENCY_BY_FIT[fit],
+    )
+
+
+def build_taxcost_lines(
+    account_type: Literal["tfsa", "rrsp", "trading"], yield_pct: float | None, verdict: AccountVerdict
+) -> list[str]:
+    """The TAXCOST block lines: this account's annual dividend tax and the verdict."""
+    mode = verdict["mode"]
+    if mode == "no_dividend":
+        return [
+            "TAXCOST: no dividend, so the annual dividend tax is 0.00% in this account; capital gains are "
+            "taxed differently by account (see CGAIN)",
+            f"TAXCOST verdict: fit={verdict['fit']}, efficiency={verdict['efficiency']}",
+        ]
+    if mode == "not_computed":
+        return [
+            f"TAXCOST verdict: not computed ({verdict['reason']}); use fit=fair, efficiency=neutral, "
+            f"and name the gap in caveats"
+        ]
+    return [
+        f"TAXCOST (this account, {account_type}): annual dividend tax {verdict['this_cost']:.2f}% of the "
+        f"holding ({verdict['note']}); yield after annual dividend tax {verdict['after_tax_yield']:.2f}% "
+        f"(a dividend tax credit exists only for eligible Canadian dividends in Trading)",
+        f"TAXCOST verdict: fit={verdict['fit']}, efficiency={verdict['efficiency']}",
+    ]
+
+
+class TaxExpectation(TypedDict):
+    """Everything the code decides for one holding in one account: the numbers the block shows
+    and the validator checks the model's output against (one source, so they cannot drift)."""
+
+    classification: str
+    structure: str
+    yield_pct: float | None
+    payment_count: int
+    withholding: tuple[float, str] | None
+    marginal_rate_pct: float | None
+    eligible_rate_pct: float | None
+    verdict: AccountVerdict | None  # None for an ETF (out of scope)
+
+
+def compute_tax_expectation(
+    ticker: str,
+    account_type: Literal["tfsa", "rrsp", "trading"],
+    bundle: DataBundle,
+    user_tax_profile: "UserTaxProfileInput | None" = None,
+) -> TaxExpectation:
+    classification, structure = classify_dividend(ticker, bundle.company_info)
+    if structure == "etf":
+        return TaxExpectation(
+            classification=classification, structure=structure, yield_pct=None, payment_count=0,
+            withholding=None, marginal_rate_pct=None, eligible_rate_pct=None, verdict=None,
+        )
+    yield_pct, payment_count = compute_trailing_dividend(
+        bundle.dividend_history, bundle.price_info.get("current_price")
+    )
+    marginal = None
+    eligible = None
+    if user_tax_profile is not None:
+        province = user_tax_profile.get("province")
+        income = user_tax_profile.get("income_annual")
+        override = user_tax_profile.get("marginal_tax_rate_override_pct")
+        marginal = compute_marginal_tax_rate(province, income, override)
+        eligible = compute_eligible_dividend_tax_rate(province, income, override)
+    return TaxExpectation(
+        classification=classification, structure=structure, yield_pct=yield_pct,
+        payment_count=payment_count, withholding=resolve_withholding(classification, account_type),
+        marginal_rate_pct=marginal, eligible_rate_pct=eligible,
+        verdict=compute_account_verdict(account_type, classification, yield_pct, marginal, eligible),
+    )
 
 
 def is_canadian_dual_listed(ticker: str) -> bool:
@@ -614,7 +805,8 @@ def build_precomputed_tax_metrics(
 
     is_ca = ticker.upper().endswith(_CA_MARKET_SUFFIXES)
     company_info = bundle.company_info
-    classification, structure = classify_dividend(ticker, company_info)
+    expectation = compute_tax_expectation(ticker, account_type, bundle, user_tax_profile)
+    classification, structure = expectation["classification"], expectation["structure"]
 
     lines: list[str] = []
 
@@ -628,9 +820,7 @@ def build_precomputed_tax_metrics(
             lines.append(build_tax_rule_snapshot(reference_last_verified))
         return "\n".join(lines)
 
-    yield_pct, payment_count = compute_trailing_dividend(
-        bundle.dividend_history, bundle.price_info.get("current_price")
-    )
+    yield_pct, payment_count = expectation["yield_pct"], expectation["payment_count"]
     if yield_pct is not None:
         lines.append(f"DIVID: {yield_pct:.1f}% yield, {payment_count} payments/yr")
     else:
@@ -647,7 +837,7 @@ def build_precomputed_tax_metrics(
     lines.append(f"LIST: {company_info.get('primary_exchange') or ''} ({country_label})")
     lines.append(f"DOM: {structure}")
 
-    wht = resolve_withholding(classification, account_type)
+    wht = expectation["withholding"]
     if wht is not None:
         rate, note = wht
         lines.append(
@@ -656,15 +846,8 @@ def build_precomputed_tax_metrics(
     else:
         lines.append(f"WHT (this account, {account_type}): NOT MODELLED per REF withholding grid")
 
-    effective_yield, drag = compute_effective_after_tax_yield(
-        yield_pct, wht[0] if wht is not None else None
-    )
-    if effective_yield is not None:
-        lines.append(f"WHT: effective after-tax yield {effective_yield:.1f}%")
-        lines.append(f"WHT: annual tax drag {drag:.1f}%")
-        alternatives = build_alternatives_line(classification, yield_pct)
-        if alternatives is not None:
-            lines.append(alternatives)
+    marg = expectation["marginal_rate_pct"]
+    lines.extend(build_taxcost_lines(account_type, yield_pct, expectation["verdict"]))
 
     cgain_line = f"CGAIN: {CGAIN_BY_ACCOUNT[account_type]}"
     if account_state is not None and account_type == "trading":
@@ -674,11 +857,6 @@ def build_precomputed_tax_metrics(
     lines.append(cgain_line)
 
     if user_tax_profile is not None:
-        marg = compute_marginal_tax_rate(
-            user_tax_profile.get("province"),
-            user_tax_profile.get("income_annual"),
-            user_tax_profile.get("marginal_tax_rate_override_pct"),
-        )
         if marg is not None:
             lines.append(
                 f"MARG: {marg:.2f}% combined federal+Ontario marginal rate on the "

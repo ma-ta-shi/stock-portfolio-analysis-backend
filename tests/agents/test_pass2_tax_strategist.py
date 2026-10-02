@@ -26,6 +26,8 @@ def _bundle(**overrides) -> SimpleNamespace:
         company_info={"name": "Royal Bank of Canada", "sector": "Financials"},
         context=SimpleNamespace(account_type="tfsa", timeline="medium_term"),
         data_vintage=datetime(2026, 9, 23, tzinfo=UTC),
+        dividend_history=[],
+        price_info={"current_price": 100.0},
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -438,3 +440,33 @@ def test_system_prompt_reliability_warnings_cover_only_the_agents_tax_receives()
     system_prompt, _, _ = _capture_run(_bundle(), "tfsa", "DIVID: 1.0%", compressed)
     assert "RSRCH: low" in system_prompt and "FUND: low" in system_prompt
     assert "TECH: low" not in system_prompt and "MACRO: low" not in system_prompt
+
+
+# ---------- the runner checks the output against the code's expectation ----------
+
+
+def test_validate_with_caveats_applies_the_expectation_when_given():
+    from data.precompute.tax_metrics import compute_account_verdict, resolve_withholding
+
+    expectation = {
+        "yield_pct": 1.8,
+        "withholding": resolve_withholding("us", "tfsa"),
+        "verdict": compute_account_verdict("tfsa", "us", 1.8, 29.65, 6.39),
+    }
+    ok = _valid_tax_output(tax_profile={
+        **_valid_tax_output()["tax_profile"], "annual_tax_drag_pct": 0.27, "effective_after_tax_yield_pct": 1.53,
+        "account_fit_score": "good", "tax_efficiency_for_account": "favorable",
+    })
+    assert _validate_with_caveats(ok, material_absent=[], account_type="tfsa", expectation=expectation)[0]
+    wrong = _valid_tax_output(tax_profile={**ok["tax_profile"], "account_fit_score": "excellent"})
+    passed, errors = _validate_with_caveats(wrong, material_absent=[], account_type="tfsa", expectation=expectation)
+    assert not passed and any("account_fit_score" in e for e in errors)
+    # without an expectation the old behaviour is unchanged
+    assert _validate_with_caveats(wrong, material_absent=[], account_type="tfsa")[0]
+
+
+def test_run_hands_the_code_expectation_to_the_validator():
+    bundle = _bundle(context=SimpleNamespace(account_type="trading", timeline="medium_term"))
+    validate_partial = _run_with_mocked_call(bundle, "trading", "DIVID: 3.0% yield, 4 payments/yr")
+    expectation = validate_partial.keywords["expectation"]
+    assert expectation["verdict"] is not None and expectation["classification"] == "canadian_eligible"

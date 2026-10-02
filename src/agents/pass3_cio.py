@@ -373,15 +373,6 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
         return "TAX STRATEGIST: NOT AVAILABLE"
 
     tp = tax_result.get("tax_profile") or {}
-    cross = tp.get("cross_account_recommendation")
-    if isinstance(cross, dict):
-        cross_text = (
-            f"For new capital, {cross.get('better_account', 'N/A')}: {cross.get('reasoning', '')} "
-            f"(drag_delta: {cross.get('drag_delta_pct', 'N/A')}%/yr)"
-        )
-    else:
-        cross_text = "current account is appropriate"
-
     key_risks = tp.get("key_tax_risks") or []
     risks_text = "; ".join(
         f"{kr.get('risk', '')} (severity={kr.get('severity', 'N/A')})"
@@ -425,7 +416,6 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
         f"annual_drag: {tp.get('annual_tax_drag_pct', 'N/A')}%/yr\n"
         f"wht_interpretation: {tp.get('wht_interpretation', '')}\n"
         f"capital_gains_treatment_summary: {tp.get('capital_gains_treatment_summary', 'N/A')}\n"
-        f"cross_account_recommendation: {cross_text}\n"
         f"key_tax_risks: {risks_text}\n"
         f"{detail_block}"
         f"tax_optimization_actions: {actions_text}"

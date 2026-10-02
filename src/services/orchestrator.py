@@ -68,14 +68,7 @@ from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile
 from data.degradation import DegradationCollector, reset_collector, set_collector
 from data.pipeline import DataPipeline
-from data.precompute.tax_metrics import (
-    AccountStateInput,
-    UserTaxProfileInput,
-    classify_dividend,
-    compute_effective_after_tax_yield,
-    compute_trailing_dividend,
-    resolve_withholding,
-)
+from data.precompute.tax_metrics import AccountStateInput, UserTaxProfileInput
 from data.providers.router import Router
 from data.schemas.context import AnalysisContext
 from data.schemas.data_bundle import DataBundle
@@ -314,58 +307,6 @@ def _add_agent_output_and_calls(
     db.add(agent_output)
     for call in llm_calls:
         db.add(call)
-
-
-def _validate_tax_passthroughs(
-    output: dict, bundle: DataBundle, account_type: str
-) -> tuple[bool, list[str]]:
-    """Production equivalent of agents/validators/pass2.py's
-    validate_tax_passthroughs(), which takes a fixture dict -- this computes
-    the same expected values directly from the real DataBundle instead
-    (classify_dividend/compute_trailing_dividend/resolve_withholding/
-    compute_effective_after_tax_yield, the exact same pure functions
-    pass2_tax_strategist.py's own tax_metrics block is built from -- see
-    that module's _tax_metrics_block(), 86bc8efvb), rather than re-parsing
-    them back out of the rendered tax_metrics string.
-
-    Confirms Tax Strategist's dividend_yield_pct/withholding_tax_rate_pct/
-    effective_after_tax_yield_pct are within tolerance of the orchestrator's
-    own computed values -- catches the LLM silently altering a passed-through
-    number, not just a malformed field.
-    """
-    errors: list[str] = []
-    tp = output.get("tax_profile", {})
-
-    classification, _ = classify_dividend(bundle.stock.ticker, bundle.company_info)
-    expected_yield, _ = compute_trailing_dividend(
-        bundle.dividend_history, bundle.price_info.get("current_price")
-    )
-    wht = resolve_withholding(classification, account_type)
-    expected_wht = wht[0] if wht is not None else None
-    expected_eff, _ = compute_effective_after_tax_yield(expected_yield, expected_wht)
-
-    actual_yield = tp.get("dividend_yield_pct")
-    if actual_yield is not None and expected_yield is not None:
-        if abs(actual_yield - expected_yield) > 0.15:
-            errors.append(
-                f"tax_profile.dividend_yield_pct: expected ~{expected_yield}%, got {actual_yield}% (tolerance ±0.1%)"
-            )
-
-    actual_wht = tp.get("withholding_tax_rate_pct")
-    if actual_wht is not None and expected_wht is not None:
-        if abs(actual_wht - expected_wht) > 0.15:
-            errors.append(
-                f"tax_profile.withholding_tax_rate_pct: expected ~{expected_wht}%, got {actual_wht}% (tolerance ±0.1%)"
-            )
-
-    actual_eff = tp.get("effective_after_tax_yield_pct")
-    if actual_eff is not None and expected_eff is not None:
-        if abs(actual_eff - expected_eff) > 0.2:
-            errors.append(
-                f"tax_profile.effective_after_tax_yield_pct: expected ~{expected_eff}%, got {actual_eff}% (tolerance ±0.1%)"
-            )
-
-    return len(errors) == 0, errors
 
 
 async def _close_runner(runner) -> None:
@@ -1128,6 +1069,11 @@ class AnalysisOrchestrator:
                 tax_summary = stage_b_result.get("tax_summary")
                 if isinstance(tax_summary, dict):
                     tax_summary["dividend_yield_pct"] = tax_profile.get("dividend_yield_pct")
+                    # The comparable cost of holding this stock in this account (annual dividend tax and the
+                    # yield after it, same basis in every account), so the Portfolio Optimizer reads one
+                    # finalized source when it compares the three accounts' results for a ticker.
+                    tax_summary["annual_tax_drag_pct"] = tax_profile.get("annual_tax_drag_pct")
+                    tax_summary["effective_after_tax_yield_pct"] = tax_profile.get("effective_after_tax_yield_pct")
 
             _add_agent_output_and_calls(db, run, "cio_stage_b", "synthesis", stage_b_result, stage_b_errors, cio_runner)
             await db.commit()
@@ -1424,33 +1370,7 @@ class AnalysisOrchestrator:
                 )
             else:
                 coro = runner.run(bundle, compressed, run.account_type)
-            agent_id, result, errors, exc = await _run_contained("pass2", agent_id, coro)
-            if agent_id == "tax" and exc is None and agent_completed(result):
-                # Isolated from _run_contained's own try/except on purpose:
-                # a bug in this SECONDARY check must not destroy a real,
-                # already-successful Tax Strategist result by masquerading
-                # as an agent failure -- it can only ever ADD errors to a
-                # real result, never erase one.
-                try:
-                    passthrough_ok, passthrough_errors = _validate_tax_passthroughs(
-                        result, bundle, run.account_type
-                    )
-                    if not passthrough_ok:
-                        errors = [*errors, *passthrough_errors]
-                except Exception as passthrough_exc:
-                    logger.error(
-                        "tax_passthrough_check_crashed", error=safe_text(passthrough_exc, 4000)
-                    )
-                    self._note_error(
-                        "agent",
-                        "agent_exception",
-                        "low",
-                        f"tax passthrough check crashed: {describe_exception(passthrough_exc)}",
-                        agent_name="tax",
-                        exc=passthrough_exc,
-                        context={"stage": "tax_passthrough"},
-                    )
-            return agent_id, result, errors, exc
+            return await _run_contained("pass2", agent_id, coro)
 
         results = await asyncio.gather(
             _run_bull_bear_tax("bull", runners["bull"]),
