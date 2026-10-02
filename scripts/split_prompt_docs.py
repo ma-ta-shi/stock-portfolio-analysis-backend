@@ -126,7 +126,8 @@ def split_multi_stage(doc_stem: str, slug: str, source_dir: Path, dry_run: bool)
     original = path.read_text(encoding="utf-8")
 
     replacements: dict[str, str] = {}
-    for stage in ("A", "B"):
+    # A stage whose heading is gone (Risk Advisor's Stage B, removed 2026-10-01) is skipped.
+    for stage in [x for x in ("A", "B") if re.search(rf"^# System Prompt — Stage {x}", original, re.M)]:
         system = extract_block(original, f"System Prompt — Stage {stage}")
         schema = extract_stage_schema(original, "Output Schema", f"Stage {stage}")
         # CIO/Risk Advisor use a stage-qualified placeholder name

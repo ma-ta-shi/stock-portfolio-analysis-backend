@@ -5,7 +5,6 @@ from agents.validators.pass2 import (
     validate_bear_advocate,
     validate_tax_strategist,
     validate_risk_advisor_stage_a,
-    validate_risk_advisor_stage_b,
     validate_tax_passthroughs,
     _evidence_carries_value,
 )
@@ -681,11 +680,7 @@ class TestTaxStrategist:
         assert any("dividend_yield_pct" in e for e in errors)
 
 
-# ─── Risk Advisor Tests (Stage A / Stage B, ClickUp 86bbuhk82) ───────────────
-# Split from one `_valid_risk_output()` fixture that nested Stage-B-only fields
-# (concentration_risk, liquidity_risk, correlation_to_existing_portfolio,
-# position_size_recommendation, stop_loss_suggestion) under Stage A's `risk_profile` --
-# confirmed via the real schemas that none of those belong there; Stage A's own
+# ─── Risk Advisor Tests (ClickUp 86bbuhk82; stage B removed 2026-10-01) ───────────────
 # `risk_profile` holds volatility_assessment/beta_interpretation/
 # max_drawdown_interpretation/downside_scenarios/risk_reward_ratio/data_sanity_flags.
 
@@ -711,18 +706,6 @@ def _valid_risk_stage_a_output() -> dict:
             "risk_reward_ratio": "neutral",
             "data_sanity_flags": [],
         },
-    }
-
-
-def _valid_risk_stage_b_output() -> dict:
-    return {
-        "correlation_to_existing_portfolio": "unknown",
-        "concentration_risk": "low",
-        "liquidity_risk": "low",
-        "position_size_recommendation": "3-5%",
-        "stop_loss_suggestion": None,
-        "sizing_rationale": "3-5% reflects the moderate volatility and the two identified downside scenarios; no stop-loss for a TFSA medium-term hold per Rule 3.",
-        "caveats": [],
     }
 
 
@@ -790,59 +773,6 @@ class TestRiskAdvisorStageA:
         passed, errors = validate_risk_advisor_stage_a(out)
         assert not passed
         assert any("timeline" in e for e in errors)
-
-
-class TestRiskAdvisorStageB:
-    def test_valid_output_passes(self):
-        out = _valid_risk_stage_b_output()
-        passed, errors = validate_risk_advisor_stage_b(out)
-        assert passed, f"Valid risk Stage B output should pass: {errors}"
-
-    def test_invalid_position_size_format_fails(self):
-        """The old validator's equivalent check was mis-nested under Stage A's
-        `risk_profile` and only fired when the (never-present) field was truthy --
-        silently never triggering against real Stage A output. Now required and
-        checked in the stage that actually produces it."""
-        out = _valid_risk_stage_b_output()
-        out["position_size_recommendation"] = "5%"  # must be "X-Y%"
-        passed, errors = validate_risk_advisor_stage_b(out)
-        assert not passed
-
-    def test_malformed_position_size_with_dash_and_percent_fails(self):
-        """A bare `"%" in psr and "-" in psr` check (the pre-86bbuhk82-review version of this
-        function) would wrongly accept this -- a single negative number, not a range. Tightened
-        to the same regex CIO Stage B uses for the identical "X-Y%" contract it consumes this
-        value under (as position_sizing_recommendation)."""
-        out = _valid_risk_stage_b_output()
-        out["position_size_recommendation"] = "-5%"
-        passed, errors = validate_risk_advisor_stage_b(out)
-        assert not passed
-        assert any("position_size_recommendation" in e for e in errors)
-        assert any("position_size_recommendation" in e for e in errors)
-
-    def test_missing_position_size_fails(self):
-        out = _valid_risk_stage_b_output()
-        del out["position_size_recommendation"]
-        passed, errors = validate_risk_advisor_stage_b(out)
-        assert not passed
-
-    def test_invalid_correlation_fails(self):
-        out = _valid_risk_stage_b_output()
-        out["correlation_to_existing_portfolio"] = "extremely_high"
-        passed, errors = validate_risk_advisor_stage_b(out)
-        assert not passed
-
-    def test_invalid_concentration_fails(self):
-        out = _valid_risk_stage_b_output()
-        out["concentration_risk"] = "extreme"
-        passed, errors = validate_risk_advisor_stage_b(out)
-        assert not passed
-
-    def test_missing_sizing_rationale_fails(self):
-        out = _valid_risk_stage_b_output()
-        out["sizing_rationale"] = ""
-        passed, errors = validate_risk_advisor_stage_b(out)
-        assert not passed
 
 
 # ─── Compression / Reliability Warning Tests ──────────────────────────────────

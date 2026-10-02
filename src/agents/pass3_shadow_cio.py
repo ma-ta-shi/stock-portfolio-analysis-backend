@@ -14,7 +14,7 @@ inputs, not a new sequential stage.
 
 No Stage B / account-specific counterpart at all (docs/agents/shadow_cio.md
 Design Decision 2, v2 2026-09-15): the shadow never receives Tax Strategist
-or Risk Advisor Stage B, and produces no tax/sizing/stop-loss content.
+or Risk Advisor Stage B, and produces no tax/sizing content.
 
 Two things this runner deliberately does NOT do, decided from real live
 data during 86bbt1kct planning, not from the ticket's original (partially

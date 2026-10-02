@@ -65,7 +65,11 @@ def _daily_returns(close: pd.Series) -> pd.Series:
     return close.pct_change().dropna()
 
 
-def _beta(stock_close: pd.Series, benchmark_close: pd.Series) -> float | None:
+def _beta_and_r2(stock_close: pd.Series, benchmark_close: pd.Series) -> tuple[float | None, float | None]:
+    """(beta, R-squared) of the stock's daily returns on the benchmark's, over the same aligned
+    1-year window. R-squared (the squared correlation) says how much of the stock's movement the
+    benchmark explains: a beta with an R-squared near zero (KO -0.23 at 0.02, ENB.TO 0.10 at 0.01
+    on 2026-10-01) says almost nothing about the stock, yet used to be shown as a bare number."""
     stock_returns = _daily_returns(stock_close.tail(_ONE_YEAR_BARS + 1))
     benchmark_returns = _daily_returns(benchmark_close.tail(_ONE_YEAR_BARS + 1))
     # Date-keyed alignment, not positional — same class of bug already
@@ -74,12 +78,18 @@ def _beta(stock_close: pd.Series, benchmark_close: pd.Series) -> float | None:
     # guaranteed (data gaps, halt days, differently-fetched date ranges).
     aligned = pd.concat({"stock": stock_returns, "benchmark": benchmark_returns}, axis=1, join="inner")
     if len(aligned) < _MIN_RETURN_BARS:
-        return None
+        return None, None
     benchmark_variance = aligned["benchmark"].var()
     if not benchmark_variance:
-        return None
+        return None, None
     covariance = aligned["stock"].cov(aligned["benchmark"])
-    return round(float(covariance / benchmark_variance), 2)
+    correlation = aligned["stock"].corr(aligned["benchmark"])
+    r2 = round(float(correlation) ** 2, 2) if pd.notna(correlation) else None
+    return round(float(covariance / benchmark_variance), 2), r2
+
+
+def _beta(stock_close: pd.Series, benchmark_close: pd.Series) -> float | None:
+    return _beta_and_r2(stock_close, benchmark_close)[0]
 
 
 def _annualized_vol_pct(stock_close: pd.Series) -> float | None:
@@ -167,12 +177,14 @@ def compute_all(
     benchmark_close = benchmark_df["close"] if "close" in benchmark_df.columns else pd.Series(dtype=float)
     volume = df["volume"] if "volume" in df.columns else pd.Series(dtype=float)
 
+    beta, beta_r2 = _beta_and_r2(close, benchmark_close)
     dd_1yr, recovery_1yr = _max_drawdown(close, _ONE_YEAR_BARS)
     dd_3yr, recovery_3yr = _max_drawdown(close, _THREE_YEAR_BARS)
 
     return {
         "benchmark": benchmark_ticker,
-        "beta": _beta(close, benchmark_close),
+        "beta": beta,
+        "beta_r2": beta_r2,
         "annualized_vol_pct": _annualized_vol_pct(close),
         "max_drawdown_1yr_pct": dd_1yr,
         "recovery_1yr_days": recovery_1yr,

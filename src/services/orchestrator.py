@@ -373,9 +373,8 @@ async def _close_runner(runner) -> None:
     session it lazily creates on first call (BaseRunner._get_session()) --
     nothing here ever injects one. Only `async with runner:` closes it
     (BaseRunner.__aexit__), which this orchestrator never uses (runners are
-    plain local variables whose `last_timing`/`last_stage_a_context` are
-    still needed after the call completes, for _agent_output_row and Stage
-    B). Confirmed live (86bbuhjup smoke test): omitting this produces a real
+    plain local variables whose `last_timing` is still needed after the
+    call completes, for _agent_output_row). Confirmed live (86bbuhjup smoke test): omitting this produces a real
     "Unclosed client session" warning per agent, not just a theoretical
     leak -- 11 leaked sessions per full pipeline run.
     """
@@ -1105,7 +1104,7 @@ class AnalysisOrchestrator:
 
             try:
                 stage_b_result, stage_b_errors = await cio_runner.run_stage_b(
-                    bundle, stage_a_result, pass2_outputs.get("tax"), None, run.account_type
+                    bundle, stage_a_result, pass2_outputs.get("tax"), run.account_type
                 )
             except OllamaUnavailable as exc:
                 self._note_ollama_unavailable("cio_stage_b", exc)
@@ -1115,21 +1114,16 @@ class AnalysisOrchestrator:
                 raise
 
             # Orchestrator-side forwarding (docs/agents/cio.md's
-            # merge_output_cio_stage_b): stop_loss_suggestion and
-            # tax_summary.dividend_yield_pct are facts Risk/Tax already
-            # computed, not LLM judgments -- inject them directly rather
-            # than trust the LLM to transcribe them back out of its own
-            # prompt correctly. Confirmed live (AAPL run, 2026-09-23):
-            # neither field appeared anywhere in a real CIO Stage B output;
-            # the LLM only paraphrased the stop-loss level in prose, never
-            # as a queryable value a caller could check against Risk's own
-            # number. Only overwrites/adds these two keys -- everything
-            # else in stage_b_result is still the LLM's own, unmodified
-            # output.
+            # merge_output_cio_stage_b): tax_summary.dividend_yield_pct is a
+            # fact Tax already computed, not an LLM judgment -- inject it
+            # directly rather than trust the LLM to transcribe it back out of
+            # its own prompt correctly. Confirmed live (AAPL run, 2026-09-23):
+            # it never appeared in a real CIO Stage B output. Only
+            # overwrites/adds this one key -- everything else in
+            # stage_b_result is still the LLM's own, unmodified output.
+            # (The Risk Advisor's stop-loss used to be forwarded here too; it
+            # was removed from the pipeline on 2026-10-01: nothing read it.)
             if isinstance(stage_b_result, dict):
-                risk_stage_b = (pass2_outputs.get("risk") or {}).get("stage_b") or {}
-                stage_b_result["stop_loss_suggestion"] = risk_stage_b.get("stop_loss_suggestion")
-
                 tax_profile = (pass2_outputs.get("tax") or {}).get("tax_profile") or {}
                 tax_summary = stage_b_result.get("tax_summary")
                 if isinstance(tax_summary, dict):
@@ -1458,65 +1452,13 @@ class AnalysisOrchestrator:
                     )
             return agent_id, result, errors, exc
 
-        async def _run_risk(runner):
-            agent_id, result, errors, exc = await _run_contained(
-                "pass2", "risk", runner.run(bundle, compressed, run.account_type)
-            )
-            # Stage B is an account-specific overlay on Stage A's own
-            # output -- only attempted when Stage A produced a real,
-            # success-only continuation context (runner.last_stage_a_context
-            # is None on total exhaustion, per BaseRunner._retry_loop's own
-            # docstring: never a failed attempt's own context).
-            if exc is None and runner.last_stage_a_context is not None:
-                try:
-                    stage_b_result, stage_b_errors = await runner.run_stage_b(
-                        bundle, runner.last_stage_a_context, run.account_type
-                    )
-                    if result:
-                        result["stage_b"] = stage_b_result
-                    errors = [*errors, *stage_b_errors]
-                except OllamaUnavailable as stage_b_exc:
-                    # Environment-level failure -- same treatment as every
-                    # other OllamaUnavailable in this file (collected here,
-                    # propagated by _run_pass2's own caller after every
-                    # agent has been written and closed). Stage A's own
-                    # real result is discarded on this path too: if Ollama
-                    # is down, the whole run is about to abort regardless,
-                    # so there is no partial Risk result a failed run could
-                    # still use.
-                    logger.error("pass2_agent_ollama_unavailable", agent_id="risk")
-                    return "risk", None, [str(stage_b_exc)], stage_b_exc
-                except Exception as stage_b_exc:
-                    # Isolated from Stage A's own result on purpose --
-                    # found during the same 2026-09-23 review that caught
-                    # tax's passthrough check needing the same treatment: a
-                    # bug or failure in Stage B must not destroy a real,
-                    # already-successful Stage A result by masquerading as
-                    # a total agent failure. Only records the error and
-                    # leaves result["stage_b"] absent; never erases result
-                    # itself the way the pre-fix single try/except did.
-                    logger.error(
-                        "pass2_agent_failed", agent_id="risk", error=safe_text(stage_b_exc, 4000)
-                    )
-                    # Runs inside asyncio.gather: _note_error only appends to a
-                    # list, never touches the session, so it is safe here.
-                    self._note_error(
-                        "agent",
-                        "agent_exception",
-                        "medium",
-                        describe_exception(stage_b_exc),
-                        agent_name="risk",
-                        exc=stage_b_exc,
-                        context={"stage": "risk_stage_b"},
-                    )
-                    errors = [*errors, safe_text(stage_b_exc, 4000)]
-            return "risk", result, errors, exc
-
         results = await asyncio.gather(
             _run_bull_bear_tax("bull", runners["bull"]),
             _run_bull_bear_tax("bear", runners["bear"]),
             _run_bull_bear_tax("tax", runners["tax"]),
-            _run_risk(runners["risk"]),
+            # Account-neutral, a single call (the account-specific stage B was removed 2026-10-01):
+            # feeds the CIO's stage A and the Shadow CIO only.
+            _run_contained("pass2", "risk", runners["risk"].run(bundle, compressed)),
         )
 
         outputs: dict[str, dict | None] = {}
@@ -1684,7 +1626,6 @@ class AnalysisOrchestrator:
                 "action": action,
                 "rationale": stage_b_result.get("synthesis_narrative", ""),
             },
-            position_size_suggestion=stage_b_result.get("position_sizing_recommendation"),
             key_drivers=stage_a_result.get("key_decision_factors") or [],
             key_risks=[],
             synthesis_narrative=stage_b_result.get("synthesis_narrative", ""),

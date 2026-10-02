@@ -71,17 +71,12 @@ _STAGE_B_NARRATIVE = (
 
 def _valid_stage_b_output() -> dict:
     return {
-        "position_sizing_recommendation": "3-5%",
         "expected_return_tier": "outperform",  # unchanged from Stage A's tier -- allowed
         "synthesis_narrative": _STAGE_B_NARRATIVE,
         "tax_summary": {
             "tax_efficiency_consumed_as": "favorable",
             "tax_impact_on_recommendation": "neutral",
             "cross_account_note": "No cross-account move indicated.",
-        },
-        "risk_profile_summary": {
-            "position_size_source": "risk_advisor_adopted",
-            "sizing_justification": "Adopted the Risk Advisor's 3-5% band unchanged.",
         },
     }
 
@@ -221,20 +216,19 @@ class TestCIOStageB:
         passed, errors = validate_cio_stage_b(out)
         assert passed, f"Valid CIO Stage B output should pass: {errors}"
 
-    def test_position_sizing_accepts_a_percentage_band(self):
-        """Verified at BOTH ends: Risk emits '3-5%' live, its prompt mandates "X-Y%",
-        the CIO prompt says "X-Y%", and the DB column is String(50)."""
+    def test_no_position_sizing_or_risk_profile_summary_is_required(self):
+        """Position sizing and risk_profile_summary were removed from this stage 2026-10-01 (Risk has
+        no loss budget or portfolio to size against; the Portfolio Optimizer owns sizing)."""
         out = _valid_stage_b_output()
-        for good in ("3-5%", "1-2%", "5-8%", "0.5-1.5%"):
-            out["position_sizing_recommendation"] = good
-            passed, errors = validate_cio_stage_b(out)
-            assert passed, f"{good!r} should be valid: {errors}"
-
-    def test_position_sizing_rejects_the_old_enum(self):
-        out = _valid_stage_b_output()
-        out["position_sizing_recommendation"] = "marketweight"
+        assert "position_sizing_recommendation" not in out and "risk_profile_summary" not in out
         passed, errors = validate_cio_stage_b(out)
-        assert not passed and any("percentage band" in e for e in errors)
+        assert passed, errors
+
+    def test_a_stray_sizing_field_is_ignored_not_rejected(self):
+        out = _valid_stage_b_output()
+        out["position_sizing_recommendation"] = "3-5%"
+        passed, errors = validate_cio_stage_b(out)
+        assert passed, errors
 
     def test_narrative_too_short_fails(self):
         out = _valid_stage_b_output()
@@ -277,12 +271,6 @@ class TestCIOStageB:
         assert passed, errors
 
     def test_previously_unchecked_enums_are_now_validated(self):
-        out = _valid_stage_b_output()
-        out["risk_profile_summary"]["position_size_source"] = "made_it_up"
-        passed, errors = validate_cio_stage_b(out)
-        assert not passed
-        assert any("position_size_source" in e for e in errors)
-
         out2 = _valid_stage_b_output()
         out2["tax_summary"]["tax_impact_on_recommendation"] = "helps_a_lot"
         passed, errors = validate_cio_stage_b(out2)

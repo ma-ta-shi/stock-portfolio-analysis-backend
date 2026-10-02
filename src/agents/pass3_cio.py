@@ -10,8 +10,7 @@ directly, so there's no per-field DataBundle-translation risk here. Only
 `fixture["context"]` accesses became `bundle.stock`/`bundle.company_info`/
 `bundle.context` reads -- every summary-building function below
 (`build_pass1_summaries`, `build_advocate_summary`,
-`build_risk_advisor_stage_a_summary`, `_build_general_outlook_summary`,
-`_build_risk_advisor_stage_b_summary`) is a byte-for-byte port, since none of
+`build_risk_advisor_stage_a_summary`, `_build_general_outlook_summary`) is a byte-for-byte port, since none of
 them ever touched `fixture` at all. `_build_tax_strategist_summary` was too,
 originally -- no longer accurate as of 86bc8eg3j, which added
 `capital_gains_treatment_summary`/`tax_optimization_actions` to it (Stage B
@@ -41,8 +40,8 @@ from data.schemas.data_bundle import DataBundle
 # missing-primitive gap the way it is for Risk Advisor: per
 # docs/technical/two-turn-execution-mechanism.md's "Why CIO doesn't use this
 # mechanism", the CIO's Stage A->B was deliberately designed to NOT use
-# context-array continuation at all -- Stage B needs fresh Tax Strategist +
-# Risk Advisor Stage B input regardless of mechanism, and otherwise only
+# context-array continuation at all -- Stage B needs fresh Tax Strategist
+# input regardless of mechanism, and otherwise only
 # needs Stage A's own compact JSON output pasted as text, which an ordinary
 # second call already provides. What's actually missing here is the Stage B
 # *invocation itself* (deciding what to paste, building the second call) --
@@ -52,8 +51,7 @@ from data.schemas.data_bundle import DataBundle
 #
 # Stage B (86bbt1k1p Item C): run_stage_b() below builds that ordinary
 # second call -- system_prompt filled from v1_stage_b.txt's named
-# placeholders (general_outlook_summary/risk_advisor_stage_b_summary/
-# tax_strategist_summary), via the EXISTING, unmodified call_with_validation
+# placeholders (general_outlook_summary/tax_strategist_summary), via the EXISTING, unmodified call_with_validation
 # (no continuation context involved, per the reasoning above).
 #
 # The real Stage A prompt embeds its own placeholders directly (unlike the
@@ -214,19 +212,30 @@ def build_risk_advisor_stage_a_summary(risk_output: dict | None) -> str:
         "\nRISK ADVISOR:",
         f"  groundedness_score: {risk_output.get('groundedness_score', 0)}/100 (data quality, NOT directional)",
         f"  risk_reward_ratio: {rp.get('risk_reward_ratio', 'N/A')} (use as directional proxy)",
+        f"  volatility_assessment: {rp.get('volatility_assessment', 'N/A')}",
         f"  beta: {rp.get('beta', 'N/A')} | max_drawdown_1yr: {rp.get('max_drawdown_1yr', 'N/A')}%",
-        f"  position_size_recommendation: {rp.get('position_size_recommendation', 'N/A')}",
-        f"  concentration_risk: {rp.get('concentration_risk', 'N/A')} | liquidity_risk: {rp.get('liquidity_risk', 'N/A')}",
         f"  thesis_summary: {risk_output.get('thesis_summary', '')}",
         # 86bbt1k1p: real, validator-enforced, cited signal from Risk's existing Stage A
         # call -- previously dropped entirely.
         f"  strongest_signal: {risk_output.get('strongest_signal', '')}",
     ]
     if rp.get("downside_scenarios"):
+        # The CIO's stage A prompt treats these "as a probability-weighted distribution", so each
+        # scenario carries its probability and timeline (they used to be dropped).
         scenarios_summary = "; ".join(
-            f"{s['scenario']} ({s['estimated_impact_pct']}%)" for s in rp["downside_scenarios"]
+            f"{s.get('scenario', '')} ({s.get('estimated_impact_pct', 'N/A')}%, "
+            f"{s.get('probability', 'N/A')} probability, {s.get('timeline', 'N/A')})"
+            for s in rp["downside_scenarios"]
+            if isinstance(s, dict)
         )
         lines.append(f"  downside_scenarios: {scenarios_summary}")
+    # Only when there is something to say (a clean run carries neither).
+    flags = [str(f) for f in (rp.get("data_sanity_flags") or []) if str(f).strip()]
+    if flags:
+        lines.append(f"  data_sanity_flags: {'; '.join(flags)}")
+    caveats = [str(c) for c in (risk_output.get("caveats") or []) if str(c).strip()]
+    if caveats:
+        lines.append(f"  caveats: {'; '.join(caveats)}")
     return "\n".join(lines)
 
 
@@ -311,24 +320,6 @@ def _build_general_outlook_summary(stage_a_result: dict | None) -> str:
         f"key_decision_factors:\n{kdf_lines}\n"
         f"disagreement_score: {r.get('disagreement_score', 'N/A')} | "
         f"category: {r.get('disagreement_category', 'N/A')}"
-    )
-
-
-def _build_risk_advisor_stage_b_summary(risk_stage_b_result: dict | None) -> str:
-    """Risk Advisor's account-specific overlay, for the CIO's own Stage B
-    call. Field list from the reference pseudocode
-    (format_risk_advisor_stage_b_for_cio)."""
-    if not risk_stage_b_result:
-        return "RISK ADVISOR (account-specific overlay): NOT AVAILABLE"
-
-    r = risk_stage_b_result
-    return (
-        f"position_size_recommendation: {r.get('position_size_recommendation', 'N/A')}\n"
-        f"stop_loss_suggestion: {r.get('stop_loss_suggestion')}\n"
-        f"correlation_to_existing_portfolio: {r.get('correlation_to_existing_portfolio', 'N/A')} | "
-        f"concentration_risk: {r.get('concentration_risk', 'N/A')} | "
-        f"liquidity_risk: {r.get('liquidity_risk', 'N/A')}\n"
-        f"sizing_rationale: {r.get('sizing_rationale', '')}"
     )
 
 
@@ -524,10 +515,9 @@ class CIORunner(BaseRunner):
         bundle: DataBundle,
         stage_a_result: dict,
         tax_result: dict | None,
-        risk_stage_b_result: dict | None,
         account_type: str | None = None,
     ) -> tuple[dict, list[str]]:
-        """Account-specific overlay + the synthesis_narrative the user
+        """Account-specific tax read + the synthesis_narrative the user
         actually reads. An ordinary second call (call_with_validation,
         unmodified) -- no continuation context, per the module-level
         comment on why the CIO's own Stage A->B doesn't use that
@@ -548,7 +538,6 @@ class CIORunner(BaseRunner):
                 "timeline": ctx.timeline,
                 "account_instruction": f"Account: {acct.upper()}.",
                 "general_outlook_summary": _build_general_outlook_summary(stage_a_result),
-                "risk_advisor_stage_b_summary": _build_risk_advisor_stage_b_summary(risk_stage_b_result),
                 "tax_strategist_summary": _build_tax_strategist_summary(tax_result),
             },
         )

@@ -269,3 +269,74 @@ def test_tax_strategist_summary_keeps_the_structured_fields_before_the_narrative
     summary = _build_tax_strategist_summary(_tax_result_with_detail())
     assert summary.index("account_fit_score: fair") < summary.index("tax_optimization_actions:")
     assert summary.index("tax_optimization_actions:") < summary.index("tax_narrative")
+
+# ---------- Risk Advisor stage A summary: what the CIO now receives (Risk Advisor Wave 2) ----------
+
+
+def _risk_output() -> dict:
+    return {
+        "groundedness_score": 92,
+        "thesis_summary": "Moderate risk.",
+        "strongest_signal": "FUND: payout ratio 126%",
+        "caveats": ["FUND data is stale."],
+        "risk_profile": {
+            "risk_reward_ratio": "unfavorable",
+            "volatility_assessment": "low",
+            "beta": 0.1,
+            "max_drawdown_1yr": 17.9,
+            "data_sanity_flags": ["BETA 0.1 with VOL 17% is a weak benchmark link"],
+            "downside_scenarios": [
+                {"scenario": "Dividend cut", "estimated_impact_pct": -25, "probability": "medium",
+                 "timeline": "3_to_12_months", "trigger": "FUND payout ratio"},
+                {"scenario": "Margin squeeze", "estimated_impact_pct": -10, "probability": "low",
+                 "timeline": "1_to_3_years", "trigger": "MACRO rates"},
+            ],
+        },
+    }
+
+
+def test_risk_advisor_summary_carries_each_scenarios_probability_and_timeline():
+    summary = build_risk_advisor_stage_a_summary(_risk_output())
+    assert "Dividend cut (-25%, medium probability, 3_to_12_months)" in summary
+    assert "Margin squeeze (-10%, low probability, 1_to_3_years)" in summary
+
+
+def test_risk_advisor_summary_passes_the_volatility_assessment_flags_and_caveats():
+    summary = build_risk_advisor_stage_a_summary(_risk_output())
+    assert "volatility_assessment: low" in summary
+    assert "data_sanity_flags: BETA 0.1 with VOL 17% is a weak benchmark link" in summary
+    assert "caveats: FUND data is stale." in summary
+
+
+def test_risk_advisor_summary_omits_flags_and_caveats_on_a_clean_run():
+    out = _risk_output()
+    out["caveats"] = []
+    out["risk_profile"]["data_sanity_flags"] = []
+    summary = build_risk_advisor_stage_a_summary(out)
+    assert "data_sanity_flags" not in summary and "caveats" not in summary
+
+
+# ---------- CIO stage B: no Risk Advisor input, no sizing (removed 2026-10-01) ----------
+
+
+async def test_stage_b_prompt_is_filled_without_a_risk_advisor_input_or_sizing():
+    import re
+
+    from agents.pass3_cio import CIORunner
+
+    sent = {}
+
+    async def fake_call(self, system_prompt, user_msg, validator, **kw):
+        sent["system"] = system_prompt
+        return {"expected_return_tier": "market_perform"}, []
+
+    runner = CIORunner()
+    runner.call_with_validation = fake_call.__get__(runner)
+    stage_a = {"stock_outlook": "neutral", "confidence": 60, "expected_return_tier": "market_perform"}
+    await runner.run_stage_b(_bundle(), stage_a, {"tax_profile": {"tax_efficiency_for_account": "neutral"}}, "tfsa")
+
+    system = sent["system"]
+    assert not re.findall(r"\{[a-z_]+\}", system), "unfilled template placeholder"
+    assert "RISK ADVISOR" not in system
+    assert "position_sizing_recommendation" not in system.split("Produce valid JSON")[1]
+    assert "risk_profile_summary" not in system

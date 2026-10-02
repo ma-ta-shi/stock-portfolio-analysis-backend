@@ -602,14 +602,14 @@ class TestCallGenerate:
         runner = BaseRunner()
         runner.ticker = "SHOP.TO"
         runner.run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
-        runner.current_agent = "risk_stage_b"
+        runner.current_agent = "risk_stage_a"
         runner.session = FakeSession(
             FakeResponse(200, _ollama_generate_response({"b": 2}, context=[9, 9, 9]))
         )
         await runner._call_generate("continuation increment", context=[1, 2, 3])
 
         entry = runner.call_log[0]
-        assert entry["call_site"] == "agent:risk_stage_b"
+        assert entry["call_site"] == "agent:risk_stage_a"
         assert entry["parsed_ok"] is True
         assert ":" not in entry["prompt_path"]  # see the sibling test's own comment on why
         prompt_path = tmp_path / entry["prompt_path"]

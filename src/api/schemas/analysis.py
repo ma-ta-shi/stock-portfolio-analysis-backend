@@ -69,7 +69,6 @@ class AnalysisResultResponse(BaseModel):
     stock_outlook_direction: str | None = None
     overall_confidence: int | None = None
     account_recommendation: dict | None = None
-    position_size_suggestion: str | None = None
     expected_return_tier: str | None = None
     key_drivers: list | None = None
     synthesis_narrative: str | None = None

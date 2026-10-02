@@ -17,7 +17,7 @@ def _has_pass1_agent_id(text: str) -> bool:
 # The Risk Advisor is the only agent with its own citation vocabulary, declared in
 # its rule 1 alongside the Pass 1 IDs. Word-boundary matched so "VOL" does not fire
 # inside "VOLATILE" and "DD" does not fire inside "ADDED".
-RISK_METRIC_TOKENS = {"BETA", "VOL", "DD", "LIQ", "CORR", "CONC"}
+RISK_METRIC_TOKENS = {"BETA", "VOL", "DD", "LIQ"}
 _RISK_TOKEN_RE = re.compile(r"\b(?:" + "|".join(sorted(RISK_METRIC_TOKENS)) + r")\b")
 
 
@@ -27,7 +27,7 @@ def _has_risk_citation(text: str) -> bool:
     The Risk Advisor prompt authorises both, in two places: its output schema
     ("Must cite a Pass 1 agent ID or metric token") and its own validation rules
     ("at least one valid citation token", where rule 1 defines valid as the Pass 1
-    IDs plus BETA VOL DD LIQ CORR CONC).
+    IDs plus BETA VOL DD LIQ).
 
     Requiring a Pass 1 ID made one of strongest_signal's two stated purposes
     impossible: it is "the dominant downside scenario OR SANITY FLAG", and CoT step 6
@@ -854,15 +854,10 @@ def validate_tax_strategist(
 
 
 def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
-    """Validate Risk Advisor Stage A (account-neutral risk profile) output.
+    """Validate Risk Advisor (account-neutral risk profile) output.
 
-    Split from the old single `validate_risk_advisor` (ClickUp 86bbuhk82) to match the real
-    two-stage prompt split from 86bbdutn6. The old function nested a Stage-B-only field,
-    `position_size_recommendation`, under Stage A's `risk_profile` object -- confirmed via a
-    full field-name extraction of `backend/prompts/risk_advisor/v1_stage_a.txt` and
-    `v1_stage_b.txt` that it doesn't belong to Stage A's real schema at all. Because the check
-    only fired when the field was truthy (`if psr and not (...)`), it silently never triggered
-    against real Stage A output instead of loudly rejecting it -- broken quietly, not loudly.
+    Named "stage_a" for history: the Risk Advisor once had an account-specific stage B
+    (position sizing), removed 2026-10-01. This is now the agent's only validator.
     """
     errors: list[str] = []
 
@@ -883,7 +878,7 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
     elif not _has_risk_citation(output["strongest_signal"]):
         errors.append(
             "strongest_signal: must cite a Pass 1 agent ID or a metric token "
-            "(BETA VOL DD LIQ CORR CONC)"
+            "(BETA VOL DD LIQ)"
         )
 
     # key_factors: 2-4, sentiment must be negative|neutral only
@@ -898,21 +893,19 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
                         f"key_factors[{i}].sentiment: Risk Advisor must use 'negative' or 'neutral', got '{sent}'"
                     )
 
-    # narrative: 250-400 words per the Stage A prompt's own hard constraint ("stop at 400
-    # words") and schema comment ("250-400 words") == 1500-2400 chars at the ~6 chars/word
-    # heuristic used elsewhere in this codebase. The old bound here (1200-3200) matched
-    # neither number -- corrected while splitting this function, not a separate change.
+    # narrative: 1000-2400 chars. The floor was 1500 ("250 words" at ~6 chars a word), lowered
+    # 2026-10-01 (Risk Advisor Wave 2) to 1000: the model writes ~6.8 chars a word, lands at
+    # 1,000-1,900 chars whatever the prompt asks (the prompt aims at 1,800-2,200), nothing
+    # downstream reads the narrative's length, and half of all attempts were rejected for length
+    # alone. The 2400 ceiling is unchanged.
     narrative = output.get("narrative", "")
     nc = char_count(narrative)
-    if nc < 1500:
-        errors.append(f"narrative: too short ({nc} chars, min 1500)")
+    if nc < 1000:
+        errors.append(f"narrative: too short ({nc} chars, min 1000)")
     if nc > 2400:
         errors.append(f"narrative: too long ({nc} chars, max 2400)")
 
-    # risk_profile (Stage A's own meaning: volatility/drawdown/downside-scenario quantification
-    # -- NOT to be confused with Stage B's differently-shaped risk_profile_summary on the CIO,
-    # or with position sizing, which belongs to Risk Advisor Stage B, see
-    # validate_risk_advisor_stage_b).
+    # risk_profile: volatility/drawdown/downside-scenario quantification.
     rp = output.get("risk_profile", {})
     if not isinstance(rp, dict):
         errors.append("risk_profile: must be a dict")
@@ -963,53 +956,6 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
             errors.append(f"risk_profile.data_sanity_flags: max 3 items, got {len(dsf)}")
 
     _sweep_declared_enums(output, errors)
-    return len(errors) == 0, errors
-
-
-def validate_risk_advisor_stage_b(output: dict) -> tuple[bool, list[str]]:
-    """Validate Risk Advisor Stage B (account-specific sizing/stop-loss overlay) output.
-
-    Never validated before this split -- the old single function checked none of these fields
-    at all except a mis-nested, effectively-dead `position_size_recommendation` check (see
-    `validate_risk_advisor_stage_a`'s docstring).
-    """
-    errors: list[str] = []
-
-    valid_corr = {"high", "medium", "low", "unknown"}
-    corr = output.get("correlation_to_existing_portfolio")
-    if corr is not None and corr not in valid_corr:
-        errors.append(f"correlation_to_existing_portfolio: must be one of {valid_corr}, got {corr!r}")
-
-    valid_conc = {"high", "medium", "low", "not_applicable"}
-    conc = output.get("concentration_risk")
-    if conc is not None and conc not in valid_conc:
-        errors.append(f"concentration_risk: must be one of {valid_conc}, got {conc!r}")
-
-    valid_liq = {"high", "medium", "low"}
-    liq = output.get("liquidity_risk")
-    if liq is not None and liq not in valid_liq:
-        errors.append(f"liquidity_risk: must be one of {valid_liq}, got {liq!r}")
-
-    # Same "X-Y%" contract CIO Stage B's position_sizing_recommendation check enforces on
-    # this value at the point of consumption (cio.py) -- matched here at the point of
-    # production so a malformed value ("-5%", "abc-def%") fails at its source agent instead
-    # of passing here and only surfacing downstream at the CIO.
-    psr = str(output.get("position_size_recommendation") or "")
-    if not re.match(r"^\s*\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*%\s*$", psr):
-        errors.append(
-            f"position_size_recommendation: must be a percentage band \"X-Y%\" "
-            f"(e.g. '3-5%'), got {psr!r}"
-        )
-
-    stop_loss = output.get("stop_loss_suggestion")
-    if stop_loss is not None and not isinstance(stop_loss, (int, float)):
-        errors.append(f"stop_loss_suggestion: must be a number or null, got {type(stop_loss).__name__}")
-
-    if not str(output.get("sizing_rationale") or "").strip():
-        errors.append("sizing_rationale: must be non-empty")
-
-    _check_array_bounds(output, "caveats", 0, 2, errors)
-
     return len(errors) == 0, errors
 
 

@@ -11,8 +11,6 @@ reuses the `risk_profile_summary` name for a completely different pair of fields
 `position_size_source`/`sizing_justification`). Confirmed via a full field-name extraction of
 `backend/prompts/cio/v1_stage_a.txt` and `v1_stage_b.txt`, not just their enum-shaped fields.
 """
-import re
-
 from agents.utils import PASS1_AGENT_IDS, char_count
 from agents.validators.common import _sweep_declared_enums
 
@@ -37,7 +35,7 @@ VALID_OUTLOOKS = {"bullish", "somewhat_bullish", "neutral", "somewhat_bearish", 
 # validation. See prompt-revision-protocol.md 128.3 / 129.1.
 VALID_RETURN_TIERS = {"strong_outperform", "outperform", "market_perform",
                       "underperform", "strong_underperform"}
-# Ordered worst-to-best so Stage B's "only worse or unchanged" rule (prompt rule 3) can be
+# Ordered worst-to-best so Stage B's "only worse or unchanged" rule (prompt rule 2) can be
 # checked as a simple index comparison.
 _RETURN_TIER_ORDER = ["strong_underperform", "underperform", "market_perform",
                       "outperform", "strong_outperform"]
@@ -252,37 +250,29 @@ def validate_cio_stage_b(
     stage_a_expected_return_tier: str | None = None,
     tax_efficiency_source: str | None = None,
 ) -> tuple[bool, list[str]]:
-    """Validate CIO Stage B (account-specific overlay + narrative) output.
+    """Validate CIO Stage B (account-specific tax read + narrative) output. Position sizing and
+    `risk_profile_summary` were removed from this stage 2026-10-01.
 
     Args:
         output: The CIO Stage B output dict.
         stage_a_expected_return_tier: Stage A's own tier for this stock/timeline, for the
             "Stage B can only move to a worse tier, or stay the same, never better" rule
-            (Stage B prompt rule 3) -- never checked before this rewrite since the old code
+            (Stage B prompt rule 2) -- never checked before this rewrite since the old code
             treated CIO as one call and had no Stage A value to compare against.
         tax_efficiency_source: the Tax Strategist's tax_efficiency_for_account value, for the
             cross-check that tax_summary.tax_efficiency_consumed_as must match it exactly.
     """
     errors: list[str] = []
 
-    for field in (
-        "position_sizing_recommendation", "expected_return_tier", "synthesis_narrative",
-        "tax_summary", "risk_profile_summary",
-    ):
+    for field in ("expected_return_tier", "synthesis_narrative", "tax_summary"):
         if field not in output or output[field] is None:
             errors.append(f"Missing required CIO Stage B field: {field}")
 
-    psr = str(output.get("position_sizing_recommendation") or "")
-    if not re.match(r"^\s*\d+(?:\.\d+)?\s*-\s*\d+(?:\.\d+)?\s*%\s*$", psr):
-        errors.append(
-            f"position_sizing_recommendation: must be a percentage band \"X-Y%\" "
-            f"(the Risk Advisor emits e.g. '3-5%'), got {psr!r}")
-
-    tier = output.get("expected_return_tier")
+    tier =output.get("expected_return_tier")
     if tier not in VALID_RETURN_TIERS:
         errors.append(f"expected_return_tier: must be one of {VALID_RETURN_TIERS}")
     elif stage_a_expected_return_tier in _RETURN_TIER_ORDER:
-        # Rule 3: Stage B may only move the tier to a WORSE bucket than Stage A's, or leave it
+        # Rule 2: Stage B may only move the tier to a WORSE bucket than Stage A's, or leave it
         # unchanged -- tax drag is a cost, never a reason to improve on the general read.
         if _RETURN_TIER_ORDER.index(tier) > _RETURN_TIER_ORDER.index(stage_a_expected_return_tier):
             errors.append(
@@ -319,21 +309,6 @@ def validate_cio_stage_b(
         impact = tax_summary.get("tax_impact_on_recommendation")
         if impact is not None and impact not in valid_impact:
             errors.append(f"tax_summary.tax_impact_on_recommendation: must be one of {valid_impact}, got {impact!r}")
-
-    risk_profile_summary = output.get("risk_profile_summary")
-    if not isinstance(risk_profile_summary, dict):
-        if "risk_profile_summary" in output:
-            errors.append(
-                f"risk_profile_summary: must be an object, got {type(risk_profile_summary).__name__}"
-            )
-    else:
-        # Stage B's own risk_profile_summary shares a name with a Stage A concept but is
-        # unrelated content -- position sizing provenance, not the tail-risk cross-check
-        # (that lives at the top level in Stage A, see validate_cio_stage_a).
-        valid_source = {"risk_advisor_adopted", "risk_advisor_adjusted", "default_conservative"}
-        source = risk_profile_summary.get("position_size_source")
-        if source is not None and source not in valid_source:
-            errors.append(f"risk_profile_summary.position_size_source: must be one of {valid_source}, got {source!r}")
 
     return len(errors) == 0, errors
 

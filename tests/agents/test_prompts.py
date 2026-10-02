@@ -71,9 +71,8 @@ class TestMultiStageExtraction:
         "agent,stage,expected_field",
         [
             ("Chief Investment Officer (CIO)", "A", "stock_outlook"),
-            ("Chief Investment Officer (CIO)", "B", "position_sizing_recommendation"),
+            ("Chief Investment Officer (CIO)", "B", "synthesis_narrative"),
             ("Risk Advisor", "A", "groundedness_score"),
-            ("Risk Advisor", "B", "correlation_to_existing_portfolio"),
         ],
     )
     def test_system_prompt_stage_disambiguation(self, agent, stage, expected_field):
@@ -85,9 +84,8 @@ class TestMultiStageExtraction:
         "agent,stage,expected_field",
         [
             ("Chief Investment Officer (CIO)", "A", "stock_outlook"),
-            ("Chief Investment Officer (CIO)", "B", "position_sizing_recommendation"),
+            ("Chief Investment Officer (CIO)", "B", "synthesis_narrative"),
             ("Risk Advisor", "A", "groundedness_score"),
-            ("Risk Advisor", "B", "correlation_to_existing_portfolio"),
         ],
     )
     def test_nested_output_schema_stage_disambiguation(self, agent, stage, expected_field):
@@ -107,7 +105,8 @@ class TestMultiStageExtraction:
         stage_a = extract_stage_schema(md, "Output Schema", "Stage A")
         stage_b = extract_stage_schema(md, "Output Schema", "Stage B")
         assert stage_a != stage_b
-        assert "position_sizing_recommendation" not in stage_a
+        assert "position_sizing_recommendation" not in stage_b
+        assert "risk_profile_summary" not in stage_b
         assert "stock_outlook" not in stage_b
 
     def test_stage_b_heading_recurs_elsewhere_in_the_document(self):
@@ -139,7 +138,7 @@ class TestMultiStageExtraction:
         )
 
         bounded = extract_stage_schema(md_with_earlier_decoy, "Output Schema", "Stage B")
-        assert "position_sizing_recommendation" in bounded
+        assert "synthesis_narrative" in bounded
         assert "VALIDATION ERRORS" not in bounded
 
 
@@ -250,8 +249,10 @@ class TestFullExtractionSweep:
         early -- checked here, not just for the 2-3 agents spot-checked
         during planning."""
         md = _doc(name)
+        # Risk Advisor has only Stage A since 2026-10-01 (its Stage B sections are marked REMOVED).
+        stages = ("Stage A",) if name == "Risk Advisor" else ("Stage A", "Stage B")
         headers = (
-            ["System Prompt — Stage A", "System Prompt — Stage B"]
+            [f"System Prompt — {st}" for st in stages]
             if name in _MULTI_STAGE
             else ["System Prompt"]
         )
@@ -260,7 +261,7 @@ class TestFullExtractionSweep:
             assert block.count("```") == 0, f"{name} / {header}: stray fence in extracted block"
 
         if name in _MULTI_STAGE:
-            for stage in ("Stage A", "Stage B"):
+            for stage in stages:
                 schema = extract_stage_schema(md, "Output Schema", stage)
                 assert schema.count("```") == 0, f"{name} / {stage} schema: stray fence"
         else:
