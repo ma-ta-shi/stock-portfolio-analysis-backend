@@ -411,3 +411,24 @@ def gate2_check(pass2_outputs: dict) -> tuple[bool, str]:
     if not agent_completed(pass2_outputs.get("bear")):
         return False, "Bear Case Advocate did not complete (Gate 2 failure)"
     return True, "Gate 2 passed"
+
+
+def currency_note(mismatch: dict | None, *, filings: bool = False) -> str:
+    """The payload line that says what currency the figures are in when a company reports in a different currency
+    than it trades in (see data/precompute/currency.py); empty when there is no mismatch. `filings` adds that amounts
+    quoted inside filing excerpts stay in the filing's own currency (the Researcher reads them)."""
+    if not mismatch:
+        return ""
+    if mismatch.get("converted"):
+        note = (
+            f"\nNOTE: statements are reported in {mismatch['financials_currency']} and shown here converted to "
+            f"{mismatch['quote_currency']} at {mismatch['usd_cad']} CAD per USD (Bank of Canada)."
+        )
+        if filings:
+            note += f" Amounts quoted inside filing excerpts are in {mismatch['financials_currency']}."
+        return note
+    return (
+        f"\nNOTE: statements are reported in {mismatch['financials_currency']} but the stock trades in "
+        f"{mismatch['quote_currency']} and no exchange rate was available, so price-based multiples are omitted."
+    )
+

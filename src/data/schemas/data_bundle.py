@@ -107,12 +107,15 @@ class DataBundle(ContractModel):
     # and analyst_consensus aren't tracked there at all -- dividend_regularity="none" is
     # itself an honest "no dividend" answer, not a gap, and analyst_consensus is already
     # tracked by Sentiment Analyst's own input_field_coverage.
-    currency_mismatch: dict | None  # {financials_currency, quote_currency} when a
+    currency_mismatch: dict | None  # {financials_currency, quote_currency, converted, usd_cad} when a
     # CA-listed company reports in a different currency than its quote (e.g. ATD.TO
-    # reports in USD) -- every price-vs-statement multiple is then FX-distorted, not
-    # missing. A quality/distortion flag, not a presence flag -- deliberately NOT folded
+    # reports in USD). The statements are converted into the quote currency at the Bank of
+    # Canada rate (data/precompute/currency.py), so the multiples are right; `converted` False
+    # means no rate or an unsupported pair and the multiples were dropped. A quality flag, not a presence flag -- deliberately NOT folded
     # into input_field_coverage's {field: bool} map, which only answers "was this
     # present," not "is this present value trustworthy."
+    not_applicable: dict | None = None  # {reason: "bank"|"REIT", fields: [...]}: metrics that do not exist
+    # for this kind of company and came out empty, so the payloads say "not applicable" instead of a data gap.
     latest_financials_period_end: str | None  # ISO "YYYY-MM-DD", the newest quarter's
     # own period_end (fundamentals.py::compute_all()'s own new return key, 86bbummwp
     # Tier 2) -- was fetched (NormalizedFinancials.quarters[0]["period_end"]) but never

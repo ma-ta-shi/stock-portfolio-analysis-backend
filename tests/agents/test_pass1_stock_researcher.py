@@ -55,6 +55,7 @@ def _bundle(**overrides) -> SimpleNamespace:
     test. Same convention as test_pass2_view.py's equivalent bundle stand-in."""
     defaults = dict(
         stock=SimpleNamespace(ticker="SHOP.TO", currency="CAD", exchange="TSX"),
+        currency_mismatch=None,
         company_info={"name": "Shopify Inc", "sector": "Technology"},
         context=SimpleNamespace(account_type="tfsa", timeline="medium_term"),
         data_vintage=datetime(2026, 9, 23, tzinfo=UTC),
@@ -488,3 +489,15 @@ def test_stale_data_transcripts_never_checked():
     """Permanently None today (D3) -- must never appear in stale_data, that's
     data_coverage's job."""
     assert "transcripts" not in _stale_data(_bundle())
+
+
+def test_the_researcher_payload_states_the_currency_conversion_and_that_filing_amounts_stay_in_the_filing_currency():
+    bundle = _bundle(currency_mismatch={"financials_currency": "USD", "quote_currency": "CAD", "converted": True, "usd_cad": 1.4243})
+    msg, _ = build_user_message(bundle)
+    assert "NOTE: statements are reported in USD and shown here converted to CAD at 1.4243 CAD per USD (Bank of Canada)." in msg
+    assert "Amounts quoted inside filing excerpts are in USD." in msg
+
+
+def test_the_researcher_payload_has_no_currency_note_when_there_is_no_mismatch():
+    msg, _ = build_user_message(_bundle())
+    assert "NOTE: statements are reported" not in msg

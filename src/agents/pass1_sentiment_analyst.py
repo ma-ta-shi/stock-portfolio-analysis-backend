@@ -320,7 +320,8 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
         canadian_flag = "\nCANADIAN DATA LIMITED: true — Finnhub analyst upgrade/downgrade data unavailable, article sentiment scored from headlines only."
 
     insider_activity = summarize_insider_activity(
-        bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap")
+        bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap"),
+        bundle.insider_activity.get("value_currency"), bundle.price_info.get("currency"),
     )["text"]
     news = _news_block(bundle)
     analyst_activity = _analyst_activity_block(bundle)

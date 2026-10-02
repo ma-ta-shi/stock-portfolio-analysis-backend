@@ -1195,3 +1195,25 @@ async def test_a_healthy_quote_reports_nothing(provider, monkeypatch, collector)
 
     assert quote["current_price"] == 100.0
     assert collector.drain() == []
+
+
+async def test_earnings_calendar_falls_back_to_the_earnings_dates_table_when_calendar_only_has_a_past_date(provider, monkeypatch):
+    """RY.TO / TD.TO 2026-10-02: `calendar` listed the quarter just reported (2026-08-27) so the next earnings date
+    came out empty; the earnings-dates table had 2026-12-03."""
+
+    class _Ticker(FakeTicker):
+        def get_earnings_dates(self, limit=8):
+            return pd.DataFrame(index=pd.DatetimeIndex(["2026-12-03", "2026-08-27", "2026-05-28"]))
+
+    _patch_ticker(monkeypatch, lambda ticker: _Ticker(calendar={"Earnings Date": [pd.Timestamp("2026-08-27")]}))
+    monkeypatch.setattr("data.providers.yfinance.datetime", type("D", (), {"now": staticmethod(lambda: pd.Timestamp("2026-10-02").to_pydatetime())}))
+
+    result = await provider.get_earnings_calendar("RY.TO")
+
+    assert {"date": "2026-12-03", "symbol": "RY.TO"} in result
+    assert all(r["date"] != "2026-05-28" for r in result)
+
+
+async def test_earnings_calendar_fallback_degrades_quietly_when_there_is_no_table(provider, monkeypatch):
+    _patch_ticker(monkeypatch, lambda ticker: FakeTicker(calendar={"Earnings Date": [pd.Timestamp("2019-01-01")]}))
+    assert await provider.get_earnings_calendar("RY.TO") == [{"date": "2019-01-01", "symbol": "RY.TO"}]

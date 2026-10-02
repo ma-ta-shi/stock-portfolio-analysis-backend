@@ -63,6 +63,7 @@ vix_regime/gdp_trend) are first-pass, not sourced from any doc — same
 disclosure pattern as fundamentals.py's health_rating thresholds.
 """
 
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 from typing import Literal
 
@@ -538,24 +539,49 @@ def _cb_stance_note(items: list[CBCommentaryItem]) -> str | None:
 # ---------- Statistics Canada supplementary fields ----------
 
 
+_STATCAN_ATTEMPTS = 3
+_STATCAN_RETRY_DELAY_SECONDS = 1.0
+
+
+async def _statcan_with_retry(name: str, call, failures: dict[str, str]):
+    """One StatCan metric, retried on a transient failure (timeouts and connection errors are common) and isolated:
+    a metric that still fails comes back None and is recorded in `failures`, without taking the other four down.
+    Before this, one failure inside a sequential block of five nulled all of them: 2 of 4 Canadian bundles built on
+    2026-10-02 had no Canadian CPI, GDP, unemployment, housing or retail data although every call succeeded when
+    repeated."""
+    for attempt in range(1, _STATCAN_ATTEMPTS + 1):
+        try:
+            return await call()
+        except Exception as exc:
+            if attempt == _STATCAN_ATTEMPTS:
+                logger.warning("macro_sources_statcan_metric_failed", metric=name, attempts=attempt, exc_info=True)
+                failures[name] = str(exc)
+                return None
+            await asyncio.sleep(_STATCAN_RETRY_DELAY_SECONDS * attempt)
+    return None
+
+
 async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) -> dict:
-    # Real gap found live (86bawpty3, 2026-09-15): unlike _fetch_cb_commentary's
-    # finnhub call above, these five calls had no error handling at all - a
-    # StatsCanada outage/timeout crashed compute_macro_sources() entirely for
-    # every Canadian stock, rather than degrading to statcan_available=False the
-    # way the rest of this function (and canadian_data_flags.py's own
-    # statcan_available derivation) already assumes a single failed metric can.
-    try:
-        unemployment = await stats_canada.get_unemployment_rate()
-        housing = await stats_canada.get_housing_starts()
-        retail = await stats_canada.get_retail_sales_yoy()
-        cpi_national = await stats_canada.get_cpi_national()
-        gdp_index = await stats_canada.get_real_gdp_index()
-    except Exception as exc:
-        logger.warning("macro_sources_statcan_fetch_failed", exc_info=True)
-        # One failed call nulls all five StatCan values.
-        report_degradation("statcan", "macro_fetch", FETCH_FAILED, str(exc), exc=exc)
-        unemployment = housing = retail = cpi_national = gdp_index = None
+    # Real gap found live (86bawpty3, 2026-09-15): these calls once had no error handling at all, so a StatCan
+    # outage crashed compute_macro_sources() for every Canadian stock; they then degraded to None together. Each
+    # metric is now fetched on its own with a retry (see _statcan_with_retry); any that still fail are reported
+    # once, naming them.
+    failures: dict[str, str] = {}
+    metrics = (
+        ("unemployment", lambda: stats_canada.get_unemployment_rate()),
+        ("housing_starts", lambda: stats_canada.get_housing_starts()),
+        ("retail_sales", lambda: stats_canada.get_retail_sales_yoy()),
+        ("cpi_national", lambda: stats_canada.get_cpi_national()),
+        ("real_gdp", lambda: stats_canada.get_real_gdp_index()),
+    )
+    unemployment, housing, retail, cpi_national, gdp_index = await asyncio.gather(
+        *(_statcan_with_retry(name, call, failures) for name, call in metrics)
+    )
+    if failures:
+        report_degradation(
+            "statcan", "macro_fetch", FETCH_FAILED,
+            "; ".join(f"{name}: {failures[name]}" for name, _ in metrics if name in failures),
+        )
 
     # statcan_age_days is one field, not one per statcan_* value — no doc
     # says which underlying fetch it should track, so it's taken from

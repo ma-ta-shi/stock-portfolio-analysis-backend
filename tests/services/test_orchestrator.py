@@ -93,6 +93,8 @@ def _fake_bundle(**overrides) -> SimpleNamespace:
         balance_sheet_metrics={"debt_to_equity": 1.5},
         peer_metrics={"sector_medians": {"sector_median_pe": 25.0}},
         insider_activity={"transactions": []},
+        analyst_consensus={"consensus_rating": "buy", "target_mean": 250.0},
+        not_applicable=None,
         technical_indicators={"volatility_regime_derived": "normal"},
         support_resistance={"nearest_support": 210.0, "nearest_resistance": 230.0},
         macro_sources=SimpleNamespace(

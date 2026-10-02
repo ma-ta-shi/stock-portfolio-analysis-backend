@@ -702,6 +702,14 @@ def test_compute_peer_comparison_three_peers_two_valid_yields_median():
 # --- compute_all ---
 
 
+def _fin_scaled(factor: float, currency: str):
+    """_fin() with every monetary amount multiplied by `factor`, as a company reporting in `currency` would show."""
+    from data.precompute.currency import convert_financials
+
+    return convert_financials(_fin(currency="USD"), factor, currency)
+
+
+
 def test_compute_all_happy_path_returns_full_shape():
     result = compute_all(_fin(), _price_info(), _dividend_history(), [])
 
@@ -715,6 +723,7 @@ def test_compute_all_happy_path_returns_full_shape():
         "quarters_available",
         "missing_fields",
         "currency_mismatch",
+        "not_applicable",
         "latest_financials_period_end",
     }
     assert result["quarters_available"] == 5
@@ -724,18 +733,34 @@ def test_compute_all_happy_path_returns_full_shape():
     assert result["latest_financials_period_end"] == "2026-06-30"  # newest quarter, _QUARTERS[0]
 
 
-def test_compute_all_currency_mismatch_is_marked_not_raised():
-    """A Canadian-listed USD-reporter (ATD.TO, NTR.TO, ...) has USD statements
-    and a CAD quote. Coverage first: still emit the metrics, but mark the
-    mismatch so downstream can flag the FX-distorted multiples (86bbxucf0)."""
-    result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], [])
+def test_compute_all_converts_a_usd_reporter_on_a_cad_quote_so_the_multiples_are_right():
+    """SHOP.TO 2026-10-02: USD statements, CAD quote. P/E was 144 against a true 103 because a CAD market cap was
+    divided by a USD profit (BB-021). With the Bank of Canada rate the statements are converted first, so the result
+    equals a company that reported the same numbers in CAD."""
+    rate = 1.4
+    usd_result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], [], usd_cad=rate)
+    cad_equivalent = compute_all(_fin_scaled(rate, "CAD"), _price_info(currency="CAD"), [], [])
 
-    assert result["currency_mismatch"] == {
-        "financials_currency": "USD",
-        "quote_currency": "CAD",
+    assert usd_result["currency_mismatch"] == {
+        "financials_currency": "USD", "quote_currency": "CAD", "converted": True, "usd_cad": rate,
     }
-    # metrics still computed (distorted, deliberately)
-    assert result["valuation_metrics"]["pe_ratio"] is not None
+    for key in ("pe_ratio", "pb_ratio", "ps_ratio"):
+        assert usd_result["valuation_metrics"][key] == pytest.approx(cad_equivalent["valuation_metrics"][key])
+    # the distortion removed is exactly the exchange rate: the naive P/E (USD profit read as CAD) divided by the rate
+    naive = compute_all(_fin(currency="CAD"), _price_info(currency="CAD"), [], [])
+    assert usd_result["valuation_metrics"]["pe_ratio"] == pytest.approx(naive["valuation_metrics"]["pe_ratio"] / rate)
+    assert usd_result["valuation_metrics"]["pb_ratio"] == pytest.approx(naive["valuation_metrics"]["pb_ratio"] / rate)
+
+
+def test_compute_all_drops_price_based_multiples_when_a_mismatch_cannot_be_converted():
+    result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], [], usd_cad=None)
+
+    assert result["currency_mismatch"]["converted"] is False
+    for key in ("pe_ratio", "pb_ratio", "ps_ratio", "ev_ebitda", "peg_ratio"):
+        assert result["valuation_metrics"][key] is None
+    assert result["dividend_info"]["payout_ratio"] is None
+    # ratios that do not divide a price by a statement amount are still there
+    assert result["profitability_metrics"]["net_margin"] is not None
 
 
 def test_compute_all_missing_fields_lists_none_valued_keys():
@@ -807,3 +832,123 @@ def test_all_peers_empty_gives_no_records_and_no_medians():
     result = compute_peer_comparison([("X", _no_statements(), _price_info())])
     assert result["peer_records"] == []
     assert all(v is None for v in result["sector_medians"].values())
+
+
+# --- revenue growth over the most recent period (2026-10-02 accuracy audit) ---
+
+
+def _growth_fin(quarters, annual):
+    return NormalizedFinancials(quarters=quarters, annual=annual, balance_sheet={}, currency="USD")
+
+
+def _q(period_end, revenue):
+    return {"period_end": period_end, "revenue": revenue}
+
+
+def test_growth_uses_the_latest_quarter_when_it_is_newer_than_the_last_fiscal_year():
+    """KO: fiscal year ended 2025-12-31 grew 1.87%, the quarter ended 2026-07-03 grew 6.74%."""
+    fin = _growth_fin([_q("2026-07-03", 106.74), _q("2025-06-27", 100.0)],
+                      [_q("2025-12-31", 101.87), _q("2024-12-31", 100.0)])
+    g = compute_growth_metrics(fin)
+    assert g["revenue_growth_yoy"] == pytest.approx(0.0674)
+    assert g["revenue_growth_yoy_basis"] == "quarter ended 2026-07-03 vs 2025-06-27"
+    assert g["revenue_growth_annual"] == pytest.approx(0.0187)
+
+
+def test_growth_uses_the_fiscal_year_when_it_ended_after_the_last_quarter():
+    """MSFT: fiscal year ended 2026-06-30 is newer than the last 10-Q quarter, 2026-03-31."""
+    fin = _growth_fin([_q("2026-03-31", 117.0), _q("2025-03-31", 100.0)],
+                      [_q("2026-06-30", 117.79), _q("2025-06-30", 100.0)])
+    g = compute_growth_metrics(fin)
+    assert g["revenue_growth_yoy"] == pytest.approx(0.1779)
+    assert g["revenue_growth_yoy_basis"] == "fiscal year ended 2026-06-30"
+
+
+def test_growth_finds_the_year_earlier_quarter_even_when_it_is_not_the_next_row():
+    """yfinance gives five quarters, newest first: the comparison is index 4, not 1."""
+    fin = _growth_fin([_q("2026-07-31", 109.0), _q("2026-04-30", 105.0), _q("2026-01-31", 103.0),
+                       _q("2025-10-31", 101.0), _q("2025-07-31", 100.0)],
+                      [_q("2025-10-31", 120.0), _q("2024-10-31", 100.0)])
+    g = compute_growth_metrics(fin)
+    assert g["revenue_growth_yoy"] == pytest.approx(0.09)
+    assert g["revenue_growth_annual"] == pytest.approx(0.20)
+
+
+def test_a_quarter_not_about_a_year_before_is_not_used_as_the_comparison():
+    fin = _growth_fin([_q("2026-07-03", 110.0), _q("2026-04-02", 105.0)], [_q("2025-12-31", 101.0), _q("2024-12-31", 100.0)])
+    g = compute_growth_metrics(fin)
+    assert g["revenue_growth_yoy_basis"] == "fiscal year ended 2025-12-31"
+
+
+def test_growth_is_none_with_no_usable_periods_and_the_label_says_so():
+    g = compute_growth_metrics(_growth_fin([], []))
+    assert g["revenue_growth_yoy"] is None and g["revenue_growth_yoy_basis"] is None and g["revenue_growth_annual"] is None
+
+
+def test_latest_financials_period_end_is_the_newest_period_any_statement_covers():
+    fin = _fin(quarters=[_q("2026-03-31", 1.0)] + [{**q} for q in _QUARTERS[1:2]], annual=[_q("2026-06-30", 1.0), _q("2025-06-30", 1.0)])
+    assert compute_all(fin, _price_info(), [], [])["latest_financials_period_end"] == "2026-06-30"
+
+
+# --- debt metrics and metrics that do not exist for a kind of company (2026-10-02 accuracy audit) ---
+
+
+def _bs_fin(*, debt, equity=1000.0, quarter=None, annual=None):
+    return NormalizedFinancials(
+        quarters=[quarter] if quarter else [], annual=[annual] if annual else [],
+        balance_sheet={"total_debt": debt, "total_equity": equity}, currency="USD",
+    )
+
+
+def test_a_company_with_no_debt_line_and_no_interest_expense_has_zero_debt_to_equity():
+    """RDDT: edgartools finds no debt tags and there is no interest expense anywhere; Yahoo's D/E is 0.006."""
+    fin = _bs_fin(debt=None, quarter={"period_end": "2026-06-30", "operating_income": 200.0},
+                  annual={"period_end": "2025-12-31", "operating_income": 400.0})
+    assert compute_balance_sheet_metrics(fin)["debt_to_equity"] == 0.0
+
+
+def test_missing_debt_stays_missing_when_the_company_pays_interest():
+    fin = _bs_fin(debt=None, quarter={"period_end": "2026-06-30", "operating_income": 200.0, "interest_expense": 10.0})
+    assert compute_balance_sheet_metrics(fin)["debt_to_equity"] is None
+
+
+def test_interest_coverage_falls_back_to_the_fiscal_year_when_the_quarter_has_no_interest_line():
+    """MSFT: the 10-Q carries no interest expense, the annual report does (3.05B against 155B operating income)."""
+    fin = _bs_fin(debt=40.0, quarter={"period_end": "2026-03-31", "operating_income": 40.0, "interest_expense": None},
+                  annual={"period_end": "2026-06-30", "operating_income": 155.0, "interest_expense": 3.1})
+    assert compute_balance_sheet_metrics(fin)["interest_coverage"] == pytest.approx(155.0 / 3.1)
+
+
+def test_interest_coverage_prefers_the_latest_quarter_when_it_has_one():
+    fin = _bs_fin(debt=40.0, quarter={"period_end": "2026-03-31", "operating_income": 40.0, "interest_expense": 2.0},
+                  annual={"period_end": "2025-12-31", "operating_income": 155.0, "interest_expense": 3.1})
+    assert compute_balance_sheet_metrics(fin)["interest_coverage"] == pytest.approx(20.0)
+
+
+def test_a_bank_has_its_nonexistent_metrics_marked_not_applicable_not_missing():
+    result = compute_all(_fin(), _price_info(), [], [], industry="Banking")
+    # _fin() has operating_income so operating_margin exists; remove it to look like a bank
+    bank_fin = _fin()
+    for entry in [*bank_fin.quarters, *bank_fin.annual]:
+        entry["operating_income"] = None
+        entry["cost_of_revenue"] = None
+    bank = compute_all(bank_fin, _price_info(), [], [], industry="Banks - Diversified")
+    assert bank["not_applicable"]["reason"] == "bank"
+    assert {"operating_margin", "gross_margin"} <= set(bank["not_applicable"]["fields"])
+    assert "profitability_metrics.operating_margin" not in bank["missing_fields"]
+    assert result["not_applicable"] is None or "operating_margin" not in result["not_applicable"]["fields"]
+
+
+def test_a_reit_has_its_earnings_multiples_marked_not_applicable_when_empty():
+    no_earnings = _fin()
+    for entry in [*no_earnings.quarters, *no_earnings.annual]:
+        entry["net_income"] = None
+        entry["net_income_common"] = None
+        entry["eps"] = None
+    out = compute_all(no_earnings, _price_info(), [], [], industry="REITs")
+    assert out["not_applicable"]["reason"] == "REIT" and "pe_ratio" in out["not_applicable"]["fields"]
+    assert "valuation_metrics.pe_ratio" not in out["missing_fields"]
+
+
+def test_other_industries_have_no_not_applicable_list():
+    assert compute_all(_fin(), _price_info(), [], [], industry="Software - Infrastructure")["not_applicable"] is None

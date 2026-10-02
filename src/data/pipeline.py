@@ -8,6 +8,7 @@ covers what a reader of the code itself needs.
 """
 
 import asyncio
+import dataclasses
 from collections.abc import Iterator
 from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
@@ -28,6 +29,7 @@ from data.precompute.macro_sources import compute_macro_sources
 from data.precompute.news_id_assignment import assign_news_ids
 from data.precompute.news_selection import select_news
 from data.precompute.research_sources import build_research_sources, company_name_variants
+from data.precompute.currency import convert_insider_values
 from data.providers.boc import BOCMacroDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fred import FredMacroDataProvider
@@ -79,6 +81,21 @@ _DIVIDEND_HISTORY_YEARS = 6
 # Stock Researcher too (its documented 30 / 90 / 180-day timeline windows never worked: one
 # capped request returned the newest ~250 items for every window, BB-023, and are deferred).
 _NEWS_WINDOW_DAYS = 30
+
+
+async def _fetch_usd_cad() -> float | None:
+    """CAD per 1 USD from the Bank of Canada, the one rate every currency conversion in a run uses
+    (data/precompute/currency.py); None when unavailable, in which case nothing is converted and the affected
+    multiples are dropped instead of shown distorted."""
+    try:
+        async with BOCMacroDataProvider() as boc:
+            result = await boc.get_exchange_rates("USDCAD")
+    except Exception as exc:
+        logger.warning("pipeline_usd_cad_fetch_failed", exc_info=True)
+        report_degradation("pipeline", "usd_cad", FETCH_FAILED, str(exc), exc=exc)
+        return None
+    rate = result.get("rate")
+    return float(rate) if rate else None
 
 
 async def _fetch_peer(router, peer_ticker: str, *, subject_is_ca: bool):
@@ -245,6 +262,7 @@ class DataPipeline:
                 peer_tickers,
                 analyst_estimates,
                 earnings_surprises,
+                usd_cad,
             ) = await asyncio.gather(
                 fin_provider.normalize_financials(ticker),
                 router.get_quote(ticker),
@@ -252,7 +270,17 @@ class DataPipeline:
                 router.get_peers(ticker),
                 router.get_analyst_estimates(ticker),
                 router.get_earnings_surprises(ticker),
+                _fetch_usd_cad(),
             )
+
+            # edgartools labels every filer USD, but a Canadian company listed in the US that files a 10-K in CAD
+            # (ENB: edgartools revenue 83.5B equals Yahoo's 83.5B CAD) has CAD statements on a USD quote, so its
+            # multiples were off by the exchange rate and the currency conversion never triggered. Take the reported
+            # currency from yfinance for US tickers so the one conversion point (precompute/currency.py) sees it.
+            if not is_ca:
+                reported_currency = await router._providers["yfinance"].get_financial_currency(ticker)
+                if reported_currency and reported_currency != fin.currency:
+                    fin = dataclasses.replace(fin, currency=reported_currency)
 
             # All peers fetched concurrently, not one at a time - each
             # normalize_financials() call is itself several sub-requests
@@ -271,6 +299,8 @@ class DataPipeline:
                 peer_data=peer_data,
                 analyst_estimates=analyst_estimates,
                 earnings_surprises=earnings_surprises,
+                usd_cad=usd_cad,
+                industry=company_info.get("industry"),
             )
 
             # Technicals needs the subject's own price history plus a
@@ -378,6 +408,15 @@ class DataPipeline:
                 sentiment.summarize_news(news_selection["scored"], capture=capture),
                 router.get_insider_trading(ticker),
             )
+            # yfinance reports every Canadian insider trade value in USD (cross-listed or not), so Canadian rows are
+            # converted to the quote currency; edgartools (US) is already USD.
+            insider_value_currency = price_info.get("currency")
+            if is_ca:
+                insider_transactions, insider_converted = convert_insider_values(
+                    insider_transactions, insider_value_currency, usd_cad
+                )
+                if not insider_converted:
+                    insider_value_currency = "USD"
             research_sources_bundle = await build_research_sources(
                 ticker, news_selection["researcher"], stock, capture=capture
             )
@@ -457,6 +496,7 @@ class DataPipeline:
                 price_info=price_info,
                 missing_fields=fundamentals_result["missing_fields"],
                 currency_mismatch=fundamentals_result["currency_mismatch"],
+                not_applicable=fundamentals_result["not_applicable"],
                 latest_financials_period_end=fundamentals_result["latest_financials_period_end"],
                 technical_indicators=technicals_result["technical_indicators"],
                 support_resistance=technicals_result["support_resistance"],
@@ -478,7 +518,7 @@ class DataPipeline:
                 },
                 analyst_consensus=analyst_consensus,
                 analyst_recommendation_trends=analyst_recommendation_trends,
-                insider_activity={"transactions": insider_transactions},
+                insider_activity={"transactions": insider_transactions, "value_currency": insider_value_currency},
                 short_interest=short_interest,
                 peer_sentiment=[],
                 canadian_data_flags=canadian_data_flags,

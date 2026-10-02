@@ -66,3 +66,17 @@ def test_an_undated_aggregate_is_not_reported_as_no_activity():
 def test_rows_without_a_value_are_counted_but_never_notable():
     out = summarize_insider_activity([_row(value=None)], 1e10)
     assert out["sell_count"] == 1 and out["materiality"] == "routine"
+
+
+def test_values_in_a_different_currency_than_the_market_cap_are_not_sized():
+    """If the Bank of Canada rate is unavailable the Canadian values stay USD while the cap is CAD: comparing them
+    would be off by the exchange rate, so nothing is judged."""
+    out = summarize_insider_activity([_row(value=5_000_000)], 2.7e11, currency="USD", market_cap_currency="CAD")
+    assert out["materiality"] is None and "values in USD but market cap in CAD" in out["text"]
+    ok = summarize_insider_activity([_row(value=5_000_000)], 2.7e11, currency="CAD", market_cap_currency="CAD")
+    assert ok["materiality"] in ("routine", "notable") and ok["text"].count("CAD") >= 1
+
+
+def test_the_currency_code_follows_every_dollar_figure():
+    out = summarize_insider_activity([_row(value=2_000_000)] * 3, 28.3e9, currency="CAD", market_cap_currency="CAD")
+    assert out["text"].startswith("net selling $6.0M CAD from 3 notable") and "$283K CAD or more" in out["text"]

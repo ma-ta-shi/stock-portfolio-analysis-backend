@@ -306,6 +306,13 @@ class YFinanceDataProvider(StockDataProvider):
             asset_type=asset_type,
         )
 
+    async def get_financial_currency(self, ticker: str) -> str | None:
+        """The currency the company reports its statements in (yfinance `financialCurrency`), or None when unknown.
+        Needed for US-listed Canadian companies that file a 10-K in CAD (ENB, CP): edgartools labels every filer USD."""
+        info = yf.Ticker(ticker).info
+        value = (info or {}).get("financialCurrency")
+        return value if isinstance(value, str) and value else None
+
     async def get_business_summary(self, ticker: str) -> str | None:
         """86ban0x1u part 2a: research_sources.py's peer-block business
         summary. Confirmed live for both CA and US tickers (5 tickers
@@ -675,18 +682,26 @@ class YFinanceDataProvider(StockDataProvider):
         ~2 days forward (near-useless for a per-ticker lookup), so the CA
         chain is yfinance-only; yfinance had the date for RY.TO/ENB.TO/SHOP.TO."""
         stock = yf.Ticker(ticker)
+        rows: list[dict] = []
         cal = stock.calendar
         # isinstance first: `not cal` on a (legacy) non-empty DataFrame raises.
-        if not isinstance(cal, dict) or not cal:
-            return []
-        raw_dates = cal.get("Earnings Date")
-        if not isinstance(raw_dates, list):
-            return []
-        rows = []
-        for value in raw_dates:
-            # skip NaT / None / a stray non-date string
-            if pd.notna(value) and hasattr(value, "strftime"):
-                rows.append({"date": value.strftime("%Y-%m-%d"), "symbol": ticker.upper()})
+        raw_dates = cal.get("Earnings Date") if isinstance(cal, dict) and cal else None
+        if isinstance(raw_dates, list):
+            for value in raw_dates:
+                # skip NaT / None / a stray non-date string
+                if pd.notna(value) and hasattr(value, "strftime"):
+                    rows.append({"date": value.strftime("%Y-%m-%d"), "symbol": ticker.upper()})
+        # For some names `calendar` still lists the quarter just reported (RY.TO and TD.TO showed 2026-08-27 in
+        # October, so the Technical agent's earnings-proximity check came out empty) while the earnings-dates table
+        # has the next one (2026-12-03): fall back to that when no date in `calendar` is still ahead.
+        today = datetime.now().strftime("%Y-%m-%d")
+        if not any(r["date"] >= today for r in rows):
+            try:
+                table = stock.get_earnings_dates(limit=8)
+                upcoming = sorted({i.strftime("%Y-%m-%d") for i in table.index if hasattr(i, "strftime")})
+            except Exception:  # a ticker with no earnings table: keep whatever `calendar` gave
+                upcoming = []
+            rows.extend({"date": d, "symbol": ticker.upper()} for d in upcoming if d >= today)
         return rows
 
     async def get_dividend_history(
