@@ -1069,6 +1069,11 @@ class AnalysisOrchestrator:
                 tax_summary = stage_b_result.get("tax_summary")
                 if isinstance(tax_summary, dict):
                     tax_summary["dividend_yield_pct"] = tax_profile.get("dividend_yield_pct")
+                    # The comparable cost of holding this stock in this account (annual dividend tax and the
+                    # yield after it, same basis in every account), so the Portfolio Optimizer reads one
+                    # finalized source when it compares the three accounts' results for a ticker.
+                    tax_summary["annual_tax_drag_pct"] = tax_profile.get("annual_tax_drag_pct")
+                    tax_summary["effective_after_tax_yield_pct"] = tax_profile.get("effective_after_tax_yield_pct")
 
             _add_agent_output_and_calls(db, run, "cio_stage_b", "synthesis", stage_b_result, stage_b_errors, cio_runner)
             await db.commit()

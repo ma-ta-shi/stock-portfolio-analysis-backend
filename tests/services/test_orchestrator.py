@@ -2257,3 +2257,50 @@ async def test_the_cio_stage_b_gets_no_risk_input_and_no_position_size_is_stored
     assert len(cio.stage_b_calls[0]) == 4
     rec = (await session.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))).scalar_one()
     assert rec.position_size_suggestion is None
+
+
+@pytest.mark.asyncio
+async def test_the_cio_account_result_carries_the_tax_agents_comparable_cost():
+    """The Tax Strategist runs once per account; the CIO's account-specific result is what the
+    Portfolio Optimizer reads, so the cost figures are copied into its tax_summary by code."""
+    session = await _make_session()
+    run = await _make_run(session)
+    bundle = _fake_bundle()
+    cio_stage_a = _completed(
+        stock_outlook="neutral", expected_return_tier="market_perform",
+        thesis_summary="t", key_decision_factors=[],
+    )
+    cio_stage_b = {"synthesis_narrative": "n", "expected_return_tier": "market_perform", "tax_summary": {}}
+    tax = _StubRunner(_completed(tax_profile={
+        "dividend_yield_pct": 2.4, "annual_tax_drag_pct": 0.72, "effective_after_tax_yield_pct": 1.71,
+    }))
+
+    with (
+        patch("services.orchestrator.DataPipeline") as MockPipeline,
+        patch("services.orchestrator.StockResearcherRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.FundamentalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.TechnicalAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.SentimentAnalystRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.MacroEconomistRunner", _StubRunner(_completed())),
+        patch("services.orchestrator.BullAdvocateRunner", _StubRunner(_completed(recommendation="bullish"))),
+        patch("services.orchestrator.BearAdvocateRunner", _StubRunner(_completed(recommendation="bearish"))),
+        patch("services.orchestrator.TaxStrategistRunner", tax),
+        patch("services.orchestrator.RiskAdvisorRunner", _StubRunner(_completed(risk_profile={}))),
+        patch("services.orchestrator.CIORunner", _StubRunner(cio_stage_a, stage_b_result=cio_stage_b)),
+        patch("services.orchestrator.ShadowCIORunner", _StubRunner(_completed(stock_outlook="neutral"))),
+        patch("services.orchestrator.Router") as MockRouter,
+    ):
+        MockPipeline.return_value.prepare = AsyncMock(return_value=bundle)
+        router_instance = AsyncMock()
+        router_instance.get_quote = AsyncMock(return_value={"current_price": 5800.0})
+        MockRouter.return_value.__aenter__ = AsyncMock(return_value=router_instance)
+        MockRouter.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await AnalysisOrchestrator().run(run, session)
+
+    outputs = (await session.execute(select(AgentOutput).where(AgentOutput.run_id == run.run_id))).scalars().all()
+    cio_row = next(r for r in outputs if r.agent_name == "cio_stage_b")
+    summary = cio_row.structured_output["tax_summary"]
+    assert summary["dividend_yield_pct"] == 2.4
+    assert summary["annual_tax_drag_pct"] == 0.72
+    assert summary["effective_after_tax_yield_pct"] == 1.71
