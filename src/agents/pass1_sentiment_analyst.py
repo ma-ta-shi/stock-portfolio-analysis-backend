@@ -78,7 +78,7 @@ neither `stale_data` nor `anomalies` had any existing precedent to build on.
   elevated short interest -- real signals already computed for other
   purposes, combined here for the first time.
 """
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from functools import partial
 
 from agents.base import BaseRunner
@@ -92,6 +92,7 @@ from agents.utils import (
 )
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_canadian_caveat, validate_sentiment_analyst
+from data.precompute.insider import summarize_insider_activity
 from data.schemas.data_bundle import DataBundle
 
 _INSIDER_WINDOW_DAYS = 90
@@ -149,17 +150,9 @@ def _fmt(v):
 
 
 def _insider_counts(bundle: DataBundle) -> tuple[int, int]:
-    transactions = bundle.insider_activity.get("transactions", [])
-    cutoff = (datetime.now(UTC) - timedelta(days=_INSIDER_WINDOW_DAYS)).date().isoformat()
-    qualifying = [
-        t for t in transactions
-        if t.get("date") and t["date"] >= cutoff
-        and not t.get("is_issuer")
-        and t.get("transaction_type") in ("purchase", "sale")
-    ]
-    buys = sum(1 for t in qualifying if t["transaction_type"] == "purchase")
-    sells = sum(1 for t in qualifying if t["transaction_type"] == "sale")
-    return buys, sells
+    """Qualifying insider purchases and sales in the window; the row filter lives in summarize_insider_activity."""
+    summary = summarize_insider_activity(bundle.insider_activity.get("transactions", []), None)
+    return summary["buy_count"], summary["sell_count"]
 
 
 def _stale_data(bundle: DataBundle) -> list[str]:
@@ -326,7 +319,9 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     if flags is not None:
         canadian_flag = "\nCANADIAN DATA LIMITED: true — Finnhub analyst upgrade/downgrade data unavailable, article sentiment scored from headlines only."
 
-    buys_90d, sells_90d = _insider_counts(bundle)
+    insider_activity = summarize_insider_activity(
+        bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap")
+    )["text"]
     news = _news_block(bundle)
     analyst_activity = _analyst_activity_block(bundle)
     short_interest = _short_interest_block(bundle)
@@ -345,8 +340,7 @@ ANALYST ACTIVITY (ANALYST):
   Analyst count: {_fmt(bundle.analyst_consensus.get('num_analysts'))}
 
 INSIDER ACTIVITY (INSIDER / SIGNALS):
-  Insider buys (90d): {buys_90d}
-  Insider sells (90d): {sells_90d}
+  Insider activity (90d): {insider_activity}
 
 SHORT INTEREST (SHORT):
 {short_interest.text}

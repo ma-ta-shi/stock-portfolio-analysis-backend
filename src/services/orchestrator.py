@@ -66,6 +66,7 @@ from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
 from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile
+from data.precompute.insider import summarize_insider_activity
 from data.degradation import DegradationCollector, reset_collector, set_collector
 from data.pipeline import DataPipeline
 from data.precompute.tax_metrics import AccountStateInput, UserTaxProfileInput
@@ -118,6 +119,15 @@ _NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b
 _NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
 
 
+def _pe_vs_peer_median_pct(pe: float | None, median: float | None) -> float | None:
+    """P/E premium (+) or discount (-) to the peer median in percent, computed here so the Pass 2 agents
+    copy the direction instead of working it out (a real MSFT Bear run wrote "a 28.6x P/E sits far above the
+    peer median of 62.8"). None unless both are positive numbers."""
+    if not isinstance(pe, (int, float)) or not isinstance(median, (int, float)) or pe <= 0 or median <= 0:
+        return None
+    return round((pe / median - 1) * 100, 1)
+
+
 def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     """Per-agent orchestrator-owned field slices for agents/pass2_view.py's
     build_pass2_view() -- the fields each Pass 1 agent's own prompt never
@@ -130,6 +140,10 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     prof = bundle.profitability_metrics
     bal = bundle.balance_sheet_metrics
     sector_medians = bundle.peer_metrics.get("sector_medians", {})
+    peer_records = bundle.peer_metrics.get("peer_records", [])
+    insider = summarize_insider_activity(
+        bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap")
+    )
     ti = bundle.technical_indicators
     sr = bundle.support_resistance
     m = bundle.macro_sources
@@ -138,7 +152,11 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
         "FUND": {
             "pe_ratio": fund.get("pe_ratio"),
             "margin_trend": prof.get("margin_trend"),
-            "sector_pe_median": sector_medians.get("sector_median_pe"),
+            # Not a sector benchmark: the median of the 2-5 named peers that have a P/E (MSFT's "Technology
+            # median" of 61.85 was one cybersecurity peer). The count lets the Pass 2 agents say so.
+            "peer_pe_median": sector_medians.get("sector_median_pe"),
+            "peer_pe_count": sum(1 for p in peer_records if p.get("pe_ratio") is not None),
+            "pe_vs_peer_median_pct": _pe_vs_peer_median_pct(fund.get("pe_ratio"), sector_medians.get("sector_median_pe")),
             "roe": prof.get("roe"),
             "debt_to_equity": bal.get("debt_to_equity"),
             "net_margin": prof.get("net_margin"),
@@ -146,6 +164,10 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
             "revenue_growth_yoy": growth.get("revenue_growth_yoy"),
             "revenue_growth_3yr_cagr": growth.get("revenue_growth_3yr_cagr"),
             "fcf_to_net_income": prof.get("fcf_to_net_income"),
+        },
+        "SENT": {
+            "insider_activity_90d": insider["text"],
+            "insider_materiality": insider["materiality"],
         },
         "TECH": {
             "nearest_support": sr.get("nearest_support"),
@@ -1369,7 +1391,8 @@ class AnalysisOrchestrator:
                     user_tax_profile=user_tax_profile,
                 )
             else:
-                coro = runner.run(bundle, compressed, run.account_type)
+                # Bull and Bear are account-neutral: one result per ticker and timeline.
+                coro = runner.run(bundle, compressed)
             return await _run_contained("pass2", agent_id, coro)
 
         results = await asyncio.gather(

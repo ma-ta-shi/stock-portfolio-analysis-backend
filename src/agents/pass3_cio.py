@@ -149,7 +149,16 @@ def build_advocate_summary(output: dict | None, label: str) -> str:
     ]
     sd = output.get("structured_data", {})
     if sd.get("core_arguments"):
-        lines.append(f"  core_arguments: {json.dumps([a['argument'] for a in sd['core_arguments']])}")
+        # Each argument with its strength and the evidence behind it (the design's
+        # format_advocate_for_cio passes the whole object; the first port kept only the claim, so
+        # the CIO weighed claims stripped of their figures).
+        lines.append("  core_arguments:")
+        for arg in sd["core_arguments"]:
+            if isinstance(arg, dict):
+                lines.append(
+                    f"    - [{arg.get('strength', 'N/A')}] {arg.get('argument', '')} | "
+                    f"evidence: {arg.get('evidence', '')}"
+                )
 
     if label == "BULL":
         if sd.get("catalysts"):
@@ -196,6 +205,18 @@ def build_advocate_summary(output: dict | None, label: str) -> str:
                 f"alignment={alignment_str} | "
                 f"reason: {taa.get('disagreement_note', '')}"
             )
+    # The rest of what the design specifies for the advocate block and the first port dropped: the
+    # asymmetry read, the advocate's own data caveats and its written case. The narrative is supporting
+    # detail (the structured fields above stay authoritative), the way the Tax narrative is shown.
+    asymmetry = str(sd.get("asymmetry_assessment") or "").strip()
+    if asymmetry:
+        lines.append(f"  asymmetry_assessment: {asymmetry}")
+    caveats = [str(c) for c in (output.get("caveats") or []) if str(c).strip()]
+    if caveats:
+        lines.append(f"  caveats: {'; '.join(caveats)}")
+    narrative = str(output.get("narrative") or "").strip()
+    if narrative:
+        lines.append(f"  narrative (supporting detail; the structured fields above are authoritative): {narrative}")
     return "\n".join(lines)
 
 

@@ -18,20 +18,11 @@ from agents.validators.pass2 import validate_bear_advocate
 from data.schemas.data_bundle import DataBundle
 
 
-def build_user_message(
-    bundle: DataBundle,
-    compressed_pass1: dict,
-    account_type: str | None = None,
-) -> str:
-    base = build_pass2_user_message(bundle, compressed_pass1, account_type)
-    confidence_levels = extract_confidence_levels(compressed_pass1)
-    quality_levels = extract_data_quality_levels(compressed_pass1)
-    warnings = build_pass1_reliability_warnings(confidence_levels, agent_quality=quality_levels)
-    if warnings:
-        base += f"\n\nRELIABILITY WARNINGS: {warnings}"
-    ctx = bundle.context
-    base += f"\nFOCUS: {ctx.timeline} | ACCOUNT: {account_type or ctx.account_type}"
-    return base
+def build_user_message(bundle: DataBundle, compressed_pass1: dict) -> str:
+    """The Pass 1 summaries only, and account-neutral: Bear is one result per ticker and timeline, shared
+    by every account's CIO run. The warnings are in the system prompt (they used to be appended here too)
+    and the account used to be named in a FOCUS line the prompt never uses."""
+    return build_pass2_user_message(bundle, compressed_pass1, account_neutral=True)
 
 
 class BearAdvocateRunner(BaseRunner):
@@ -39,11 +30,10 @@ class BearAdvocateRunner(BaseRunner):
         self,
         bundle: DataBundle,
         compressed_pass1: dict,
-        account_type: str | None = None,
     ) -> tuple[dict, list[str]]:
         self.current_agent = "bear"
         ctx = bundle.context
-        user_msg = build_user_message(bundle, compressed_pass1, account_type)
+        user_msg = build_user_message(bundle, compressed_pass1)
         confidence_levels = extract_confidence_levels(compressed_pass1)
         # 86bbummwp Tier 3 -- see pass2_bull_advocate.py's own comment on this
         # same addition for why both signals are shown, never collapsed.

@@ -340,3 +340,47 @@ async def test_stage_b_prompt_is_filled_without_a_risk_advisor_input_or_sizing()
     assert "RISK ADVISOR" not in system
     assert "position_sizing_recommendation" not in system.split("Produce valid JSON")[1]
     assert "risk_profile_summary" not in system
+
+
+# ---------- advocate summary: the design's fields the first port dropped ----------
+
+
+def _bull_with_detail() -> dict:
+    return {
+        "recommendation": "bullish", "confidence": 68, "thesis_summary": "Steady compounder.",
+        "strongest_argument": "FCF conversion near 1.0 (FUND).", "weakest_point": "Distribution spend (RSRCH).",
+        "caveats": ["RSRCH confidence is medium."],
+        "narrative": "Coca-Cola converts almost all net income into free cash flow (FUND).",
+        "structured_data": {
+            "core_arguments": [
+                {"argument": "Cash conversion", "strength": "primary", "evidence": "FUND: fcf_to_net_income 0.9987"},
+                {"argument": "Brand moat", "strength": "secondary", "evidence": "RSRCH: moat_trend strengthening"},
+            ],
+            "asymmetry_assessment": "Modest upside, limited downside.",
+        },
+    }
+
+
+def test_advocate_summary_shows_each_core_argument_with_its_strength_and_evidence():
+    summary = build_advocate_summary(_bull_with_detail(), "BULL")
+    assert "- [primary] Cash conversion | evidence: FUND: fcf_to_net_income 0.9987" in summary
+    assert "- [secondary] Brand moat | evidence: RSRCH: moat_trend strengthening" in summary
+
+
+def test_advocate_summary_carries_the_asymmetry_caveats_and_labelled_narrative_last():
+    summary = build_advocate_summary(_bull_with_detail(), "BULL")
+    assert "asymmetry_assessment: Modest upside, limited downside." in summary
+    assert "caveats: RSRCH confidence is medium." in summary
+    assert "narrative (supporting detail; the structured fields above are authoritative): Coca-Cola converts" in summary
+    assert summary.rindex("narrative (supporting detail") > summary.index("core_arguments:")
+
+
+def test_advocate_summary_omits_what_the_advocate_did_not_produce():
+    summary = build_advocate_summary({"recommendation": "bearish", "confidence": 30, "thesis_summary": "t"}, "BEAR")
+    assert "narrative" not in summary and "caveats" not in summary and "asymmetry" not in summary
+
+
+def test_the_shadow_cio_gets_the_same_advocate_detail():
+    from agents import pass3_shadow_cio
+
+    assert "narrative (supporting detail" in pass3_shadow_cio.build_advocate_summary(_bull_with_detail(), "BULL")

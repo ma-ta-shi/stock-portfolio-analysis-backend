@@ -280,11 +280,11 @@ def validate_bull_advocate(
             if not _has_pass1_agent_id(ev) and not ev.strip().startswith("thesis assumption:"):
                 errors.append(f"thesis_risks[{i}].evidence: must cite Pass 1 agent ID or start with 'thesis assumption:'")
 
-    # narrative: 1500-2800 chars, must reference >=3 distinct Pass 1 agents
+    # narrative: 1000-2800 chars, must reference >=3 distinct Pass 1 agents
     narrative = output.get("narrative", "")
     nc = char_count(narrative)
-    if nc < 1500:
-        errors.append(f"narrative: too short ({nc} chars, min 1500)")
+    if nc < 1000:
+        errors.append(f"narrative: too short ({nc} chars, min 1000)")
     if nc > 2800:
         errors.append(f"narrative: too long ({nc} chars, max 2800)")
     agents_in_narrative = [aid for aid in PASS1_AGENT_IDS if aid in narrative]
@@ -311,68 +311,8 @@ def validate_bull_advocate(
         # market_misreads: 1-3
         _check_array_bounds(sd, "market_misreads", 1, 3, errors)
 
-        # historical_analogy: required field
-        ha = sd.get("historical_analogy", {})
-        if not isinstance(ha, dict):
-            errors.append("structured_data.historical_analogy: must be a dict")
-        else:
-            company = ha.get("company", "")
-            analogy_fit = ha.get("analogy_fit", "")
-            # analogy_fit's own declared vocabulary (strong|moderate|weak|none) was never
-            # range-checked below -- only the "weak is inadmissible" business rule and the
-            # none_found special case were, so an out-of-vocabulary value (e.g. "excellent")
-            # passed silently. Same gap class as competitive_position/management_assessment/
-            # alignment_with_researcher, found the same way.
-            #
-            # The non-none branch (company != "none_found", analogy_fit in strong|moderate) has
-            # never been observed live, across 34 real gpt-oss:20b samples: all 7 original harness
-            # fixtures (86bbuhk82) PLUS scenario_08_business_model_transition.json -- a fixture
-            # purpose-built to closely mirror a specific, well-documented real-world precedent
-            # (a company mid-transition from perpetual-license to subscription revenue, ARR
-            # growing while reported revenue mechanically declines).
-            #
-            # NOT attributed to the model -- traced the scenario_08 run end to end and found the
-            # actual cause is the harness's stale D6 reliability_score/data_quality_assessment
-            # defaulting bug (86bbummwp), not the model or this fixture. RSRCH's raw output
-            # correctly omitted reliability_score (current prompt doesn't ask for it) and,
-            # unlike the other 4 agents that happened to fabricate a plausible value on retry,
-            # terminally failed -- so compress_pass1_outputs() defaulted it to
-            # reliability_score=0/data_quality_assessment="insufficient". RSRCH's narrative (the
-            # ONLY source carrying the license-to-subscription story) reached the compressed view
-            # intact, but build_pass1_reliability_warnings() rendered "RSRCH: 0 (skipped)" into
-            # Bull Advocate's actual prompt from that same 0 default. Bull's real output caveat
-            # confirms it: "RSRCH reliability 0/100; key qualitative insights are unverified." The
-            # model correctly discounted a source it was told (falsely, by the harness) was
-            # unreliable, then correctly fell back to the prompt's own "if in doubt, none_found"
-            # default given what it had been told -- not a model or prompt defect.
-            #
-            # UPDATE (86bbummwp landed and was re-tested): re-ran scenario_08 through Pass 1 +
-            # Bull Advocate after the fix. Zero "Missing required field" errors on any of the 5
-            # Pass 1 agents this time, and Bull Advocate ran with ZERO validation errors on first
-            # attempt (previously it had to retry past the false "RSRCH: 0 (skipped)" discount).
-            # Result: still "none_found"/"none" -- but now a CLEAN read, not a confounded one.
-            # 35 real samples total (the prior 34 plus this clean re-run), zero non-none. This is
-            # now genuine evidence the non-none branch is rare/hard to trigger with the current
-            # model and fixture set, not an artifact of the harness bug -- the bug explained one
-            # bad data point, not the whole pattern. Still not enough to call the branch
-            # unreachable (see the mechanism-only claim above); a fixture with an even more
-            # forceful real-world analogy trigger, or more scenario variety, would be the next
-            # step if this is ever worth chasing further.
-            if analogy_fit not in {"strong", "moderate", "weak", "none", "", None}:
-                errors.append(
-                    f"historical_analogy.analogy_fit: must be one of strong|moderate|weak|none, "
-                    f"got {analogy_fit!r}"
-                )
-            if company == "none_found":
-                if analogy_fit not in {"none", None, ""}:
-                    errors.append(
-                        f"historical_analogy: company='none_found' but analogy_fit='{analogy_fit}' (should be 'none')"
-                    )
-            elif company:
-                if analogy_fit == "weak":
-                    errors.append(
-                        "historical_analogy: analogy_fit='weak' is inadmissible — must be 'strong' or 'moderate'"
-                    )
+        # historical_analogy was removed 2026-10-02: 76 of 76 saved outputs were `none_found`, nothing read it,
+        # and it needs facts the Pass 1 payload does not contain. A stray one is ignored, not rejected.
 
         # thesis_archetype_alignment
         ta = sd.get("thesis_archetype_alignment", {})
@@ -492,11 +432,11 @@ def validate_bear_advocate(
 
     _check_array_bounds(output, "thesis_risks", 1, 3, errors)
 
-    # narrative: 1500-2800 chars, >=3 distinct Pass 1 agents
+    # narrative: 1000-2800 chars, >=3 distinct Pass 1 agents
     narrative = output.get("narrative", "")
     nc = char_count(narrative)
-    if nc < 1500:
-        errors.append(f"narrative: too short ({nc} chars, min 1500)")
+    if nc < 1000:
+        errors.append(f"narrative: too short ({nc} chars, min 1000)")
     if nc > 2800:
         errors.append(f"narrative: too long ({nc} chars, max 2800)")
     agents_in_narrative = [aid for aid in PASS1_AGENT_IDS if aid in narrative]
