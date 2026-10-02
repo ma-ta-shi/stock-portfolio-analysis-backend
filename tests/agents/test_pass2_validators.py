@@ -53,7 +53,6 @@ def _valid_bull_output() -> dict:
             "market_misreads": [
                 {"misread": "Market is underweighting the AI copilot attach rate as a durable revenue stream vs. a feature", "why_this_persists": "AI monetization remains unproven across most software companies.", "supporting_pass1_agents": ["RSRCH", "SENT"], "evidence": "RSRCH: 2,400 activations well ahead of plan; SENT: analyst coverage still not pricing AI attach revenue"},
             ],
-            "historical_analogy": {"company": "none_found", "period": "n/a", "situation_match": "", "key_differences": "", "outcome_cited": "", "analogy_fit": "none"},
             "thesis_archetype_alignment": {
                 "researcher_archetype": "quality_compounder",
                 "bull_archetype": "quality_compounder",
@@ -143,20 +142,6 @@ class TestBullAdvocate:
         assert not passed
         assert any("primary" in e for e in errors)
 
-    def test_weak_analogy_fails(self):
-        out = _valid_bull_output()
-        out["structured_data"]["historical_analogy"] = {
-            "company": "SomeRealCo",
-            "period": "2018-2021",
-            "situation_match": "Similar growth profile.",
-            "key_differences": "Different sector.",
-            "outcome_cited": "+150% in 3 years.",
-            "analogy_fit": "weak",  # inadmissible
-        }
-        passed, errors = validate_bull_advocate(out)
-        assert not passed
-        assert any("weak" in e for e in errors)
-
     def test_invalid_archetype_fails(self):
         out = _valid_bull_output()
         out["structured_data"]["thesis_archetype_alignment"]["bull_archetype"] = "growth_compounder"
@@ -187,12 +172,12 @@ class TestBullAdvocate:
         passed, errors = validate_bull_advocate(out)
         assert passed, errors
 
-    def test_invalid_analogy_fit_fails(self):
+    def test_historical_analogy_is_gone_and_a_stray_one_is_ignored(self):
         out = _valid_bull_output()
-        out["structured_data"]["historical_analogy"]["analogy_fit"] = "excellent"
-        passed, errors = validate_bull_advocate(out)
-        assert not passed
-        assert any("analogy_fit" in e for e in errors)
+        assert "historical_analogy" not in out["structured_data"]
+        assert validate_bull_advocate(out)[0]
+        out["structured_data"]["historical_analogy"] = {"company": "SomeRealCo", "analogy_fit": "weak"}
+        assert validate_bull_advocate(out)[0]
 
 
 # ─── Bear Advocate Tests ──────────────────────────────────────────────────────
