@@ -214,19 +214,30 @@ def build_risk_advisor_stage_a_summary(risk_output: dict | None) -> str:
         "\nRISK ADVISOR:",
         f"  groundedness_score: {risk_output.get('groundedness_score', 0)}/100 (data quality, NOT directional)",
         f"  risk_reward_ratio: {rp.get('risk_reward_ratio', 'N/A')} (use as directional proxy)",
+        f"  volatility_assessment: {rp.get('volatility_assessment', 'N/A')}",
         f"  beta: {rp.get('beta', 'N/A')} | max_drawdown_1yr: {rp.get('max_drawdown_1yr', 'N/A')}%",
-        f"  position_size_recommendation: {rp.get('position_size_recommendation', 'N/A')}",
-        f"  concentration_risk: {rp.get('concentration_risk', 'N/A')} | liquidity_risk: {rp.get('liquidity_risk', 'N/A')}",
         f"  thesis_summary: {risk_output.get('thesis_summary', '')}",
         # 86bbt1k1p: real, validator-enforced, cited signal from Risk's existing Stage A
         # call -- previously dropped entirely.
         f"  strongest_signal: {risk_output.get('strongest_signal', '')}",
     ]
     if rp.get("downside_scenarios"):
+        # The CIO's stage A prompt treats these "as a probability-weighted distribution", so each
+        # scenario carries its probability and timeline (they used to be dropped).
         scenarios_summary = "; ".join(
-            f"{s['scenario']} ({s['estimated_impact_pct']}%)" for s in rp["downside_scenarios"]
+            f"{s.get('scenario', '')} ({s.get('estimated_impact_pct', 'N/A')}%, "
+            f"{s.get('probability', 'N/A')} probability, {s.get('timeline', 'N/A')})"
+            for s in rp["downside_scenarios"]
+            if isinstance(s, dict)
         )
         lines.append(f"  downside_scenarios: {scenarios_summary}")
+    # Only when there is something to say (a clean run carries neither).
+    flags = [str(f) for f in (rp.get("data_sanity_flags") or []) if str(f).strip()]
+    if flags:
+        lines.append(f"  data_sanity_flags: {'; '.join(flags)}")
+    caveats = [str(c) for c in (risk_output.get("caveats") or []) if str(c).strip()]
+    if caveats:
+        lines.append(f"  caveats: {'; '.join(caveats)}")
     return "\n".join(lines)
 
 
