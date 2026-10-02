@@ -61,11 +61,13 @@ from agents.validators.common import (
     GROUNDEDNESS_HIGH_THRESHOLD,
     validate_confidence_requires_caveat_when_flagged,
 )
-from agents.validators.pass2 import validate_tax_strategist
+from agents.validators.pass2 import validate_tax_against_expectation, validate_tax_strategist
 from data.precompute.tax_metrics import (
     AccountStateInput,
     UserTaxProfileInput,
+    TaxExpectation,
     build_tax_metrics_field,
+    compute_tax_expectation,
     load_tax_rules_reference,
 )
 from data.schemas.data_bundle import DataBundle
@@ -176,7 +178,10 @@ def _room_present(tax_metrics_text: str, account_type: str) -> bool:
 
 
 def _validate_with_caveats(
-    output: dict, material_absent: list[str], account_type: str
+    output: dict,
+    material_absent: list[str],
+    account_type: str,
+    expectation: TaxExpectation | None = None,
 ) -> tuple[bool, list[str]]:
     """Composing validator (86bbummwp follow-on) -- Tax Strategist previously
     called `validate_tax_strategist` bare, never supplying `account_type`
@@ -199,6 +204,12 @@ def _validate_with_caveats(
     (shared with Risk Advisor, `validators/common.py`) for why 85 is a
     starting guess, not a verified number."""
     passed, errors = validate_tax_strategist(output, account_type=account_type)
+    if expectation is not None:
+        # The code decides the numbers and the verdict (fit, efficiency, cross-account move); the model
+        # must copy them. Part of the same retry loop as every other check.
+        expectation_errors = validate_tax_against_expectation(output, expectation)
+        passed = passed and not expectation_errors
+        errors = errors + expectation_errors
     gs = output.get("groundedness_score")
     cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
         output,
@@ -319,10 +330,18 @@ class TaxStrategistRunner(BaseRunner):
         material_absent = [
             k for k, v in field_presence.items() if not v and k not in excluded_when_absent
         ]
+        expectation = compute_tax_expectation(
+            bundle.stock.ticker, acct, bundle, user_tax_profile
+        )
         result, errors = await self.call_with_validation(
             system_prompt,
             user_msg,
-            partial(_validate_with_caveats, material_absent=material_absent, account_type=acct),
+            partial(
+                _validate_with_caveats,
+                material_absent=material_absent,
+                account_type=acct,
+                expectation=expectation,
+            ),
             max_tokens=4000,
             temperature=0.3,
         )

@@ -9,14 +9,17 @@ from data.precompute.tax_metrics import (
     CGAIN_BY_ACCOUNT,
     WHT_GRID,
     TaxReferenceUnavailable,
-    build_alternatives_line,
     build_precomputed_tax_metrics,
     build_tax_metrics_field,
     build_tax_rule_snapshot,
+    _EFFICIENCY_BY_FIT,
+    _fit_label,
     classify_dividend,
-    compute_effective_after_tax_yield,
+    compute_account_verdict,
+    compute_eligible_dividend_tax_rate,
     compute_marginal_tax_rate,
     compute_trailing_dividend,
+    dividend_tax_rate_pct,
     is_canadian_dual_listed,
     load_tax_rules_reference,
     resolve_withholding,
@@ -252,35 +255,6 @@ def test_wht_grid_has_exactly_the_modelled_entries():
     assert len(WHT_GRID) == 8
 
 
-# --- compute_effective_after_tax_yield ---
-
-
-def test_compute_effective_after_tax_yield_matches_prompt_testing_checklist():
-    """The live prompt's own testing checklist: drag_delta_pct ≈
-    -(yield × 0.15) for a 15%-WHT US dividend in a TFSA. Uses 2.0% yield,
-    not 3.0% - the latter's exact drag (0.45) sits on a floating-point
-    rounding boundary (confirmed live: round(0.45, 1) == 0.5 in Python,
-    a representation quirk, not a production bug) - picking a
-    non-boundary value tests the same formula without that noise."""
-    effective, drag = compute_effective_after_tax_yield(2.0, 15.0)
-    assert drag == pytest.approx(0.3)
-    assert effective == pytest.approx(1.7)
-
-
-def test_compute_effective_after_tax_yield_none_when_no_dividend():
-    assert compute_effective_after_tax_yield(None, 15.0) == (None, None)
-
-
-def test_compute_effective_after_tax_yield_none_when_not_modelled():
-    assert compute_effective_after_tax_yield(3.0, None) == (None, None)
-
-
-def test_compute_effective_after_tax_yield_zero_wht():
-    effective, drag = compute_effective_after_tax_yield(4.0, 0.0)
-    assert effective == 4.0
-    assert drag == 0.0
-
-
 # --- CGAIN_BY_ACCOUNT ---
 
 
@@ -328,10 +302,10 @@ def test_is_canadian_dual_listed_known_miss_for_us_side_of_real_pair(monkeypatch
 def test_load_tax_rules_reference_against_the_real_shipped_file():
     """Real call against the actual, already-committed reference file -
     confirms the real header parses, not a fixture standing in for it.
-    Date updated 86bc8efkg (PR #73) -- real 2026 CRA data refresh, no longer
+    Date updated 2026-10-01 (Ontario eligible-dividend credit added; earlier 86bc8efkg (PR #73) real 2026 CRA data refresh, no longer
     the stale 2026-03-01 placeholder."""
     text, last_verified = load_tax_rules_reference()
-    assert last_verified == date(2026, 9, 28)
+    assert last_verified == date(2026, 10, 1)
     assert "Withholding tax grid" in text
 
 
@@ -368,11 +342,14 @@ def test_build_precomputed_tax_metrics_ca_ordinary_full_render():
         [_div_record(_days_ago(d), 1.5) for d in (10, 100, 190, 280)],
         100.0,
     )
-    block = build_precomputed_tax_metrics("RY.TO", "trading", bundle)
+    block = build_precomputed_tax_metrics(
+        "RY.TO", "trading", bundle, user_tax_profile={"province": "ON", "income_annual": 85000.0}
+    )
     assert "DIVID: 6.0% yield, 4 payments/yr" in block
     assert "ELIG: canadian_eligible" in block
     assert "WHT (this account, trading): 0.0%" in block
     assert "not modelled" not in block.lower()
+    assert "TAXCOST (this account, trading): annual dividend tax 0.38% of the holding" in block
 
 
 def test_build_precomputed_tax_metrics_ca_reit_registered_account_not_not_modelled():
@@ -936,68 +913,180 @@ def _us_payer(price: float = 100.0, quarterly: float = 0.6) -> SimpleNamespace:
     )
 
 
-def test_after_tax_lines_sit_under_the_wht_token_not_unlabelled_line_names():
-    """The old `Effective after-tax yield:` / `Annual tax drag:` lines carried no token
-    name, so the model cited the line label, which the validator does not accept."""
-    block = build_precomputed_tax_metrics("KO", "tfsa", _us_payer())
-    assert "WHT: effective after-tax yield 2.0%" in block
-    assert "WHT: annual tax drag 0.4%" in block
-    assert "Effective after-tax yield:" not in block
-    assert "Annual tax drag:" not in block
-
-
-def test_alternatives_line_gives_the_drag_in_every_modelled_account_from_the_grid():
+def test_the_tax_lines_use_the_taxcost_token_not_unlabelled_line_names():
+    """The old `Effective after-tax yield:` / `Annual tax drag:` lines carried no token name, so the
+    model cited the line label, which the validator does not accept; and the later WHT-labelled
+    versions counted withholding only (wrong in a Trading account)."""
     block = build_precomputed_tax_metrics("KO", "tfsa", _us_payer())
     assert (
-        "ALTERNATIVES (withholding drag on this dividend if held in): "
-        "tfsa 0.4% (non-recoverable) | rrsp 0.0% (treaty Art. XVIII exemption) | "
-        "trading 0.4% (recoverable as a foreign tax credit)"
+        "TAXCOST (this account, tfsa): annual dividend tax 0.36% of the holding (15% withholding, "
+        "non-recoverable); yield after annual dividend tax 2.04%"
     ) in block
+    assert "TAXCOST verdict: fit=good, efficiency=favorable" in block
+    assert "WHT: effective after-tax yield" not in block and "WHT: annual tax drag" not in block
+    assert "Effective after-tax yield:" not in block and "Annual tax drag:" not in block
 
 
-def test_alternatives_line_is_the_same_whichever_account_is_analysed():
-    lines = {
-        account: next(
-            line
-            for line in build_precomputed_tax_metrics("KO", account, _us_payer()).splitlines()
-            if line.startswith("ALTERNATIVES")
-        )
-        for account in ("tfsa", "rrsp", "trading")
-    }
-    assert len(set(lines.values())) == 1
+_PROFILE = {"province": "ON", "income_annual": 85000.0}
 
 
-def test_alternatives_line_canadian_eligible_dividend_is_zero_everywhere():
-    bundle = _fake_bundle(
+def test_the_block_assesses_this_account_only_and_never_compares_accounts():
+    for account in ("tfsa", "rrsp", "trading"):
+        block = build_precomputed_tax_metrics("KO", account, _us_payer(), user_tax_profile=_PROFILE)
+        assert "ALTERNATIVES" not in block and "better_account" not in block and "cross_account" not in block
+        assert sum(line.startswith("TAXCOST (this account") for line in block.splitlines()) == 1
+
+
+def test_us_dividend_in_trading_is_taxed_as_income():
+    block = build_precomputed_tax_metrics("KO", "trading", _us_payer(), user_tax_profile=_PROFILE)
+    # 2.4% x 29.65%: the 15% withholding is credited against the Canadian tax on the dividend
+    assert "annual dividend tax 0.71% of the holding (ordinary income at 29.65%; the 15% withholding is credited" in block
+    assert "yield after annual dividend tax 1.69%" in block
+    assert "TAXCOST verdict: fit=fair, efficiency=neutral" in block
+
+
+def test_us_dividend_in_an_rrsp_has_no_annual_tax():
+    block = build_precomputed_tax_metrics("KO", "rrsp", _us_payer(), user_tax_profile=_PROFILE)
+    assert "annual dividend tax 0.00% of the holding (no annual tax; later withdrawals taxed as ordinary income, not scored)" in block
+    assert "TAXCOST verdict: fit=excellent, efficiency=favorable" in block
+
+
+def _td_bundle():
+    return _fake_bundle(
         _company_info(name="Toronto-Dominion Bank", industry="Banking"),
         [_div_record(_days_ago(d * 90 + 10), 1.05) for d in range(4)],
         165.0,
     )
-    block = build_precomputed_tax_metrics("TD.TO", "trading", bundle)
-    assert (
-        "tfsa 0.0% (no withholding) | rrsp 0.0% (no withholding) | "
-        "trading 0.0% (no withholding; eligible for the dividend tax credit)"
-    ) in block
 
 
-def test_alternatives_line_lists_only_the_accounts_the_grid_models():
-    """A Canadian REIT is modelled for the two registered accounts only (trading is
-    deliberately absent from WHT_GRID), so the line must not invent a trading entry."""
-    line = build_alternatives_line("trust_distribution", 5.0)
-    assert line is not None
-    assert "tfsa 0.0%" in line and "rrsp 0.0%" in line
-    assert "trading" not in line
+def test_canadian_eligible_dividend_in_trading_is_taxed_after_the_credit():
+    block = build_precomputed_tax_metrics("TD.TO", "trading", _td_bundle(), user_tax_profile=_PROFILE)
+    # 4 x 1.05 / 165 = 2.545% yield x 6.39% eligible-dividend rate = 0.16
+    assert "annual dividend tax 0.16% of the holding (6.39% after the dividend tax credit)" in block
+    assert "TAXCOST verdict: fit=good, efficiency=favorable" in block
 
 
-@pytest.mark.parametrize("classification", ["us_reit", "limited_partnership", "adr"])
-def test_alternatives_line_absent_when_the_grid_does_not_model_the_classification(
-    classification,
-):
-    assert build_alternatives_line(classification, 4.0) is None
+def test_canadian_dividend_in_trading_without_income_is_not_computed_with_fixed_defaults():
+    block = build_precomputed_tax_metrics("TD.TO", "trading", _td_bundle())
+    assert "TAXCOST verdict: not computed (the eligible-dividend rate needs the province and income" in block
+    assert "use fit=fair, efficiency=neutral" in block
+    assert "TAXCOST (this account" not in block
 
 
-def test_alternatives_line_absent_without_a_dividend():
-    assert build_alternatives_line("us", None) is None
+def test_a_class_outside_the_grid_is_not_computed():
+    bundle = _fake_bundle(
+        _company_info(name="Alibaba Group Holding Limited", industry="Specialty Retail", country="CN"),
+        [_div_record(_days_ago(d * 90 + 10), 0.5) for d in range(4)],
+        100.0,
+    )
+    block = build_precomputed_tax_metrics("BABA", "tfsa", bundle, user_tax_profile=_PROFILE)
+    assert "TAXCOST verdict: not computed" in block
+
+
+def test_no_dividend_has_the_best_fit_the_account_allows():
+    bundle = _fake_bundle(_company_info(name="Shopify Inc", industry="Software"), [], 100.0)
+    for account, fit, eff in (("tfsa", "excellent", "favorable"), ("rrsp", "excellent", "favorable"), ("trading", "good", "favorable")):
+        block = build_precomputed_tax_metrics("SHOP", account, bundle, user_tax_profile=_PROFILE)
+        assert f"TAXCOST verdict: fit={fit}, efficiency={eff}" in block
+        assert "the annual dividend tax is 0.00% in this account" in block
+
+
+# --- the model itself: numbers worked out from the published brackets, not from the code ---
+
+
+def test_eligible_dividend_rate_matches_hand_calculation_and_the_published_top_rate():
+    # $85,000: federal 20.5%, Ontario 9.15%, no surtax. 1.38 x (20.5 - 15.0198) + 1.38 x (9.15 - 10) = 6.39
+    assert compute_eligible_dividend_tax_rate("ON", 85000.0) == 6.39
+    # Top bracket: 1.38 x (33 - 15.0198) + 1.38 x (13.16 x 1.56 - 10) = 39.34, the published Ontario top
+    # rate on eligible dividends.
+    assert compute_eligible_dividend_tax_rate("ON", 300000.0) == 39.34
+    # Low income: the credits exceed the tax; they are non-refundable, so the rate is floored at zero.
+    assert compute_eligible_dividend_tax_rate("ON", 40000.0) == 0.0
+
+
+@pytest.mark.parametrize(
+    "province, income, override",
+    [("ON", None, None), (None, 85000.0, None), ("BC", 85000.0, None), ("ON", 85000.0, 30.0)],
+)
+def test_eligible_dividend_rate_is_not_modelled_without_inputs_or_with_an_override(province, income, override):
+    assert compute_eligible_dividend_tax_rate(province, income, override) is None
+
+
+@pytest.mark.parametrize(
+    "classification, account, marg, elig, expected",
+    [
+        ("us", "tfsa", 29.65, 6.39, 15.0),
+        ("us", "rrsp", 29.65, 6.39, 0.0),
+        ("us", "trading", 29.65, 6.39, 29.65),
+        ("us", "trading", 10.0, 6.39, 15.0),  # the withholding exceeds the Canadian tax: 15% stays
+        ("us", "trading", None, 6.39, None),
+        ("canadian_eligible", "tfsa", None, None, 0.0),
+        ("canadian_eligible", "rrsp", None, None, 0.0),
+        ("canadian_eligible", "trading", 29.65, 6.39, 6.39),
+        ("canadian_eligible", "trading", 29.65, None, None),
+        ("trust_distribution", "tfsa", None, None, 0.0),
+        ("trust_distribution", "trading", 29.65, 6.39, None),
+        ("us_reit", "tfsa", 29.65, 6.39, None),
+    ],
+)
+def test_dividend_tax_rate_by_class_and_account(classification, account, marg, elig, expected):
+    result = dividend_tax_rate_pct(classification, account, marg, elig)
+    assert (None if result is None else result[0]) == expected
+
+
+_M, _E = 29.65, 6.39
+
+
+def _verdict(account, classification, yield_pct):
+    return compute_account_verdict(account, classification, yield_pct, _M, _E)
+
+
+@pytest.mark.parametrize(
+    "classification, yield_pct, account, cost, fit, efficiency",
+    [
+        ("us", 2.43, "tfsa", 0.36, "good", "favorable"),  # KO
+        ("us", 2.43, "rrsp", 0.00, "excellent", "favorable"),
+        ("us", 2.43, "trading", 0.72, "fair", "neutral"),
+        ("us", 0.7, "tfsa", 0.10, "excellent", "favorable"),  # MSFT: 0.105 rounds into the top band
+        ("us", 0.7, "trading", 0.21, "good", "favorable"),
+        ("canadian_eligible", 5.8, "rrsp", 0.00, "excellent", "favorable"),  # ENB
+        ("canadian_eligible", 5.8, "trading", 0.37, "good", "favorable"),
+        ("canadian_eligible", 2.6, "trading", 0.17, "good", "favorable"),  # TD
+        ("us", 6.0, "trading", 1.78, "poor", "unfavorable"),
+    ],
+)
+def test_verdict_for_representative_holdings(classification, yield_pct, account, cost, fit, efficiency):
+    v = _verdict(account, classification, yield_pct)
+    assert (v["mode"], v["this_cost"], v["fit"], v["efficiency"]) == ("computed", cost, fit, efficiency)
+
+
+def test_trading_is_never_excellent():
+    assert _verdict("trading", "us", 0.05)["fit"] == "good"  # a cost of 0.01, capped: Trading shelters nothing
+
+
+def test_not_computed_defaults_are_fixed_not_judged():
+    v = compute_account_verdict("trading", "us", 2.43, None, None)
+    assert (v["mode"], v["fit"], v["efficiency"]) == ("not_computed", "fair", "neutral")
+    assert "marginal rate" in v["reason"]
+    v = compute_account_verdict("tfsa", "us_reit", 4.0, _M, _E)
+    assert v["mode"] == "not_computed" and "outside the modelled combinations" in v["reason"]
+
+
+def test_a_registered_account_is_computed_without_income_on_file():
+    v = compute_account_verdict("tfsa", "us", 2.43, None, None)
+    assert v["mode"] == "computed" and v["this_cost"] == 0.36 and v["fit"] == "good"
+
+
+@pytest.mark.parametrize(
+    "cost, label",
+    [(0.0, "excellent"), (0.10, "excellent"), (0.11, "good"), (0.50, "good"), (0.51, "fair"), (1.50, "fair"), (1.51, "poor")],
+)
+def test_fit_band_boundaries(cost, label):
+    assert _fit_label(cost) == label
+
+
+def test_efficiency_summarises_the_fit():
+    assert _EFFICIENCY_BY_FIT == {"excellent": "favorable", "good": "favorable", "fair": "neutral", "poor": "unfavorable"}
 
 
 def test_room_shows_both_registered_rooms_with_the_analysed_account_first():

@@ -1598,24 +1598,6 @@ async def test_error_records_shadow_with_no_outlook_to_compare():
 
 
 @pytest.mark.asyncio
-async def test_error_records_tax_passthrough_check_crash():
-    session = await _make_session()
-    run = await _make_run(session)
-
-    with patch(
-        "services.orchestrator._validate_tax_passthroughs", side_effect=KeyError("dividend_yield")
-    ):
-        await _run_with(session, run)
-
-    assert run.status == RunStatus.COMPLETED
-    rows = await _error_rows(session)
-    assert _kinds(rows) == [
-        ("agent", "agent_exception", "tax", "KeyError@services/orchestrator.py:_run_bull_bear_tax")
-    ]
-    assert rows[0].severity == "low"
-
-
-@pytest.mark.asyncio
 async def test_error_records_run_quality_summary_write_failure():
     session = await _make_session()
     run = await _make_run(session)

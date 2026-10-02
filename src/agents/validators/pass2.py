@@ -47,7 +47,7 @@ def _has_risk_citation(text: str) -> bool:
 # MARG is in the set because the prompt (rule 1) and the pre-computed block both advertise
 # it as a citation token; it was missing here, so evidence starting `MARG:` was rejected and
 # MARG never counted toward the narrative's three-token floor.
-TAX_METRIC_TOKENS = {"DIVID", "LIST", "DOM", "WHT", "CGAIN", "ROOM", "LOSS", "ELIG", "MARG"}
+TAX_METRIC_TOKENS = {"DIVID", "LIST", "DOM", "WHT", "TAXCOST", "CGAIN", "ROOM", "LOSS", "ELIG", "MARG"}
 _TAX_TOKEN_RE = re.compile(r"\b(?:" + "|".join(sorted(TAX_METRIC_TOKENS)) + r")\b")
 _REF_RE = re.compile(r"\bREF\b")
 # Rule 9: "Evidence starts with a valid citation token followed by `:`". Anchored,
@@ -741,27 +741,6 @@ def validate_tax_strategist(
         if account_fit not in valid_fit:
             errors.append(f"tax_profile.account_fit_score: must be one of {valid_fit}, got '{account_fit}'")
 
-        # poor account_fit mandates non-null cross_account_recommendation
-        if account_fit == "poor":
-            car = tp.get("cross_account_recommendation")
-            if not car or not str(car).strip():
-                errors.append(
-                    "tax_profile.cross_account_recommendation: must be non-null when account_fit_score='poor'"
-                )
-
-        # cross_account_recommendation.better_account -- also declared, also unenforced until
-        # now. Real schema: a nested object ({better_account, reasoning, drag_delta_pct}), not
-        # the bare string the presence check above tolerates for callers still on the old shape.
-        car = tp.get("cross_account_recommendation")
-        if isinstance(car, dict):
-            valid_better_account = {"tfsa", "rrsp", "trading"}
-            ba = car.get("better_account")
-            if ba is not None and ba not in valid_better_account:
-                errors.append(
-                    f"tax_profile.cross_account_recommendation.better_account: must be one of "
-                    f"{valid_better_account}, got {ba!r}"
-                )
-
         valid_efficiency = {"favorable", "neutral", "unfavorable"}
         if tp.get("tax_efficiency_for_account") not in valid_efficiency:
             errors.append(
@@ -822,7 +801,7 @@ def validate_tax_strategist(
                 errors.append(
                     f"tax_profile.tax_optimization_actions[{i}].action: must be non-empty"
                 )
-            valid_applies_to = {"tfsa", "rrsp", "trading", "cross_account"}
+            valid_applies_to = {"tfsa", "rrsp", "trading"}
             applies_to = a.get("applies_to")
             if applies_to is not None and applies_to not in valid_applies_to:
                 errors.append(
@@ -957,6 +936,75 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
 
     _sweep_declared_enums(output, errors)
     return len(errors) == 0, errors
+
+
+
+# Tolerances for the numbers the model copies out of the TAXCOST block (it prints two decimals, the
+# schema asks for two; the yield is printed to one decimal from a longer figure).
+_YIELD_TOLERANCE = 0.15
+_RATE_TOLERANCE = 0.15
+_COST_TOLERANCE = 0.05
+_AFTER_TAX_YIELD_TOLERANCE = 0.1
+
+
+def _plain_number(value) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def validate_tax_against_expectation(output: dict, expectation: dict) -> list[str]:
+    """Check the model's output against what the code decided (compute_tax_expectation).
+
+    The block gives the model the numbers and a verdict (fit, efficiency);
+    it must copy them, not re-judge them. Before this the model chose these labels itself and gave
+    a different one for the same input in 13 of 15 stock/account cells, and a `drag_delta_pct` of
+    -29.7 passed. Checks: the passthroughs (yield, withholding, annual tax and the yield
+    after it), `account_fit_score` and `tax_efficiency_for_account`. The agent assesses fit for this
+    account only; it does not compare accounts or recommend a move. An ETF has no verdict (out of scope)."""
+    verdict = expectation.get("verdict")
+    tp = output.get("tax_profile")
+    if verdict is None or not isinstance(tp, dict):
+        return []
+    errors: list[str] = []
+
+    expected_yield = expectation.get("yield_pct")
+    actual_yield = _plain_number(tp.get("dividend_yield_pct"))
+    if expected_yield is not None and actual_yield is not None and abs(actual_yield - expected_yield) > _YIELD_TOLERANCE:
+        errors.append(
+            f"tax_profile.dividend_yield_pct: expected ~{expected_yield:.1f}% (the DIVID line), got {actual_yield}%"
+        )
+
+    withholding = expectation.get("withholding")
+    actual_wht = _plain_number(tp.get("withholding_tax_rate_pct"))
+    if withholding is not None and actual_wht is not None and abs(actual_wht - withholding[0]) > _RATE_TOLERANCE:
+        errors.append(
+            f"tax_profile.withholding_tax_rate_pct: expected {withholding[0]:.1f}% (the WHT line), got {actual_wht}%"
+        )
+
+    mode = verdict["mode"]
+    drag = _plain_number(tp.get("annual_tax_drag_pct"))
+    after_tax = _plain_number(tp.get("effective_after_tax_yield_pct"))
+    if mode == "computed":
+        if drag is not None and abs(drag - verdict["this_cost"]) > _COST_TOLERANCE:
+            errors.append(
+                f"tax_profile.annual_tax_drag_pct: expected {verdict['this_cost']:.2f} (the TAXCOST line for this "
+                f"account), got {drag}"
+            )
+        if after_tax is not None and abs(after_tax - verdict["after_tax_yield"]) > _AFTER_TAX_YIELD_TOLERANCE:
+            errors.append(
+                f"tax_profile.effective_after_tax_yield_pct: expected {verdict['after_tax_yield']:.2f} (yield after "
+                f"annual dividend tax, TAXCOST line), got {after_tax}"
+            )
+    elif mode == "no_dividend":
+        if (drag is not None and abs(drag) > _COST_TOLERANCE) or (after_tax is not None and abs(after_tax) > _AFTER_TAX_YIELD_TOLERANCE):
+            errors.append("tax_profile: annual_tax_drag_pct and effective_after_tax_yield_pct are 0 or null when there is no dividend")
+
+    for field, key in (("account_fit_score", "fit"), ("tax_efficiency_for_account", "efficiency")):
+        if tp.get(field) != verdict[key]:
+            errors.append(
+                f"tax_profile.{field}: the TAXCOST verdict line says {verdict[key]!r}, got {tp.get(field)!r}; copy it"
+            )
+
+    return errors
 
 
 def validate_tax_passthroughs(output: dict, fixture: dict, account_type: str) -> tuple[bool, list[str]]:

@@ -5,6 +5,7 @@ from agents.validators.pass2 import (
     validate_bear_advocate,
     validate_tax_strategist,
     validate_risk_advisor_stage_a,
+    validate_tax_against_expectation,
     validate_tax_passthroughs,
     _evidence_carries_value,
 )
@@ -551,13 +552,14 @@ class TestTaxStrategist:
         assert not passed
         assert any("groundedness_score" in e or "confidence" in e for e in errors)
 
-    def test_poor_account_fit_requires_cross_account_recommendation(self):
+    def test_a_poor_fit_without_a_move_is_not_rejected_by_the_structural_check(self):
+        """Whether a move is required is decided by the code (validate_tax_against_expectation):
+        a poor fit with no account that has room left legitimately has none."""
         out = _valid_tax_output()
         out["tax_profile"]["account_fit_score"] = "poor"
-        out["tax_profile"]["cross_account_recommendation"] = None  # missing
+        out["tax_profile"]["cross_account_recommendation"] = None
         passed, errors = validate_tax_strategist(out)
-        assert not passed
-        assert any("cross_account_recommendation" in e for e in errors)
+        assert not any("cross_account_recommendation" in e for e in errors)
 
     def test_poor_account_fit_with_recommendation_passes(self):
         out = _valid_tax_output()
@@ -610,18 +612,6 @@ class TestTaxStrategist:
         out["tax_profile"]["dividend_classification"] = "us"
         passed, errors = validate_tax_strategist(out)
         assert passed, errors
-
-    def test_invalid_better_account_fails(self):
-        out = _valid_tax_output()
-        out["tax_profile"]["account_fit_score"] = "poor"
-        out["tax_profile"]["cross_account_recommendation"] = {
-            "better_account": "savings_account",  # invalid
-            "reasoning": "Better tax treatment elsewhere.",
-            "drag_delta_pct": -0.3,
-        }
-        passed, errors = validate_tax_strategist(out)
-        assert not passed
-        assert any("better_account" in e for e in errors)
 
     def test_valid_better_account_passes(self):
         out = _valid_tax_output()
@@ -773,6 +763,73 @@ class TestRiskAdvisorStageA:
         passed, errors = validate_risk_advisor_stage_a(out)
         assert not passed
         assert any("timeline" in e for e in errors)
+
+
+# ---------- validate_tax_against_expectation: the code decides, the model copies ----------
+
+
+def _expectation(account="trading", classification="us", yield_pct=2.43):
+    from data.precompute.tax_metrics import compute_account_verdict, resolve_withholding
+
+    return {
+        "yield_pct": yield_pct,
+        "withholding": resolve_withholding(classification, account),
+        "verdict": compute_account_verdict(account, classification, yield_pct, 29.65, 6.39),
+    }
+
+
+def _matching_trading_output() -> dict:
+    """What the model should write for KO (2.43% US dividend) in a Trading account."""
+    out = _valid_tax_output()
+    out["tax_profile"].update({
+        "dividend_yield_pct": 2.4, "withholding_tax_rate_pct": 15.0, "annual_tax_drag_pct": 0.72,
+        "effective_after_tax_yield_pct": 1.71, "account_fit_score": "fair", "tax_efficiency_for_account": "neutral",
+    })
+    return out
+
+
+class TestTaxAgainstExpectation:
+    def test_an_output_that_copies_the_verdict_passes(self):
+        assert validate_tax_against_expectation(_matching_trading_output(), _expectation()) == []
+
+    def test_a_wrong_fit_or_efficiency_is_rejected(self):
+        out = _matching_trading_output()
+        out["tax_profile"]["account_fit_score"] = "poor"
+        out["tax_profile"]["tax_efficiency_for_account"] = "unfavorable"
+        errors = validate_tax_against_expectation(out, _expectation())
+        assert any("account_fit_score" in e and "'fair'" in e for e in errors)
+        assert any("tax_efficiency_for_account" in e and "'neutral'" in e for e in errors)
+
+    def test_the_passthroughs_are_checked_against_the_block(self):
+        out = _matching_trading_output()
+        out["tax_profile"].update({"dividend_yield_pct": 4.0, "withholding_tax_rate_pct": 0.0,
+                                   "annual_tax_drag_pct": 0.4, "effective_after_tax_yield_pct": 2.1})
+        errors = validate_tax_against_expectation(out, _expectation())
+        for field in ("dividend_yield_pct", "withholding_tax_rate_pct", "annual_tax_drag_pct", "effective_after_tax_yield_pct"):
+            assert any(field in e for e in errors), field
+
+    def test_not_computed_defaults_are_enforced(self):
+        from data.precompute.tax_metrics import compute_account_verdict
+
+        expectation = {"yield_pct": 2.0, "withholding": None,
+                       "verdict": compute_account_verdict("tfsa", "us_reit", 2.0, 29.65, 6.39)}
+        out = _valid_tax_output()
+        out["tax_profile"].update({"account_fit_score": "excellent", "tax_efficiency_for_account": "favorable"})
+        errors = validate_tax_against_expectation(out, expectation)
+        assert any("'fair'" in e for e in errors) and any("'neutral'" in e for e in errors)
+
+    def test_no_dividend_expects_zero_or_null_figures(self):
+        expectation = _expectation("trading", "canadian_eligible", None)
+        out = _valid_tax_output()
+        out["tax_profile"].update({"dividend_yield_pct": None, "withholding_tax_rate_pct": 0.0,
+                                   "annual_tax_drag_pct": 0.0, "effective_after_tax_yield_pct": 0.0,
+                                   "account_fit_score": "good", "tax_efficiency_for_account": "favorable"})
+        assert validate_tax_against_expectation(out, expectation) == []
+        out["tax_profile"]["annual_tax_drag_pct"] = 1.2
+        assert validate_tax_against_expectation(out, expectation)
+
+    def test_an_etf_has_no_verdict_so_nothing_is_checked(self):
+        assert validate_tax_against_expectation(_valid_tax_output(), {"verdict": None}) == []
 
 
 # ─── Compression / Reliability Warning Tests ──────────────────────────────────

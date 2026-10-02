@@ -2,7 +2,7 @@
 
 **Disclaimer:** For system-prompt injection only. Not tax advice. Rules are summarized for LLM consumption. Always verify against CRA publications for the current tax year.
 
-**Last verified:** 2026-09-28 _(2026 tax year figures)_
+**Last verified:** 2026-10-01 _(2026 tax year figures)_
 
 **Coverage:** This reference fully covers **ordinary common and preferred shares of Canadian and US corporations**, in all three account types, plus **Canadian REITs / income trusts in registered accounts** (TFSA/RRSP — 0% withholding, Canadian-source). It does **not** cover: Canadian REIT/trust treatment in a *taxable* account, US REITs, MLPs, non-MLP limited partnerships, ADRs, or non-US foreign withholding rates — the precompute returns those as `classification_confidence: low` / `modelled: false` for the agent to caveat and defer. Expanding this with the deferred `(classification × structure × account)` rows is tracked post-launch (ClickUp 86bbpm06v).
 
@@ -67,11 +67,12 @@
 - Receive the enhanced dividend tax credit.
 - Gross-up rate: 38% (for eligible dividends).
 - Federal dividend tax credit: 15.0198% of the grossed-up amount.
+- Ontario dividend tax credit: 10.0% of the grossed-up amount (2020 to 2026; source: ontario.ca/page/ontario-dividend-tax-credit). Ontario's surtax applies to the Ontario tax before this credit.
 - Net effect: Eligible Canadian dividends are taxed at a lower effective rate than other income, especially for lower income brackets. In some provinces and income levels, the effective rate on eligible dividends can be close to 0%.
 
 **Foreign dividends (including US):**
 - Taxed as ordinary income (no dividend tax credit).
-- US withholding is recoverable via foreign tax credit (see Cross-border considerations) — net cost is usually small or zero for US dividends in a taxable account.
+- US withholding is recoverable via foreign tax credit (see Cross-border considerations): the 15% is credited against the Canadian tax on the same dividend, so the annual tax on a US dividend in a taxable account is the marginal rate (or the 15% if the marginal rate is lower), not the withholding alone.
 
 **Interest income:**
 - Fully taxable as ordinary income. Worst tax treatment of any investment income type.
