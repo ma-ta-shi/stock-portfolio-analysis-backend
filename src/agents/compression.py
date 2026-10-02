@@ -103,11 +103,16 @@ def build_pass2_user_message(
     compressed_pass1: dict[str, dict | None],
     account_type: str | None = None,
     agent_ids: tuple[str, ...] | None = None,
+    account_neutral: bool = False,
 ) -> str:
     """Builds the user message payload for Pass 2 agents from compressed Pass 1.
 
     `agent_ids` limits which Pass 1 agents are included (default: all five, in the
     canonical order). The Tax Strategist asks for RSRCH and FUND only.
+
+    `account_neutral` leaves the account out of the header. The Risk Advisor's stage A is
+    account-neutral by design (one read per ticker and timeline, whatever account holds it);
+    its message used to name the account anyway.
 
     `bundle` is the real DataBundle for this analysis run, standing in for the
     harness's `fixture` dict -- see this module's docstring for the field mapping.
@@ -123,7 +128,7 @@ def build_pass2_user_message(
 
     lines = [
         f"{ticker} ({company}) | {sector} | {exchange} | {currency}",
-        f"As of: {timestamp} | Timeline: {timeline} | Account: {acct}",
+        f"As of: {timestamp} | Timeline: {timeline}" + ("" if account_neutral else f" | Account: {acct}"),
         "",
     ]
 

@@ -20,11 +20,9 @@ NOT a clean port -- field-by-field notes, verified against
 - `YTD` (harness: `price['ytd_return_pct']`): same genuine gap as every other
   Pass 1/2 runner in this port -- no precompute module anywhere computes a
   YTD return. Omitted, not fabricated.
-- `CORR`/`CONC` (portfolio correlation / concentration risk): still honest
-  placeholders ("unknown (not provided for this analysis)" / a generic
-  literal) -- no portfolio system exists yet, confirmed by this runner's own
-  `run_stage_b()` docstring below, which already documents the same gap for
-  `portfolio_context`. Not something this port can close.
+- `CORR`/`CONC` (portfolio correlation / concentration risk): not rendered. No
+  portfolio system exists, and the Risk Advisor is account-neutral and per stock;
+  portfolio fit belongs to the Portfolio Optimizer.
 
 Uses groundedness_score (NOT confidence).
 NO recommendation field.
@@ -79,24 +77,27 @@ def _precomputed_risk_metrics(bundle: DataBundle) -> tuple[str, dict[str, bool]]
     quote passthrough virtually always present for a resolved ticker --
     not tracked separately, unlike annualized_vol (VOL's second half),
     which shares BETA's own 60-bar minimum and genuinely can be absent.
-    CORR/CONC are permanent placeholders (no portfolio system exists yet,
-    same reasoning as this file's own module docstring) -- not tracked at
-    all, since neither is a real precompute field that becomes present or
-    absent based on this run's own data.
+    CORR/CONC used to be rendered here as placeholders ("unknown" and a generic
+    literal); there is no portfolio context, so they are gone from this block.
+
+    The benchmark the beta is measured against is shown by name (it was computed
+    but never rendered). It is context, not a material field, so it is not part
+    of the presence map and cannot trip the data-gap caveat rule.
     """
     rm = bundle.risk_metrics
     pp = bundle.price_position
+    benchmark = f" vs {rm['benchmark']}" if rm.get("benchmark") else ""
+    # R-squared: how much of the stock's movement the benchmark explains (see risk_metrics._beta_and_r2).
+    r2 = f", R-squared {rm['beta_r2']}" if rm.get("beta_r2") is not None else ""
     text = (
-        f"BETA: beta = {_fmt(rm.get('beta'))} (will be injected into output by orchestrator)\n"
+        f"BETA: beta = {_fmt(rm.get('beta'))}{benchmark} (1-year daily returns{r2})\n"
         f"VOL:  52w High={_fmt(pp.get('high_52w'))}, 52w Low={_fmt(pp.get('low_52w'))}, "
         f"Annualized vol={_fmt(rm.get('annualized_vol_pct'), '%')}\n"
         f"DD:   Max drawdown (1yr) = {_fmt(rm.get('max_drawdown_1yr_pct'), '%')} "
-        f"(recovery: {_fmt(rm.get('recovery_1yr_days'), ' days')}) (will be injected by orchestrator)\n"
+        f"(recovery: {_fmt(rm.get('recovery_1yr_days'), ' business days')})\n"
         f"      Max drawdown (3yr) = {_fmt(rm.get('max_drawdown_3yr_pct'), '%')} "
-        f"(recovery: {_fmt(rm.get('recovery_3yr_days'), ' days')})\n"
-        f"LIQ:  Avg dollar volume (20d) = {_fmt(rm.get('adv_millions'), 'M')} {rm.get('adv_currency', '')}\n"
-        f"CORR: Portfolio correlation = unknown (not provided for this analysis)\n"
-        f"CONC: Standard concentration risk assessment based on position sizing"
+        f"(recovery: {_fmt(rm.get('recovery_3yr_days'), ' business days')})\n"
+        f"LIQ:  Avg dollar volume (20d) = {_fmt(rm.get('adv_millions'), 'M')} {rm.get('adv_currency', '')}"
     )
     field_presence = {
         "beta": rm.get("beta") is not None,
@@ -136,30 +137,49 @@ def _validate_with_caveats(output: dict, material_absent: list[str]) -> tuple[bo
     return passed and cq_passed, errors + cq_errors
 
 
+def get_system_prompt(bundle: DataBundle, compressed_pass1: dict) -> str:
+    ctx = bundle.context
+    confidence_levels = extract_confidence_levels(compressed_pass1)
+    # 86bbummwp Tier 3 -- see pass2_bull_advocate.py's own comment on this
+    # same addition for why both signals are shown, never collapsed.
+    quality_levels = extract_data_quality_levels(compressed_pass1)
+    risk_metrics_text, _ = _precomputed_risk_metrics(bundle)
+    return fill(
+        load_template("risk_advisor", stage="a"),
+        {
+            "ticker": bundle.stock.ticker,
+            "company_name": bundle.company_info.get("name"),
+            "sector": bundle.company_info.get("sector"),
+            "timeline": ctx.timeline,
+            "timeline_instruction": f"Timeline: {ctx.timeline}.",
+            "precomputed_risk_metrics": risk_metrics_text,
+            "researcher_thesis_archetype": researcher_thesis_archetype(compressed_pass1),
+            "pass1_reliability_warnings": build_pass1_reliability_warnings(
+                confidence_levels, agent_quality=quality_levels
+            ) or "(none)",
+            "accuracy_brief": "",
+            "winning_patterns_brief": "",
+            "memory_brief": "",
+        },
+    )
+
+
 def build_user_message(
     bundle: DataBundle,
     compressed_pass1: dict,
-    account_type: str | None = None,
 ) -> tuple[str, dict[str, bool]]:
-    base = build_pass2_user_message(bundle, compressed_pass1, account_type)
-    confidence_levels = extract_confidence_levels(compressed_pass1)
-    quality_levels = extract_data_quality_levels(compressed_pass1)
-    warnings = build_pass1_reliability_warnings(confidence_levels, agent_quality=quality_levels)
-    if warnings:
-        base += f"\n\nRELIABILITY WARNINGS: {warnings}"
+    """Stage A's user message is the Pass 1 summaries only, and is account-neutral.
 
-    ctx = bundle.context
-    acct = account_type or ctx.account_type
-    risk_metrics_text, field_presence = _precomputed_risk_metrics(bundle)
-
-    base += f"""
-
-RISK METRIC TOKENS (ORCHESTRATOR PRE-COMPUTED):
-{risk_metrics_text}
-
-ACCOUNT: {acct.upper()} | TIMELINE: {ctx.timeline}
-STOP-LOSS NOTE: {"null is appropriate (TFSA/RRSP medium/long-term)" if acct in ("tfsa", "rrsp") and ctx.timeline in ("medium_term", "long_term") else "numeric stop-loss may be appropriate"}"""
-
+    The risk metrics and the reliability warnings are in the system prompt
+    (get_system_prompt) and used to be appended here as well, so every call paid
+    for them twice. The account used to appear here too (a header line, an
+    `ACCOUNT | TIMELINE` line and a code-generated STOP-LOSS NOTE) although stage A
+    is the account-neutral half of the agent: one read per ticker and timeline,
+    shared by every account.
+    Stage B states its own account in its own prompt.
+    The second return value is the presence map for the risk metrics."""
+    base = build_pass2_user_message(bundle, compressed_pass1, account_neutral=True)
+    _, field_presence = _precomputed_risk_metrics(bundle)
     return base, field_presence
 
 
@@ -176,43 +196,17 @@ class RiskAdvisorRunner(BaseRunner):
         compressed_pass1: dict,
         account_type: str | None = None,
     ) -> tuple[dict, list[str]]:
-        # Stage-specific, not just "risk" -- call_site (86bbwachy Phase 2) is
-        # derived from current_agent, so llm_calls can trace Stage A and
-        # Stage B as the two distinct round trips they really are, even
-        # though AgentOutput still merges them into one row (orchestrator.py's
-        # own _run_risk) -- llm_calls is the finer-grained trace that row
-        # doesn't need to be.
+        # call_site (86bbwachy Phase 2) is derived from current_agent; the agent id
+        # is still "risk_stage_a" so historical llm_calls rows keep the same name.
         self.current_agent = "risk_stage_a"
-        acct = account_type or bundle.context.account_type
-        user_msg, field_presence = build_user_message(bundle, compressed_pass1, acct)
+        # `account_type` is accepted for call-site compatibility only: stage A is
+        # account-neutral and uses none of it (see build_user_message).
+        user_msg, field_presence = build_user_message(bundle, compressed_pass1)
         # 86bbwachy Phase 4 -- set before the LLM call is attempted, so a
         # failed call still records whether its own input was already
         # incomplete.
         self.last_field_coverage = field_presence
-        ctx = bundle.context
-        confidence_levels = extract_confidence_levels(compressed_pass1)
-        # 86bbummwp Tier 3 -- see pass2_bull_advocate.py's own comment on this
-        # same addition for why both signals are shown, never collapsed.
-        quality_levels = extract_data_quality_levels(compressed_pass1)
-        precomputed_risk_metrics_text, _ = _precomputed_risk_metrics(bundle)
-        system_prompt = fill(
-            load_template("risk_advisor", stage="a"),
-            {
-                "ticker": bundle.stock.ticker,
-                "company_name": bundle.company_info.get("name"),
-                "sector": bundle.company_info.get("sector"),
-                "timeline": ctx.timeline,
-                "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "precomputed_risk_metrics": precomputed_risk_metrics_text,
-                "researcher_thesis_archetype": researcher_thesis_archetype(compressed_pass1),
-                "pass1_reliability_warnings": build_pass1_reliability_warnings(
-                    confidence_levels, agent_quality=quality_levels
-                ) or "(none)",
-                "accuracy_brief": "",
-                "winning_patterns_brief": "",
-                "memory_brief": "",
-            },
-        )
+        system_prompt = get_system_prompt(bundle, compressed_pass1)
         material_absent = [k for k, v in field_presence.items() if not v]
         result, errors, context = await self.call_with_validation_start(
             system_prompt,

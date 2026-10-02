@@ -403,3 +403,28 @@ class TestDateIndexRegression:
 
         result = compute_all(stock, benchmark, _BENCHMARK, _CURRENCY)
         assert result["beta"] is not None
+
+# ---------- beta R-squared (Risk Advisor Wave 2): a beta must come with how much it explains ----------
+
+
+def test_beta_r2_is_near_one_when_the_stock_is_a_scaled_copy_of_the_benchmark():
+    benchmark = _ohlcv(300, seed=1, trend_total=20)
+    scaled_returns = benchmark["close"].pct_change().dropna() * 1.5
+    stock_close = 100 * (1 + scaled_returns).cumprod()
+    stock_close = pd.concat([pd.Series([100.0], index=benchmark.index[:1]), stock_close])
+    result = compute_all(_from_close(stock_close, seed=2), benchmark, _BENCHMARK, _CURRENCY)
+    assert result["beta_r2"] is not None and result["beta_r2"] > 0.95
+
+
+def test_beta_r2_is_near_zero_for_an_unrelated_stock():
+    """Independent random series: a beta comes out (some number) but it explains almost nothing."""
+    stock = _ohlcv(300, seed=11)
+    benchmark = _ohlcv(300, seed=22)
+    result = compute_all(stock, benchmark, _BENCHMARK, _CURRENCY)
+    assert result["beta"] is not None
+    assert result["beta_r2"] is not None and result["beta_r2"] < 0.1
+
+
+def test_beta_r2_none_whenever_beta_is_none():
+    result = compute_all(_ohlcv(30, seed=1), _ohlcv(30, seed=2), _BENCHMARK, _CURRENCY)
+    assert result["beta"] is None and result["beta_r2"] is None

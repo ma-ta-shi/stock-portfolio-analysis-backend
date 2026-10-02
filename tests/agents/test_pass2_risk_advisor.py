@@ -10,7 +10,12 @@ from the harness."""
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from agents.pass2_risk_advisor import _precomputed_risk_metrics, _validate_with_caveats, build_user_message
+from agents.pass2_risk_advisor import (
+    _precomputed_risk_metrics,
+    _validate_with_caveats,
+    build_user_message,
+    get_system_prompt,
+)
 
 
 def _bundle(**overrides) -> SimpleNamespace:
@@ -32,7 +37,7 @@ def test_precomputed_risk_metrics_renders_real_fields():
     assert "BETA: beta = 1.8" in text
     assert "Annualized vol=42.5%" in text
     assert "Max drawdown (1yr) = -28.4%" in text
-    assert "recovery: 120 days" in text
+    assert "recovery: 120 business days" in text
     assert "Max drawdown (3yr) = -45.1%" in text
     assert "Avg dollar volume (20d) = 85.2M CAD" in text
 
@@ -54,23 +59,69 @@ def test_no_ytd_return_fabricated():
     assert "ytd_return" not in text
 
 
-def test_correlation_and_concentration_stay_honest_placeholders():
-    """No portfolio system exists yet -- these must stay explicit
-    placeholders, not fabricated numbers."""
+def test_no_portfolio_placeholder_lines_in_the_stage_a_metrics():
+    """Stage A has no portfolio context. CORR and CONC used to be rendered as a line of
+    "unknown" and a generic sentence presented as data; they belong to stage B."""
     text, _ = _precomputed_risk_metrics(_bundle())
-    assert "CORR: Portfolio correlation = unknown" in text
-    assert "CONC: Standard concentration risk assessment" in text
+    assert "CORR" not in text
+    assert "CONC" not in text
+    assert "will be injected" not in text
 
 
-def test_stop_loss_note_null_for_tfsa_medium_term():
-    msg, _ = build_user_message(_bundle(), {})
-    assert "STOP-LOSS NOTE: null is appropriate" in msg
+def test_the_benchmark_beta_is_measured_against_is_named():
+    bundle = _bundle(risk_metrics={**_bundle().risk_metrics, "benchmark": "^GSPTSE"})
+    text, _ = _precomputed_risk_metrics(bundle)
+    assert "BETA: beta = 1.8 vs ^GSPTSE (1-year daily returns)" in text
 
 
-def test_stop_loss_note_numeric_for_trading_short_term():
-    bundle = _bundle(context=SimpleNamespace(account_type="trading", timeline="short_term"))
-    msg, _ = build_user_message(bundle, {})
-    assert "STOP-LOSS NOTE: numeric stop-loss may be appropriate" in msg
+def test_the_benchmark_is_not_a_material_field():
+    """It is context: a missing benchmark must not feed the data-gap caveat rule."""
+    _, presence = _precomputed_risk_metrics(_bundle(risk_metrics={**_bundle().risk_metrics, "benchmark": None}))
+    assert "benchmark" not in presence
+
+
+# ---------- stage A is account-neutral and sends its data once ----------
+
+
+def test_stage_a_message_carries_no_account_and_no_stop_loss_note():
+    for account, timeline in (("tfsa", "medium_term"), ("trading", "short_term"), ("rrsp", "long_term")):
+        bundle = _bundle(context=SimpleNamespace(account_type=account, timeline=timeline))
+        msg, _ = build_user_message(bundle, {})
+        assert account not in msg.lower()
+        assert "STOP-LOSS" not in msg
+        assert f"Timeline: {timeline}" in msg
+
+
+def test_stage_a_message_is_identical_for_every_account():
+    msgs = {
+        build_user_message(_bundle(context=SimpleNamespace(account_type=a, timeline="medium_term")), {})[0]
+        for a in ("tfsa", "rrsp", "trading")
+    }
+    assert len(msgs) == 1
+
+
+def test_risk_metrics_and_warnings_are_in_the_system_prompt_once_not_the_message():
+    compressed = {
+        "RSRCH": {
+            "pass2_view": {"thesis_archetype": "dividend_compounder"},
+            "analysis_confidence": "low",
+            "data_quality_assessment": "low",
+            "assessment_summary": "s",
+            "narrative_truncated": "n",
+        }
+    }
+    system_prompt = get_system_prompt(_bundle(), compressed)
+    msg, _ = build_user_message(_bundle(), compressed)
+    assert system_prompt.count("Annualized vol=42.5%") == 1
+    assert "Annualized vol" not in msg
+    assert "RELIABILITY WARNINGS" not in msg and "RSRCH: low" in system_prompt
+    assert "RISK METRIC TOKENS" not in msg
+
+
+def test_system_prompt_has_no_unfilled_placeholder():
+    import re
+
+    assert re.findall(r"\{[a-z_]+\}", get_system_prompt(_bundle(), {})) == []
 
 
 # ---------- field_presence (86bbwachy Phase 4) ----------
@@ -226,4 +277,17 @@ def test_validate_with_caveats_exactly_at_threshold_counts_as_high():
     passed, errors = _validate_with_caveats(out, material_absent=["beta"])
     assert not passed
 
+def test_the_beta_line_shows_how_much_of_the_stock_the_benchmark_explains():
+    bundle = _bundle(risk_metrics={**_bundle().risk_metrics, "benchmark": "^GSPC", "beta": -0.23, "beta_r2": 0.02})
+    text, _ = _precomputed_risk_metrics(bundle)
+    assert "BETA: beta = -0.23 vs ^GSPC (1-year daily returns, R-squared 0.02)" in text
 
+
+def test_the_beta_line_omits_r_squared_when_it_is_unavailable_rather_than_inventing_one():
+    text, _ = _precomputed_risk_metrics(_bundle())  # no beta_r2 in the fixture
+    assert "R-squared" not in text
+
+
+def test_r_squared_is_context_not_a_material_field():
+    _, presence = _precomputed_risk_metrics(_bundle(risk_metrics={**_bundle().risk_metrics, "beta_r2": None}))
+    assert "beta_r2" not in presence

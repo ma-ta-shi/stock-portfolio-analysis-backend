@@ -854,15 +854,10 @@ def validate_tax_strategist(
 
 
 def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
-    """Validate Risk Advisor Stage A (account-neutral risk profile) output.
+    """Validate Risk Advisor (account-neutral risk profile) output.
 
-    Split from the old single `validate_risk_advisor` (ClickUp 86bbuhk82) to match the real
-    two-stage prompt split from 86bbdutn6. The old function nested a Stage-B-only field,
-    `position_size_recommendation`, under Stage A's `risk_profile` object -- confirmed via a
-    full field-name extraction of `backend/prompts/risk_advisor/v1_stage_a.txt` and
-    `v1_stage_b.txt` that it doesn't belong to Stage A's real schema at all. Because the check
-    only fired when the field was truthy (`if psr and not (...)`), it silently never triggered
-    against real Stage A output instead of loudly rejecting it -- broken quietly, not loudly.
+    Named "stage_a" for history: the Risk Advisor once had an account-specific stage B
+    (position sizing), removed 2026-10-01. This is now the agent's only validator.
     """
     errors: list[str] = []
 
@@ -883,7 +878,7 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
     elif not _has_risk_citation(output["strongest_signal"]):
         errors.append(
             "strongest_signal: must cite a Pass 1 agent ID or a metric token "
-            "(BETA VOL DD LIQ CORR CONC)"
+            "(BETA VOL DD LIQ)"
         )
 
     # key_factors: 2-4, sentiment must be negative|neutral only
@@ -898,14 +893,15 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
                         f"key_factors[{i}].sentiment: Risk Advisor must use 'negative' or 'neutral', got '{sent}'"
                     )
 
-    # narrative: 250-400 words per the Stage A prompt's own hard constraint ("stop at 400
-    # words") and schema comment ("250-400 words") == 1500-2400 chars at the ~6 chars/word
-    # heuristic used elsewhere in this codebase. The old bound here (1200-3200) matched
-    # neither number -- corrected while splitting this function, not a separate change.
+    # narrative: 1000-2400 chars. The floor was 1500 ("250 words" at ~6 chars a word), lowered
+    # 2026-10-01 (Risk Advisor Wave 2) to 1000: the model writes ~6.8 chars a word, lands at
+    # 1,000-1,900 chars whatever the prompt asks (the prompt aims at 1,800-2,200), nothing
+    # downstream reads the narrative's length, and half of all attempts were rejected for length
+    # alone. The 2400 ceiling is unchanged.
     narrative = output.get("narrative", "")
     nc = char_count(narrative)
-    if nc < 1500:
-        errors.append(f"narrative: too short ({nc} chars, min 1500)")
+    if nc < 1000:
+        errors.append(f"narrative: too short ({nc} chars, min 1000)")
     if nc > 2400:
         errors.append(f"narrative: too long ({nc} chars, max 2400)")
 
