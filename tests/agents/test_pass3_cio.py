@@ -316,6 +316,37 @@ def test_risk_advisor_summary_omits_flags_and_caveats_on_a_clean_run():
     assert "data_sanity_flags" not in summary and "caveats" not in summary
 
 
+def test_risk_advisor_summary_ends_with_the_narrative_as_supporting_detail():
+    out = _risk_output()
+    out["narrative"] = "Liquidity is strong at 10.4 B USD a day (LIQ). The key signal is the drawdown (DD)."
+    summary = build_risk_advisor_stage_a_summary(out)
+    last = summary.splitlines()[-1]
+    assert last.startswith("  narrative (supporting detail; the structured fields above are authoritative): ")
+    assert "Liquidity is strong at 10.4 B USD a day (LIQ)" in last
+
+
+def test_risk_advisor_summary_omits_the_narrative_line_when_there_is_none():
+    assert "narrative" not in build_risk_advisor_stage_a_summary(_risk_output())
+    for blank in ("", "   "):
+        assert "narrative" not in build_risk_advisor_stage_a_summary({**_risk_output(), "narrative": blank})
+
+
+def test_the_stage_a_user_message_carries_the_risk_narrative_through_the_real_builder():
+    """The path the CIO actually takes: build_user_message with the orchestrator's pass2_outputs keys."""
+    risk = {**_risk_output(), "narrative": "Liquidity is strong at 10.4 B USD a day (LIQ)."}
+    msg = build_user_message(_bundle(), {}, {"risk": risk}, 20, "consensus")
+    assert "RISK ADVISOR:" in msg and "Liquidity is strong at 10.4 B USD a day (LIQ)." in msg
+    assert "TAX STRATEGIST" not in msg
+
+
+def test_the_shadow_cio_gets_the_risk_narrative_too():
+    """Shadow CIO and CIO stage A share build_risk_advisor_stage_a_summary, so one change reaches both."""
+    from agents import pass3_shadow_cio
+
+    out = {**_risk_output(), "narrative": "Liquidity is strong (LIQ)."}
+    assert "narrative (supporting detail" in pass3_shadow_cio.build_risk_advisor_stage_a_summary(out)
+
+
 # ---------- CIO stage B: no Risk Advisor input, no sizing (removed 2026-10-01) ----------
 
 

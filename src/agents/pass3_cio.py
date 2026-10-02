@@ -257,6 +257,12 @@ def build_risk_advisor_stage_a_summary(risk_output: dict | None) -> str:
     caveats = [str(c) for c in (risk_output.get("caveats") or []) if str(c).strip()]
     if caveats:
         lines.append(f"  caveats: {'; '.join(caveats)}")
+    # The written risk read. Beyond the structured lines above it carries each scenario's trigger, the beta
+    # and drawdown interpretation, liquidity and dividend sustainability, which were computed on every run
+    # but never reached the CIO. Supporting detail, like the advocate and Tax narratives.
+    narrative = str(risk_output.get("narrative") or "").strip()
+    if narrative:
+        lines.append(f"  narrative (supporting detail; the structured fields above are authoritative): {narrative}")
     return "\n".join(lines)
 
 
