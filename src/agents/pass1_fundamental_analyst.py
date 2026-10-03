@@ -7,11 +7,10 @@ NOT a clean port -- field-by-field notes, each verified against
 - All ratio/margin/growth fields on `DataBundle` are raw fractions (e.g.
   `0.142`), not the harness fixture's already-`_pct`-suffixed values (`14.2`) --
   every percentage below is rendered as `value * 100`, not passed through.
-- `sector_pe_median` (harness name) is `peer_metrics["sector_medians"]
-  ["sector_median_pe"]` for real -- `compute_peer_comparison()`'s own docstring
-  confirms the `sector_median_*` naming is deliberate, matching the live
-  prompt's own placeholder names (a closer match to the prompt than the
-  harness fixture's `sector_pe_median` was).
+- The peer comparison is the industry P/E benchmark (`peer_metrics["industry_benchmark"]`, built by
+  `data/industry_benchmark.py`): the median and middle half of the trailing P/E over the stock's Yahoo industry. The
+  per-peer table this payload used to carry (5 companies' margins, growth, ROE and leverage) was removed on
+  2026-10-03: the advocates cited it for valuation only (40 of 42 citations), and its selection was the weakest part.
 - `guidance_vs_consensus` (harness fixture: a pre-computed input verdict) is
   actually one of Fundamental's own OUTPUT `interpretive_fields`
   (`agents/validators/pass1.py::IF_SPEC_FUNDAMENTAL`) -- an LLM judgment, not
@@ -44,7 +43,7 @@ NOT a clean port -- field-by-field notes, each verified against
   DataBundle (`data/schemas/data_bundle.py` + `data/pipeline.py`'s bundle
   assembly). `_data_coverage_line()` (86bbummwp Tier 1a) now reads a coarse
   subset of the same `missing_fields`-derived presence map -- only
-  `peers_block`/`earnings_surprises`, not all 15 per-ratio keys, which stay
+  `industry_benchmark`/`earnings_surprises`, not all 15 per-ratio keys, which stay
   granular-only in `input_field_coverage` and would be too noisy for a single
   prose line.
 
@@ -89,6 +88,7 @@ from agents.utils import (
 )
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_fundamental_analyst
+from data.industry_benchmark import is_canadian, pe_vs_industry
 from data.precompute.fundamentals import _PEER_METRIC_VALID_RANGE
 from data.schemas.data_bundle import DataBundle
 
@@ -147,7 +147,7 @@ def _fmt(v, suffix: str = "", pct: bool = False):
 # first, which was both redundant with that check and a latent KeyError risk
 # if either key were ever absent).
 _COVERAGE_GAP_SENTENCES = {
-    "peers_block": "no peer data available",
+    "industry_benchmark": "no industry P/E benchmark available",
     "earnings_surprises": "no earnings surprise history available",
 }
 
@@ -212,15 +212,24 @@ def _validate_with_caveats(
     return passed and cq_passed, errors + cq_errors
 
 
-def _peers_text(bundle: DataBundle) -> RenderedField:
-    records = bundle.peer_metrics.get("peer_records", [])
-    if not records:
-        return RenderedField(text="", present=False)
-    lines = []
-    for i, r in enumerate(records, 1):
-        metrics = ", ".join(f"{k}={v}" for k, v in r.items() if v is not None and k != "ticker")
-        lines.append(f"  PEER_{i} ({r.get('ticker', '?')}): {metrics}")
-    return RenderedField(text="PEER DATA:\n" + "\n".join(lines), present=True)
+def _industry_pe_text(bundle: DataBundle) -> RenderedField:
+    """The industry P/E benchmark with its basis, and where this stock's P/E sits in it (computed in code)."""
+    na = bundle.not_applicable or {}
+    if "pe_ratio" in na.get("fields", []):
+        return RenderedField(text=f"Industry P/E: not applicable ({na.get('reason')}: earnings multiples mislead for this kind of company).", present=True)
+    bench = bundle.peer_metrics.get("industry_benchmark")
+    if not bench:
+        return RenderedField(text="Industry P/E: N/A — no industry benchmark available (too few comparable companies, or the data was unavailable).", present=False)
+    pct, position = pe_vs_industry(bundle.valuation_metrics.get("pe_ratio"), bench)
+    basis = f"{bench['companies']} companies, {bench['industry']}, {bench['market']}, Yahoo trailing P/E"
+    if bench["market"] == "US" and is_canadian(bundle.stock.ticker):
+        basis += "; the TSX industry has too few companies"
+    if position == "not_meaningful":
+        where = " | This P/E is not_meaningful against the industry (earnings are near zero)"
+    else:
+        where = f" | This P/E is {position} ({pct:+.0f}% against the median)" if position else ""
+    text = f"Industry P/E: median {bench['median_pe']:.1f}, middle half {bench['p25_pe']:.1f} to {bench['p75_pe']:.1f} ({basis}){where}"
+    return RenderedField(text=text, present=True)
 
 
 def _earnings_surprises_text(bundle: DataBundle) -> RenderedField:
@@ -250,12 +259,8 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     div = bundle.dividend_info
     price = bundle.price_info
     analyst = bundle.analyst_consensus
-    sector_medians = bundle.peer_metrics.get("sector_medians", {})
     earnings_surprises = _earnings_surprises_text(bundle)
-    peers = _peers_text(bundle)
-    # The median is over the few named peers that have a P/E, not a sector benchmark (MSFT's 'Technology
-    # median' of 61.8 was one peer's P/E), so the count goes beside it.
-    pe_peer_count = sum(1 for p in bundle.peer_metrics.get("peer_records", []) if p.get("pe_ratio") is not None)
+    industry_pe = _industry_pe_text(bundle)
     # Metrics that do not exist for this kind of company (banks have no operating margin, REIT earnings multiples
     # mislead) read "not applicable", not as a data gap.
     na = bundle.not_applicable or {}
@@ -271,7 +276,8 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{fx_note}
 
 VALUATION (VAL):
-  P/E: {nv('pe_ratio', val.get('pe_ratio'))} vs Peer median: {_fmt(sector_medians.get('sector_median_pe'))} ({pe_peer_count} peers with a P/E)
+  P/E: {nv('pe_ratio', val.get('pe_ratio'))}
+  {industry_pe.text}
   Forward P/E: {_fmt(val.get('forward_pe'))} | PEG: {nv('peg_ratio', val.get('peg_ratio'))}
   Current price: {price.get('current_price')} {bundle.stock.currency} | Market cap: {_fmt(price.get('market_cap'))}
   52w range: {price.get('low_52w')} - {price.get('high_52w')}
@@ -298,13 +304,11 @@ ANALYST CONSENSUS (ANALYST):
   Consensus: {_fmt(analyst.get('consensus_rating'))} | Avg target: {_fmt(analyst.get('target_mean'))} {bundle.stock.currency}
 
 EARNINGS SURPRISE HISTORY (for your own guidance-vs-consensus judgment):
-{earnings_surprises.text}
-
-{peers.text}"""
+{earnings_surprises.text}"""
 
     field_presence = _missing_fields_presence(bundle)
     field_presence["earnings_surprises"] = earnings_surprises.present
-    field_presence["peers_block"] = peers.present
+    field_presence["industry_benchmark"] = industry_pe.present
     return text, field_presence
 
 

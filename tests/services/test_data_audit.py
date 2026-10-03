@@ -69,7 +69,7 @@ def test_the_known_table_can_be_overridden_per_call():
 
 
 def test_empty_pass2_fields_skip_not_applicable_and_expected_empties():
-    views = {"FUND": {"pe_ratio": "not_applicable", "operating_margin": None, "peer_pe_median": None},
+    views = {"FUND": {"pe_ratio": "not_applicable", "operating_margin": None, "industry_pe_median": None},
              "MACRO": {"commodity_context": None, "inflation_trend": None}}
     assert empty_pass2_fields(views) == [("FUND", "operating_margin"), ("MACRO", "inflation_trend")]
 

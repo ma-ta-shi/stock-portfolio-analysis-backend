@@ -110,15 +110,20 @@ def test_the_evidence_must_back_the_claim_rule_is_stated(prompt):
 
 
 @BOTH
-def test_the_peer_median_is_named_as_a_peer_median(prompt):
-    """MSFT's 'Technology sector median' P/E was FTNT's 61.8 (three peers had a P/E); both advocates argued a
-    54% discount from it. The payload now says peer_pe_median / peer_pe_count and the prompt says what it is."""
-    assert "peer_pe_median" in prompt and "peer_pe_count" in prompt
+def test_the_benchmark_is_named_as_an_industry_median_with_its_range_and_count(prompt):
+    """MSFT's 'sector median' P/E was FTNT's 61.8 (three peers had a P/E); both advocates argued a 54% discount from it.
+    The benchmark is now the whole industry's median with its middle half, and the prompt says what it is."""
+    assert "industry_pe_median" in prompt and "industry_pe_count" in prompt and "industry_pe_range" in prompt
+    assert "peer_pe_median" not in prompt
 
 
 @BOTH
-def test_the_pe_direction_is_copied_from_the_code_computed_field(prompt):
-    assert "pe_vs_peer_median_pct" in prompt
+def test_the_pe_position_is_copied_from_the_code_computed_field_and_in_range_is_in_line(prompt):
+    """An industry median is unstable where the industry is heterogeneous (MSFT's moved between 23.5 and 85.3 with the
+    universe), so only a P/E outside the industry's middle half counts as a premium or a discount."""
+    assert "pe_vs_industry_median_pct" in prompt and "pe_vs_industry" in prompt
+    assert "within_range" in prompt and "above_range" in prompt and "below_range" in prompt
+    assert "pe_vs_peer_median_pct" not in prompt
 
 
 @BOTH

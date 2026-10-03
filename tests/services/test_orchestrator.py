@@ -91,7 +91,7 @@ def _fake_bundle(**overrides) -> SimpleNamespace:
         profitability_metrics={"margin_trend": "stable", "roe": 0.3, "net_margin": 0.25,
                                 "operating_margin": 0.3, "fcf_to_net_income": 1.0},
         balance_sheet_metrics={"debt_to_equity": 1.5},
-        peer_metrics={"sector_medians": {"sector_median_pe": 25.0}},
+        peer_metrics={"industry_benchmark": None},
         insider_activity={"transactions": []},
         analyst_consensus={"consensus_rating": "buy", "target_mean": 250.0},
         not_applicable=None,

@@ -8,7 +8,7 @@ is told while every prompt file, and so the prompt hash, stays the same. To say 
 are comparable, a run needs to record the code state too.
 
 This hashes every `.py` file AND every `.json` data file under `backend/src` (found in review:
-`data/peers.json` and `data/ca_us_crosslisting.json` decide which peers and cross-listings a run
+`data/ca_us_crosslisting.json` decides which cross-listings a run
 uses, so an edit to them changes behavior with no Python change). It is deliberately not the git
 commit: work in progress is usually uncommitted, and a commit id would say "the same code" for two
 different working trees. It changes on ANY such edit, related to the model input or not, which errs

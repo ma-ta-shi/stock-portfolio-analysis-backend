@@ -116,9 +116,11 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             # Bull's key_metrics / growth / margins lines render these. All are
             # "Numeric passthrough from DataBundle" per the FUND prompt -- the LLM
             # produces only interpretive_fields, never a number.
-            "peer_pe_median": b.get("peer_pe_median"),
-            "peer_pe_count": b.get("peer_pe_count"),
-            "pe_vs_peer_median_pct": b.get("pe_vs_peer_median_pct"),
+            "industry_pe_median": b.get("industry_pe_median"),
+            "industry_pe_range": b.get("industry_pe_range"),
+            "industry_pe_count": b.get("industry_pe_count"),
+            "pe_vs_industry_median_pct": b.get("pe_vs_industry_median_pct"),
+            "pe_vs_industry": b.get("pe_vs_industry"),
             "roe": b.get("roe"),
             "debt_to_equity": b.get("debt_to_equity"),
             "net_margin": b.get("net_margin"),
