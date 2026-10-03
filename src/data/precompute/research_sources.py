@@ -56,7 +56,6 @@ from data.schemas.research_sources_bundle import ManagementSignals, ResearchSour
 
 logger = structlog.get_logger(__name__)
 
-_PEER_LIMIT = 2
 _PEER_NEWS_DAYS = 30  # a peer's recent news is 1-2 flavor headlines embedded in a
 # <=200-token block, not a citation-tracked list, so it keeps the single capped request
 # (never `thorough`): the newest 2 headlines are all it needs (BB-023).
@@ -342,9 +341,10 @@ async def _fetch_company_name(ticker: str) -> str | None:
 
 
 async def build_peer_blocks(
-    ticker: str, limit: int = _PEER_LIMIT, news_days: int = _PEER_NEWS_DAYS
+    ticker: str, peer_tickers: list[str], news_days: int = _PEER_NEWS_DAYS
 ) -> list[tuple[PeerBlock, str]]:
-    """Router.get_peers(ticker, limit) -> every candidate peer's content
+    """`peer_tickers` (the companies closest in market cap, resolved once per run by data/industry_benchmark.py
+    and passed in, so the Fundamental and Researcher inputs cannot disagree) -> every candidate peer's content
     fetched concurrently (asyncio.gather, order-preserving - matches the
     concurrency already used within one peer and within
     build_filing_digests, rather than fetching peers one at a time).
@@ -374,10 +374,7 @@ async def build_peer_blocks(
     can't be safely anonymized - so PEER_n numbering is only finalized
     after both filters, never renumbered twice.
 
-    Degrades to [] when get_peers() returns nothing, which it already
-    guarantees never raises."""
-    async with Router(ticker=ticker) as router:
-        peer_tickers = await router.get_peers(ticker, limit=limit)
+    Degrades to [] when there are no peer tickers."""
     if not peer_tickers:
         return []
 
@@ -868,6 +865,7 @@ async def build_research_sources(
     stock: StockLike | None = None,
     *,
     capture: CaptureContext | None = None,
+    peer_tickers: list[str] | None = None,
 ) -> ResearchSourcesBundle:
     """Top-level assembly - calls every builder above plus the three from
     2a-ii and wires the result into one validator-satisfying
@@ -964,7 +962,7 @@ async def build_research_sources(
     digests_task = asyncio.create_task(build_filing_digests(ticker, stock=stock, capture=capture))
 
     peer_pairs, management_signals = await asyncio.gather(
-        build_peer_blocks(ticker),
+        build_peer_blocks(ticker, peer_tickers or []),
         build_management_signals(ticker),
     )
 

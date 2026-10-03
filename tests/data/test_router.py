@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 
 import pandas as pd
@@ -9,7 +8,6 @@ from data.providers.base import NewsProvider, StockDataProvider
 from data.providers.router import (
     CA_CHAINS,
     US_CHAINS,
-    _DEFAULT_PEERS_PATH,
     Router,
     _is_empty,
     is_canadian,
@@ -408,112 +406,6 @@ async def test_get_financials_ca_chain_exhausted_returns_none_source():
     assert source is None
 
 
-# --- CA get_peers: static data/peers.json, not a live provider ---
-
-
-def test_shipped_peers_json_is_well_formed():
-    """The committed data/peers.json — not a tmp fixture. Every value must
-    be a non-empty list of uppercase ticker strings, and no ticker may list
-    itself as its own peer (it would collide in compute_peer_comparison)."""
-    data = json.loads(_DEFAULT_PEERS_PATH.read_text(encoding="utf-8"))
-    assert isinstance(data, dict) and data
-    for anchor_ticker, peer_list in data.items():
-        assert isinstance(peer_list, list) and peer_list, anchor_ticker
-        assert all(isinstance(p, str) and p == p.upper() for p in peer_list), anchor_ticker
-        assert anchor_ticker.upper() not in {p.upper() for p in peer_list}, anchor_ticker
-        assert len(peer_list) == len(set(peer_list)), f"{anchor_ticker} has duplicate peers"
-
-
-def test_shipped_peers_json_gives_every_entry_at_least_two_peers():
-    """< 2 peers trips the Fundamental/Researcher "limited peer data"
-    penalty, which is the whole reason this file exists (audit S6). Any
-    entry worth adding must clear that bar."""
-    data = json.loads(_DEFAULT_PEERS_PATH.read_text(encoding="utf-8"))
-    thin = {t: p for t, p in data.items() if len(p) < 2}
-    assert not thin, f"entries with <2 peers defeat the purpose: {thin}"
-
-
-async def test_ca_get_peers_reads_the_real_shipped_file():
-    """End to end through Router against the committed file, no fixture."""
-    router = Router(ticker="RY.TO", openbb_tmx=FakeProvider(), yfinance_news=FakeProvider())
-    assert await router.get_peers("RY.TO", limit=3) == ["TD.TO", "BNS.TO", "BMO.TO"]
-    # a cross-listed name intentionally carries US peers (audit 86bbr4azz logic)
-    assert await router.get_peers("SHOP.TO", limit=3) == ["XYZ", "WIX", "GDDY"]
-
-
-async def test_ca_get_peers_reads_static_file(tmp_path):
-    peers_file = tmp_path / "peers.json"
-    peers_file.write_text(json.dumps({"RY.TO": ["TD.TO", "BNS.TO", "BMO.TO"]}))
-    router = Router(
-        ticker="RY.TO",
-        openbb_tmx=FakeProvider(),
-        yfinance_news=FakeProvider(),
-        peers_path=peers_file,
-    )
-    result = await router.get_peers("RY.TO", limit=2)
-    assert result == ["TD.TO", "BNS.TO"]
-
-
-async def test_ca_get_peers_unknown_ticker_returns_empty_list(tmp_path):
-    peers_file = tmp_path / "peers.json"
-    peers_file.write_text(json.dumps({"RY.TO": ["TD.TO"]}))
-    router = Router(
-        ticker="XYZ.TO",
-        openbb_tmx=FakeProvider(),
-        yfinance_news=FakeProvider(),
-        peers_path=peers_file,
-    )
-    assert await router.get_peers("XYZ.TO") == []
-
-
-async def test_ca_get_peers_empty_file_returns_empty_list(tmp_path):
-    peers_file = tmp_path / "peers.json"
-    peers_file.write_text("")
-    router = Router(
-        ticker="RY.TO",
-        openbb_tmx=FakeProvider(),
-        yfinance_news=FakeProvider(),
-        peers_path=peers_file,
-    )
-    assert await router.get_peers("RY.TO") == []
-
-
-async def test_ca_get_peers_missing_file_returns_empty_list(tmp_path):
-    router = Router(
-        ticker="RY.TO",
-        openbb_tmx=FakeProvider(),
-        yfinance_news=FakeProvider(),
-        peers_path=tmp_path / "does_not_exist.json",
-    )
-    assert await router.get_peers("RY.TO") == []
-
-
-async def test_ca_get_peers_invalid_json_returns_empty_list(tmp_path):
-    peers_file = tmp_path / "peers.json"
-    peers_file.write_text("{not valid json")
-    router = Router(
-        ticker="RY.TO",
-        openbb_tmx=FakeProvider(),
-        yfinance_news=FakeProvider(),
-        peers_path=peers_file,
-    )
-    with structlog.testing.capture_logs() as logs:
-        result = await router.get_peers("RY.TO")
-    assert result == []
-    assert any(log["event"] == "router_peers_json_invalid" for log in logs)
-
-
-async def test_us_get_peers_uses_finnhub_chain():
-    router = Router(
-        ticker="AAPL",
-        fmp=FakeProvider(),
-        edgartools=FakeProvider(),
-        finnhub=FakeProvider(get_peers=_ok(["MSFT", "GOOG"])),
-    )
-    result = await router.get_peers("AAPL")
-    assert result == ["MSFT", "GOOG"]
-
-
 # --- get_ratios_ttm: carried forward from us_equity.py, FMP-only cross-check ---
 
 
@@ -743,7 +635,6 @@ _METHOD_ARGS: dict[str, tuple] = {
     "get_earnings_surprises": ("AAPL",),
     "get_insider_trading": ("AAPL", 90),
     "get_earnings_calendar": ("AAPL",),
-    "get_peers": ("AAPL", 5),
     "get_news": ("AAPL", 7),
     "get_analyst_recommendation_trends": ("AAPL",),
     "get_ratios_ttm": ("AAPL",),
@@ -763,7 +654,6 @@ _METHOD_EMPTY_TYPE: dict[str, type] = {
     "get_earnings_surprises": list,
     "get_insider_trading": list,
     "get_earnings_calendar": list,
-    "get_peers": list,
     "get_news": list,
     "get_analyst_recommendation_trends": list,
     "get_ratios_ttm": dict,
@@ -791,7 +681,6 @@ _METHOD_SAMPLE_VALUE: dict[str, object] = {
     "get_earnings_surprises": [{"period_end": "2026-07-30", "eps_actual": 2.02}],
     "get_insider_trading": [{"insider_name": "Jane"}],
     "get_earnings_calendar": [{"date": "2024-01-01"}],
-    "get_peers": ["MSFT"],
     "get_news": [{"headline": "x"}],
     "get_analyst_recommendation_trends": [{"period": "0m"}],
     "get_ratios_ttm": {"pe": 10},
@@ -827,8 +716,6 @@ def _values_equal(a, b) -> bool:
     return a == b
 
 
-# get_peers is special-cased on the CA branch (static file, not a live
-# provider chain) — covered by its own dedicated tests above instead.
 # get_financials returns (DataFrame, source) since 86bbb001k, not a bare
 # DataFrame — the generic loop's isinstance(result, _METHOD_EMPTY_TYPE[method])
 # check doesn't fit its richer contract; covered by its own dedicated tests
@@ -840,7 +727,7 @@ def _values_equal(a, b) -> bool:
 # no-op below. That's exercised by the dedicated tests above instead — if
 # _METHOD_ARGS["get_news"] ever changes to a real cross-listed CA ticker,
 # these generic tests would start depending on the real crosslisting map.
-_CA_CHAIN_METHODS = [m for m in CA_CHAINS if m not in ("get_peers", "get_financials")]
+_CA_CHAIN_METHODS = [m for m in CA_CHAINS if m != "get_financials"]
 _US_CHAIN_METHODS = [m for m in US_CHAINS if m != "get_financials"]
 
 

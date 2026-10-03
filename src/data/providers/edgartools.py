@@ -657,9 +657,6 @@ class EdgarToolsDataProvider(StockDataProvider):
     async def get_earnings_surprises(self, ticker: str) -> list[dict]:
         raise NotImplementedError("Earnings surprises are out of scope for edgartools — use fmp.py")
 
-    async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
-        raise NotImplementedError("Peers are out of scope for edgartools — use fmp.py")
-
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
         raise NotImplementedError("Earnings calendar is out of scope for edgartools — use fmp.py")
 

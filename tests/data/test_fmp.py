@@ -547,7 +547,6 @@ async def test_get_ratios_ttm_returns_first_record(provider):
     [
         ("get_financials", ("AAPL", "income", "annual")),
         ("get_insider_trading", ("AAPL",)),
-        ("get_peers", ("AAPL",)),
         ("get_news", ("AAPL", 7)),
         ("get_analyst_recommendation_trends", ("AAPL",)),
     ],

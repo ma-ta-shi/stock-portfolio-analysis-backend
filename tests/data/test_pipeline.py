@@ -119,7 +119,6 @@ class _FakeRouter:
     fin: object = SimpleNamespace()
     quote: dict = {}
     dividend_history: list = []
-    peers: list = []
     news: list = []
     news_calls: list = []
     price_history: object = None
@@ -159,9 +158,6 @@ class _FakeRouter:
     async def get_dividend_history(self, ticker, from_date, to_date):
         return self.dividend_history
 
-    async def get_peers(self, ticker):
-        return self.peers
-
     async def get_analyst_estimates(self, ticker):
         return {}
 
@@ -196,7 +192,6 @@ def _fake_fundamentals_compute_all(**kwargs):
         "profitability_metrics": {"gross_margin": 0.4},
         "balance_sheet_metrics": {"health_rating": "healthy"},
         "dividend_info": {"dividend_yield": None},
-        "peer_metrics": {},
         "missing_fields": [],
         "currency_mismatch": None,
         "not_applicable": None,
@@ -223,6 +218,10 @@ def _fake_technicals_compute_all(**kwargs):
 
 def _fake_risk_metrics_compute_all(**kwargs):
     return {"beta": 1.1, "sharpe_ratio": 0.8}
+
+
+async def _fake_industry_benchmark(ticker):
+    return None
 
 
 async def _fake_summarize_news(articles, **kwargs):
@@ -340,6 +339,7 @@ def _fake_assign_news_ids(articles):
 @pytest.fixture
 def patched_precompute(monkeypatch):
     monkeypatch.setattr(pipeline_module, "Router", _FakeRouter)
+    monkeypatch.setattr(pipeline_module, "industry_benchmark", _fake_industry_benchmark)
     monkeypatch.setattr(pipeline_module.fundamentals, "compute_all", _fake_fundamentals_compute_all)
     monkeypatch.setattr(pipeline_module.technicals, "compute_all", _fake_technicals_compute_all)
     monkeypatch.setattr(pipeline_module.risk_metrics, "compute_all", _fake_risk_metrics_compute_all)
@@ -440,7 +440,6 @@ async def test_prepare_us_stock_populates_every_field(patched_precompute):
     _FakeRouter.dividend_history = [
         {"ex_date": "2026-01-01", "payment_date": "2026-01-15", "amount_per_share": 0.5}
     ]
-    _FakeRouter.peers = ["MSFT"]
     _FakeRouter.price_history = _price_df()
 
     db = _FakeDB(stock)
@@ -487,7 +486,6 @@ async def test_prepare_ca_stock_populates_every_field(patched_precompute):
     _FakeRouter.dividend_history = [
         {"ex_date": "2026-01-01", "payment_date": "2026-01-15", "amount_per_share": 1.0}
     ]
-    _FakeRouter.peers = ["TD.TO"]
     _FakeRouter.price_history = _price_df()
 
     db = _FakeDB(stock)
@@ -598,7 +596,6 @@ async def test_prepare_propagates_a_real_preflight_warning(patched_precompute, m
         "low_52w": 100.0,
     }
     _FakeRouter.dividend_history = []
-    _FakeRouter.peers = []
     _FakeRouter.price_history = _ohlcv_with_zero_volume_day()
 
     db = _FakeDB(stock)
@@ -670,7 +667,6 @@ async def test_prepare_without_run_id_adds_no_llm_call_rows(patched_precompute):
         "high_52w": 160.0, "low_52w": 100.0,
     }
     _FakeRouter.dividend_history = []
-    _FakeRouter.peers = []
     _FakeRouter.price_history = _price_df()
 
     db = _FakeDB(stock)
@@ -701,7 +697,7 @@ async def test_prepare_with_run_id_adds_llm_call_rows_from_both_precompute_sourc
         return {"articles": [], "sentiment_source": None}
 
     async def _fake_build_research_sources_with_capture(
-        ticker, id_assigned_articles, stock=None, *, capture=None
+        ticker, id_assigned_articles, stock=None, *, capture=None, peer_tickers=None
     ):
         if capture is not None:
             capture.call_log.append(
@@ -742,7 +738,6 @@ async def test_prepare_with_run_id_adds_llm_call_rows_from_both_precompute_sourc
         "high_52w": 160.0, "low_52w": 100.0,
     }
     _FakeRouter.dividend_history = []
-    _FakeRouter.peers = []
     _FakeRouter.price_history = _price_df()
 
     db = _FakeDB(stock)
@@ -763,171 +758,63 @@ async def test_prepare_with_run_id_adds_llm_call_rows_from_both_precompute_sourc
     assert {row.seq for row in db.added} == {0, 1}
 
 
-# --- peers: the financials source follows the PEER's market; one bad peer never fails the run (BB-030) ---
+# --- the industry P/E benchmark: one call feeds the Fundamental data and the Researcher ---
 
 
-def _capture_peer_data(monkeypatch):
+def _benchmark(closest=("PEP", "MNST")):
+    from data.industry_benchmark import IndustryBenchmark
+
+    return IndustryBenchmark("Beverages—Non-Alcoholic", "US", 12, 28.1, 16.5, 40.0, tuple(closest))
+
+
+def _capture_research_sources(monkeypatch):
     seen = {}
 
-    def fake_compute_all(**kwargs):
-        seen["peer_data"] = kwargs["peer_data"]
-        return _fake_fundamentals_compute_all(**kwargs)
+    async def fake(ticker, articles, stock=None, **kwargs):
+        seen.update(kwargs)
+        return await _fake_build_research_sources(ticker, articles, stock, **kwargs)
 
-    monkeypatch.setattr(pipeline_module.fundamentals, "compute_all", fake_compute_all)
+    monkeypatch.setattr(pipeline_module, "build_research_sources", fake)
     return seen
 
 
-def _prepare_inputs(*, subject_is_ca: bool, peers: list[str]):
+def _inputs(subject_is_ca=False):
     _FakeRouter.is_ca = subject_is_ca
     _FakeRouter.fin = SimpleNamespace(currency="CAD" if subject_is_ca else "USD", quarters=[])
     _FakeRouter.quote = {"current_price": 10.0, "market_cap": 1e9, "currency": "USD"}
     _FakeRouter.price_history = _price_df()
     _FakeRouter.dividend_history = []
-    _FakeRouter.peers = peers
-    stock = _make_stock(is_ca=subject_is_ca)
-    context = AnalysisContext(account_type="tfsa", timeline="medium_term")
-    return stock, context
+    return _make_stock(is_ca=subject_is_ca), AnalysisContext(account_type="tfsa", timeline="medium_term")
 
 
-@pytest.mark.parametrize(
-    "subject_is_ca, peer, expected_provider",
-    [
-        (False, "PEP", "edgartools"),  # US subject, US peer: unchanged
-        (False, "PRMW.TO", "yfinance"),  # US subject, Canadian peer: the KO crash
-        (True, "TRP.TO", "yfinance"),  # Canadian subject, Canadian peer: unchanged
-        (True, "WIX", "yfinance"),  # Canadian subject, US peer: unchanged (the common case)
-    ],
-)
-async def test_each_peer_uses_the_financials_source_for_its_own_market(
-    patched_precompute, monkeypatch, subject_is_ca, peer, expected_provider
-):
-    seen = _capture_peer_data(monkeypatch)
-    stock, context = _prepare_inputs(subject_is_ca=subject_is_ca, peers=[peer])
+async def test_the_benchmark_is_stored_and_its_closest_companies_go_to_the_researcher(patched_precompute, monkeypatch):
+    calls = []
 
-    await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
+    async def fake_benchmark(ticker):
+        calls.append(ticker)
+        return _benchmark()
 
-    peer_calls = [call for call in _FakeFinancialsProvider.calls if call[1] == peer]
-    assert peer_calls == [(expected_provider, peer)]
-    assert [p[0] for p in seen["peer_data"]] == [peer]
-
-
-@pytest.mark.parametrize("subject_is_ca, bad_peer", [(False, "PRMW.TO"), (True, "WIX")])
-async def test_a_peer_that_cannot_be_fetched_is_dropped_and_reported_not_fatal(
-    patched_precompute, monkeypatch, subject_is_ca, bad_peer
-):
-    from data.degradation import DegradationCollector, reset_collector, set_collector
-
-    seen = _capture_peer_data(monkeypatch)
-    stock, context = _prepare_inputs(subject_is_ca=subject_is_ca, peers=["GOOD", bad_peer])
-    _FakeFinancialsProvider.failing = {bad_peer}
-    collector = DegradationCollector()
-    token = set_collector(collector)
-    try:
-        await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
-    finally:
-        reset_collector(token)
-
-    assert [p[0] for p in seen["peer_data"]] == ["GOOD"]  # the run finished without the bad peer
-    events = collector.drain()
-    assert [e.key for e in events] == [("pipeline", "peer_financials", "fetch_failed")]
-    assert events[0].context["symbols"] == [bad_peer]
-    assert bad_peer in events[0].message
-
-
-async def test_the_subjects_own_financials_failing_still_fails_the_run(patched_precompute):
-    """Only PEER fetches are isolated: no financials for the stock itself is a real failure."""
-    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
-    _FakeFinancialsProvider.failing = {"AAPL"}
-
-    with pytest.raises(RuntimeError, match="Company not found"):
-        await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
-
-
-# --- news: fetch the window, hand each agent a bounded selection (BB-023) ---
-
-
-def _raw_busy_news(days: int = 10, per_day: int = 40) -> list[dict]:
-    from datetime import timedelta
-
-    base = datetime(2026, 9, 28, 12, 0, 0)
-    articles = []
-    for d in range(days):
-        for i in range(per_day):
-            articles.append(
-                {
-                    "headline": f"Story {d}-{i}",
-                    "summary": "",
-                    "source": "Yahoo" if i % 3 else "Benzinga",
-                    "url": f"https://x/{d}/{i}",
-                    "published_at": (base - timedelta(days=d, minutes=i)).strftime(
-                        "%Y-%m-%d %H:%M:%S"
-                    ),
-                }
-            )
-    return articles
-
-
-async def test_the_main_stocks_news_is_fetched_for_the_whole_window_and_the_peers_keep_one_request(
-    patched_precompute,
-):
-    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
-
-    await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
-
-    assert _FakeRouter.news_calls == [("AAPL", 30, True)]  # 30 days, thorough
-
-
-async def test_each_agent_gets_a_bounded_selection_not_everything_fetched(
-    patched_precompute, monkeypatch
-):
-    from data.precompute.news_id_assignment import assign_news_ids
-
-    monkeypatch.setattr(pipeline_module, "assign_news_ids", assign_news_ids)  # the fixture stubs it out
-    seen = {}
-
-    async def spy_summarize(articles, **kwargs):
-        seen["scored"] = list(articles)
-        return {"articles": [{**a, "sentiment": "neutral"} for a in articles], "sentiment_source": "local_llm"}
-
-    async def spy_research(ticker, articles, stock=None, **kwargs):
-        seen["researcher"] = list(articles)
-        return await _fake_build_research_sources(ticker, articles, stock=stock, **kwargs)
-
-    def spy_technicals(**kwargs):
-        seen["technicals_news"] = list(kwargs["news_ids"])
-        return _fake_technicals_compute_all(**kwargs)
-
-    monkeypatch.setattr(pipeline_module.sentiment, "summarize_news", spy_summarize)
-    monkeypatch.setattr(pipeline_module, "build_research_sources", spy_research)
-    monkeypatch.setattr(pipeline_module.technicals, "compute_all", spy_technicals)
-    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
-    _FakeRouter.news = _raw_busy_news(days=10, per_day=40)  # 400 articles
+    monkeypatch.setattr(pipeline_module, "industry_benchmark", fake_benchmark)
+    seen = _capture_research_sources(monkeypatch)
+    stock, context = _inputs()
 
     bundle = await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
 
-    assert len(seen["technicals_news"]) == 400  # price-gap explanations still see every date
-    assert len(seen["scored"]) == 10 * 6  # six a day: bounded by days, not by volume
-    assert len(seen["researcher"]) == 10 * 2
-    shown = [a for a in bundle.news_with_sentiment if a["shown"]]
-    assert len(bundle.news_with_sentiment) == 60 and len(shown) == 20
-    assert bundle.news_coverage == {"window_days": 30, "fetched": 400}
-    # the ids the agents cite are the same article everywhere
-    scored_ids = {a["id"] for a in seen["scored"]}
-    assert {a["id"] for a in shown} <= scored_ids
+    assert calls == [stock.canonical_ticker]  # resolved once, not once per consumer
+    assert bundle.peer_metrics["industry_benchmark"]["median_pe"] == 28.1
+    assert bundle.peer_metrics["industry_benchmark"]["p25_pe"] == 16.5
+    assert seen["peer_tickers"] == ["PEP", "MNST"]
 
 
-async def test_a_quiet_ticker_keeps_all_its_news(patched_precompute, monkeypatch):
-    from data.precompute.news_id_assignment import assign_news_ids
+async def test_no_benchmark_means_no_peer_metrics_and_no_peers_for_the_researcher(patched_precompute, monkeypatch):
+    async def none(ticker):
+        return None
 
-    async def scoring(articles, **kwargs):
-        return {"articles": [{**a, "sentiment": "neutral"} for a in articles], "sentiment_source": "local_llm"}
-
-    monkeypatch.setattr(pipeline_module, "assign_news_ids", assign_news_ids)
-    monkeypatch.setattr(pipeline_module.sentiment, "summarize_news", scoring)
-    stock, context = _prepare_inputs(subject_is_ca=False, peers=[])
-    _FakeRouter.news = _raw_busy_news(days=5, per_day=1)
+    monkeypatch.setattr(pipeline_module, "industry_benchmark", none)
+    seen = _capture_research_sources(monkeypatch)
+    stock, context = _inputs()
 
     bundle = await DataPipeline().prepare(stock.stock_id, context, _FakeDB(stock))
 
-    assert len(bundle.news_with_sentiment) == 5
-    assert bundle.news_coverage == {"window_days": 30, "fetched": 5}
+    assert bundle.peer_metrics == {"industry_benchmark": None}
+    assert seen["peer_tickers"] == []

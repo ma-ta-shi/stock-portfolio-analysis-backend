@@ -608,57 +608,6 @@ class YFinanceDataProvider(StockDataProvider):
             )
         return records
 
-    async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
-        """
-        Finds industry peers for a given stock using yfinance screeners.
-        :param ticker: Stock ticker symbol (e.g., 'AAPL', 'MSFT')
-        :param limit: Maximum number of peers to return (default 5)
-        :return: A list of ticker strings representing peer companies
-        """
-        try:
-            # Initialize the target stock to find its classification
-            target_stock = yf.Ticker(ticker)
-            info = target_stock.info
-            # Extract industry key (safely fallback to sector if missing)
-            industry_name = info.get("industry") or info.get("sector")
-            if not industry_name:
-                print(f"Could not identify industry classification for {ticker}.")
-                return []
-            # Use the yfinance Screener to fetch companies matching this industry
-            # We create an EquityQuery filtering by the parsed industry name
-            query = yf.EquityQuery("eq", ["industry", industry_name])
-            screener = yf.Screener()
-            screener.set_body(
-                {
-                    "size": limit + 5,  # Pull slightly more to filter out the target ticker itself
-                    "offset": 0,
-                    "sortField": "intradaymarketcap",  # Sort by market cap to get closest major competitors
-                    "sortType": "DESC",
-                    "quoteType": "EQUITY",
-                    "query": query.to_dict(),
-                }
-            )
-            # Execute search
-            results = screener.response
-            quotes = results.get("finance", {}).get("result", [{}])[0].get("quotes", [])
-            # Filter the response to clean the final array
-            peer_list = []
-            target_upper = ticker.upper()
-            for item in quotes:
-                peer_symbol = item.get("symbol", "").upper()
-                # Ensure we don't include the input company in its own peer list
-                if peer_symbol and peer_symbol != target_upper:
-                    peer_list.append(peer_symbol)
-                if len(peer_list) >= limit:
-                    break
-            return peer_list
-        except Exception as e:
-            print(f"Error retrieving peer data: {e}")
-            report_degradation(
-                "yfinance", "get_peers", FETCH_FAILED, str(e), exc=e, context={"symbol": ticker}
-            )
-            return []
-
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
         """Upcoming earnings date(s) for a ticker, one row per date.
 

@@ -1163,18 +1163,6 @@ async def test_a_failed_quote_is_reported_and_stays_empty(provider, monkeypatch,
     assert "KO" in events[0].message
 
 
-async def test_a_failed_peer_lookup_is_reported_and_returns_empty(provider, monkeypatch, parity):
-    def boom(ticker):
-        raise RuntimeError("yahoo is down")
-
-    _patch_ticker(monkeypatch, boom)
-
-    plain, with_collector, events = await parity(lambda: provider.get_peers("KO"))
-
-    assert plain == with_collector == []  # unchanged
-    assert [e.key for e in events] == [("yfinance", "get_peers", "fetch_failed")]
-
-
 async def test_an_insider_table_with_no_date_column_is_reported_as_data_missing(
     provider, monkeypatch, collector
 ):

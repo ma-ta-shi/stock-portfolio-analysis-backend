@@ -924,14 +924,7 @@ async def test_get_news_empty_result_returns_empty_list(provider, mock_obb):
 
 
 # ---------- Unsupported methods (should raise NotImplementedError) ----------
-# get_peers: confirmed live 2026-08-04 that obb.equity.compare.peers
-# genuinely has no tmx provider — a real gap, not a missed implementation.
-
-
-@pytest.mark.asyncio
-async def test_get_peers_not_implemented(provider):
-    with pytest.raises(NotImplementedError):
-        await provider.get_peers(ticker="SHOP")
+# Unsupported methods raise NotImplementedError.
 
 
 @pytest.mark.asyncio
