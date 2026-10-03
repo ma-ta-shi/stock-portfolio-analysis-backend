@@ -29,10 +29,10 @@ def _bundle(**overrides) -> SimpleNamespace:
                             "buy_count": 30, "hold_count": 8, "sell_count": 2},
         analyst_recommendation_trends=None,
         insider_activity={"transactions": []},
-        price_info={"market_cap": 3.0e12},
+        price_info={"market_cap": 3.0e12, "current_price": 200.0},
+        analyst_rating_changes=None,
         short_interest={"short_interest_pct": 1.2, "days_to_cover": 1.8,
                          "shares_short": 50_000_000, "shares_short_prior_month": 55_000_000},
-        peer_sentiment=[],
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -45,7 +45,7 @@ def test_renders_real_header_fields():
 
 def test_renders_news_with_real_citation_id_and_sentiment_label():
     msg, _ = build_user_message(_bundle())
-    assert "N1: Apple announces new product" in msg
+    assert "N1 09-20: Apple announces new product" in msg
     assert "sentiment=positive" in msg
 
 
@@ -90,20 +90,41 @@ def test_insider_counts_exclude_stale_transactions():
 
 def test_short_interest_renders_real_fields():
     msg, _ = build_user_message(_bundle())
-    assert "Short interest % of float: 1.2" in msg
-    assert "Days to cover: 1.8" in msg
-    assert "Shares short: 50000000 (30d prior: 55000000)" in msg
+    assert "1.2% of float, 1.8 days to cover" in msg
+    assert "shares short 50,000,000 against 55,000,000 a month earlier (-9.1%)" in msg
 
 
 def test_no_short_interest_renders_honestly():
     bundle = _bundle(short_interest=None)
     msg, _ = build_user_message(bundle)
-    assert "N/A — no short interest data available." in msg
+    assert "N/A -- no short interest data available." in msg
 
 
-def test_analyst_recommendation_trends_none_renders_honestly_for_ca():
-    msg, _ = build_user_message(_bundle())  # default None
-    assert "N/A — not available for Canadian stocks" in msg
+def test_no_analyst_distribution_and_no_changes_renders_honestly():
+    msg, _ = build_user_message(_bundle())  # both default None
+    assert "N/A -- no rating distribution or rating changes returned." in msg
+
+
+def test_rating_changes_and_the_target_against_the_price_are_rendered_for_a_canadian_name():
+    """TD.TO 2026-10-03: yfinance has the distribution and the dated changes; the old payload said 'not available
+    for Canadian stocks'."""
+    bundle = _bundle(
+        analyst_recommendation_trends=[{"period": "0m", "strong_buy": 5, "buy": 4, "hold": 3, "sell": 0, "strong_sell": 2}],
+        analyst_rating_changes=[
+            {"date": "2026-09-20", "action": "up", "price_target_action": "Raises"},
+            {"date": "2026-09-10", "action": "main", "price_target_action": "Lowers"},
+        ],
+    )
+    msg, _ = build_user_message(bundle)
+    assert "0m: strong_buy=5 buy=4 hold=3 sell=0 strong_sell=2" in msg
+    assert "Rating changes: 1 upgrade, 0 downgrades, 0 new initiations in the last 90d; price targets 1 raised, 1 cut" in msg
+    assert "average target +5.0% against the price" in msg
+
+
+def test_a_quiet_name_says_when_the_last_change_was():
+    bundle = _bundle(analyst_rating_changes=[{"date": "2026-06-01", "action": "main", "price_target_action": "Raises"}])
+    msg, _ = build_user_message(bundle)
+    assert "Rating changes: none in the last 90d (latest 2026-06-01)" in msg
 
 
 def test_analyst_recommendation_trends_renders_raw_distributions_not_upgrade_counts():
@@ -118,17 +139,15 @@ def test_analyst_recommendation_trends_renders_raw_distributions_not_upgrade_cou
     assert "analyst_upgrades_30d" not in msg
 
 
-def test_peer_sentiment_renders_honestly_not_fabricated():
-    """peer_sentiment is hardcoded [] in the data pipeline today -- a real
-    gap, must never render a fabricated comparison."""
+def test_no_peer_or_social_text_is_in_the_payload():
+    """Peer sentiment was '[]' in 48 of 48 real runs and social sentiment is always unknown: neither is shown."""
     msg, _ = build_user_message(_bundle())
-    assert "PEER SENTIMENT:" in msg
-    assert "not currently available" in msg
+    assert "PEER" not in msg and "social_sentiment" not in msg
 
 
 def test_canadian_flag_absent_for_us_stock():
     msg, _ = build_user_message(_bundle())  # canadian_data_flags=None
-    assert "CANADIAN DATA LIMITED" not in msg
+    assert "Canadian stock" not in msg
 
 
 def test_canadian_flag_present_for_ca_stock():
@@ -137,23 +156,22 @@ def test_canadian_flag_present_for_ca_stock():
         sedar_filing_available=True, statcan_available=True,
     ))
     msg, _ = build_user_message(bundle)
-    assert "CANADIAN DATA LIMITED: true" in msg
+    assert "Canadian stock: article sentiment is scored from headlines only" in msg
+    assert "Finnhub" not in msg
 
 
 # ---------- field_presence (86bbwachy Phase 4) ----------
 
 
 def test_field_presence_default_bundle():
-    """Default fixture: real news, real short interest, real consensus, but
-    analyst_recommendation_trends=None (the CA/no-data default) and
-    peer_sentiment permanently absent."""
+    """Default fixture: real news, real short interest, real consensus, but no rating distribution and no
+    rating changes."""
     _, presence = build_user_message(_bundle())
     assert presence == {
         "news_block": True,
         "analyst_activity": False,
         "analyst_consensus": True,
         "short_interest": True,
-        "peer_sentiment": False,
     }
 
 
@@ -171,6 +189,13 @@ def test_field_presence_analyst_activity_true_with_real_trends():
     assert presence["analyst_activity"] is True
 
 
+def test_field_presence_analyst_activity_true_with_only_rating_changes():
+    """A Canadian name with no distribution but real rating changes still has analyst activity."""
+    bundle = _bundle(analyst_rating_changes=[{"date": "2026-09-20", "action": "up"}])
+    _, presence = build_user_message(bundle)
+    assert presence["analyst_activity"] is True
+
+
 def test_field_presence_analyst_consensus_false_without_a_rating():
     bundle = _bundle(analyst_consensus={"consensus_rating": None, "num_analysts": None, "target_mean": None})
     _, presence = build_user_message(bundle)
@@ -181,14 +206,6 @@ def test_field_presence_short_interest_false_when_unavailable():
     bundle = _bundle(short_interest=None)
     _, presence = build_user_message(bundle)
     assert presence["short_interest"] is False
-
-
-def test_field_presence_peer_sentiment_always_false():
-    """Permanent gap -- always False regardless of bundle content, since
-    nothing in the pipeline populates it yet (see build_user_message's own
-    docstring)."""
-    _, presence = build_user_message(_bundle())
-    assert presence["peer_sentiment"] is False
 
 
 def test_field_presence_has_no_entry_for_insider_activity():
@@ -202,27 +219,23 @@ def test_field_presence_has_no_entry_for_insider_activity():
 
 
 def test_data_coverage_line_flags_default_fixtures_real_gaps():
-    """Default fixture has no analyst_activity (CA/no-data default) and the
-    permanent peer_sentiment gap -- both must be mentioned, not a bare
-    'standard.'"""
+    """Default fixture has no analyst_activity: mentioned, not a bare 'standard.'"""
     _, presence = build_user_message(_bundle())
     line = _data_coverage_line(presence)
-    assert "no analyst upgrade/downgrade data available" in line
-    assert "peer sentiment comparison is not yet available" in line
+    assert "no analyst rating data available" in line
+    assert "peer sentiment" not in line
     assert "no news articles available" not in line  # default fixture has real news
 
 
-def test_data_coverage_line_never_standard_due_to_permanent_peer_sentiment_gap():
-    """peer_sentiment is a permanent gap, so this line is never a bare
-    'standard.' for any real run -- confirmed even with every other field
-    present."""
+def test_data_coverage_line_is_standard_when_everything_is_present():
+    """With no permanent gap left (peer sentiment is retired) a fully covered run reads as standard."""
     bundle = _bundle(analyst_recommendation_trends=[
         {"period": "2026-09-01", "strong_buy": 10, "buy": 15, "hold": 5, "sell": 1, "strong_sell": 0},
     ])
     _, presence = build_user_message(bundle)
     line = _data_coverage_line(presence)
-    assert "no analyst upgrade/downgrade data available" not in line
-    assert "peer sentiment comparison is not yet available" in line
+    assert "no analyst rating data available" not in line
+    assert "standard" in line.lower()
 
 
 # ---------- _validate_with_caveats (86bbummwp 1d) ----------
@@ -253,12 +266,10 @@ def _valid_sentiment_analyst_output(**overrides) -> dict:
             "news_sentiment": {"overall": "positive", "dominant_themes": ["product launch"], "sentiment_trend": "stable"},
             "analyst_sentiment": {"consensus_direction": "bullish", "recent_changes": "no changes", "avg_price_target": 20.0},
             "insider_activity_interpretation": "Modest net insider buying, a mildly positive signal.",
-            "short_interest_interpretation": {"trend": "stable", "interpretation": "normal"},
             "social_sentiment": "unknown",
             "narrative_momentum": "stable",
             "positioning_assessment": "neutral",
             "analyst_consensus": "buy",
-            "peer_sentiment_comparison": "Not currently available.",
         },
         "contrarian_signals": [],
         "pass2_view": {},
@@ -327,22 +338,6 @@ def test_validate_with_caveats_flags_high_confidence_with_anomaly_and_no_caveat(
 def test_validate_with_caveats_passes_high_confidence_with_anomaly_when_caveat_present():
     out = _valid_sentiment_analyst_output(caveats=["News sentiment positive despite net insider selling."])
     passed, errors = _validate(out, canadian_sentiment_inferred=False, anomalies=["real divergence"])
-    assert passed, errors
-
-
-def test_validate_with_caveats_peer_sentiment_alone_never_trips_the_rule():
-    """Regression test (86bbummwp Tier 3): peer_sentiment is permanently
-    absent (hardcoded empty in data/pipeline.py's DataBundle assembly, never
-    a real per-run signal) -- confirmed live that the follow-on's own
-    validator wiring passed material_absent unfiltered here, so this real
-    output would have failed validation on every single high-confidence run
-    solely because of a permanent gap that isn't this run's fault. The real
-    run() call site now excludes it the same way RSRCH excludes
-    transcript_excerpts and Tax Strategist excludes wht -- this proves the
-    rule itself would pass cleanly once that exclusion is applied, matching
-    the equivalent regression tests already written for RSRCH/TAX."""
-    out = _valid_sentiment_analyst_output(caveats=[])
-    passed, errors = _validate(out, canadian_sentiment_inferred=False, material_absent=[])
     assert passed, errors
 
 
@@ -488,8 +483,8 @@ def test_only_the_shown_headlines_are_listed():
 
     msg, _ = build_user_message(bundle)
 
-    assert "N1: Headline 1" in msg and "N4: Headline 4" in msg  # shown
-    assert "N2: Headline 2" not in msg and "N3: Headline 3" not in msg  # scored, not shown
+    assert "N1 09-07: Headline 1" in msg and "N4 09-10: Headline 4" in msg  # shown, with their dates
+    assert "Headline 2 (" not in msg and "Headline 3 (" not in msg  # scored, not shown
 
 
 def test_the_coverage_totals_and_weekly_tone_are_reported_when_known():
@@ -501,9 +496,17 @@ def test_the_coverage_totals_and_weekly_tone_are_reported_when_known():
 
     assert "2400 articles fetched over the last 30 days; 30 sampled" in msg
     assert "10 listed below" in msg
-    assert "Tone of the scored sample: 10 positive, 10 negative, 10 neutral." in msg
+    assert "Tone of the scored sample: 10 positive, 10 negative, 10 neutral (33% positive, 33% negative, 33% neutral)." in msg
     assert "Week of 2026-09-07:" in msg and "Week of 2026-09-14:" in msg
     assert "sample, so they can show a large shift" in msg
+
+
+def test_the_tone_shares_are_of_the_whole_sample_not_of_the_non_neutral_ones():
+    """KO 2026-10-03: 48 positive, 19 negative, 42 neutral was written up as '72% positive' (48 of 67)."""
+    from agents.pass1_sentiment_analyst import _tone_shares
+
+    articles = [{"sentiment": "positive"}] * 48 + [{"sentiment": "negative"}] * 19 + [{"sentiment": "neutral"}] * 42
+    assert _tone_shares(articles) == "44% positive, 17% negative, 39% neutral"
 
 
 def test_weekly_counts_add_up_to_the_sample():
@@ -523,7 +526,7 @@ def test_without_coverage_the_payload_is_unchanged():
     msg, _ = build_user_message(_bundle())
 
     assert "Coverage:" not in msg and "Week of" not in msg
-    assert "N1: Apple announces new product" in msg
+    assert "N1 09-20: Apple announces new product" in msg
 
 
 def test_the_anomaly_check_uses_the_whole_scored_sample_not_just_the_shown_ones():
@@ -551,3 +554,50 @@ def test_insider_line_keeps_only_notable_transactions_for_the_companys_size():
     big, small = build_user_message(_bundle(insider_activity={"transactions": [sale]}, price_info={"market_cap": 28.3e9}))[0],         build_user_message(_bundle(insider_activity={"transactions": [sale]}, price_info={"market_cap": 3.0e12}))[0]
     assert "Insider activity (90d): net selling $6.0M from 1 notable of 1 transactions" in big
     assert "none above the notable threshold of $30.0M: routine" in small
+
+
+# ---------- dominant_themes anchored to real news IDs (2026-10-03) ----------
+
+
+def _themed(ids):
+    return _valid_sentiment_analyst_output(structured_data={
+        **_valid_sentiment_analyst_output()["structured_data"],
+        "news_sentiment": {"overall": "positive", "sentiment_trend": "stable",
+                           "dominant_themes": [{"theme": "t", "sentiment": "positive", "primary_news_id": i} for i in ids]},
+    })
+
+
+def test_a_theme_anchored_to_a_listed_news_id_passes():
+    passed, errors = _validate_with_caveats(
+        _themed(["N1", "N4"]), canadian_sentiment_inferred=False, material_absent=[], anomalies=[], stale_data=[],
+        news_ids={"N1", "N4", "N7"},
+    )
+    assert passed, errors
+
+
+def test_a_theme_anchored_to_a_source_label_or_unlisted_id_is_rejected():
+    """KO 2026-10-03: a theme's primary_news_id was 'ANALYST'."""
+    passed, errors = _validate_with_caveats(
+        _themed(["N1", "ANALYST", "N99"]), canadian_sentiment_inferred=False, material_absent=[], anomalies=[], stale_data=[],
+        news_ids={"N1", "N4"},
+    )
+    assert not passed
+    assert any("'ANALYST'" in e for e in errors) and any("'N99'" in e for e in errors)
+
+
+def test_the_average_target_is_shown_to_cents_not_as_yahoo_gave_it():
+    """MSFT 2026-10-03: 'Avg target: 578.82245 USD' was copied into evidence as written."""
+    msg, _ = build_user_message(_bundle(analyst_consensus={"consensus_rating": "buy", "num_analysts": 3, "target_mean": 578.82245}))
+    assert "Avg target: 578.82 USD" in msg and "578.82245" not in msg
+    msg, _ = build_user_message(_bundle(analyst_consensus={"consensus_rating": "buy", "num_analysts": 3, "target_mean": None}))
+    assert "Avg target: N/A USD" in msg
+
+
+def test_an_identical_second_monthly_distribution_row_is_not_repeated():
+    """Yahoo's 0m and -1m rows are often identical (TD.TO, SHOP.TO, ENB.TO 2026-10-03): the repeat adds tokens, not information."""
+    same = {"strong_buy": 5, "buy": 4, "hold": 3, "sell": 0, "strong_sell": 2}
+    msg, _ = build_user_message(_bundle(analyst_recommendation_trends=[{"period": "0m", **same}, {"period": "-1m", **same}]))
+    assert "0m: strong_buy=5" in msg and "-1m:" not in msg
+    changed = {**same, "buy": 6}
+    msg, _ = build_user_message(_bundle(analyst_recommendation_trends=[{"period": "0m", **changed}, {"period": "-1m", **same}]))
+    assert "0m: strong_buy=5 buy=6" in msg and "-1m: strong_buy=5 buy=4" in msg

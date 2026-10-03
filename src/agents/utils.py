@@ -219,7 +219,7 @@ def compute_data_quality_assessment(
 
     `material_absent` is the caller's own `data_coverage["absent"]` with any
     permanently-structural items already excluded (Stock Researcher's
-    `transcript_excerpts`, Sentiment's `peer_sentiment`) -- same list already
+    `transcript_excerpts`) -- same list already
     built for `validate_confidence_requires_caveat_when_flagged`'s own
     `material_absent` param, reused here rather than recomputed.
 

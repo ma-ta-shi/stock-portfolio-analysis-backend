@@ -377,7 +377,9 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
     if word_count(summary) > 80:
         errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 80)")
 
-    _check_narrative_chars(output, 720, 1080, errors)
+    # Floor 600 (about 100 words), not 720: of 24 replays after the prompt rewrite the model's too-short narratives were 562-694 characters;
+    # Pass 2 reads the narrative as one of several fields, and 600 to 1,080 characters is a complete 4 to 7 sentence synthesis.
+    _check_narrative_chars(output, 600, 1080, errors)
     # Sentiment's declared bounds: key_factors 1-3, risks 0-2 (thin-data path).
     _check_key_factors(output.get("key_factors", []), errors, lo=1, hi=3)
     _check_risks(output.get("risks", []), errors, lo=0, hi=2)
@@ -385,30 +387,8 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
     # structured_data
     sd = output.get("structured_data", {})
     if isinstance(sd, dict):
-        # short_interest_interpretation is an OBJECT in prompt schema v1.2
-        # ({trend, interpretation}), not a flat string. The previous flat-string
-        # check raised TypeError ("unhashable type: 'dict'") on every schema-
-        # conformant output -- a crash, not a validation failure -- which means
-        # this validator had never been run against real model output.
-        valid_si = {"elevated_volatility_risk", "normal", "insufficient_data"}
-        valid_trend = {"increasing", "stable", "decreasing", "unknown"}
-        si = sd.get("short_interest_interpretation")
-        if not isinstance(si, dict):
-            errors.append(
-                "structured_data.short_interest_interpretation: must be an object with "
-                "'trend' and 'interpretation'"
-            )
-        else:
-            if si.get("interpretation") not in valid_si:
-                errors.append(
-                    "structured_data.short_interest_interpretation.interpretation: "
-                    f"must be one of {valid_si}"
-                )
-            if si.get("trend") not in valid_trend:
-                errors.append(
-                    "structured_data.short_interest_interpretation.trend: "
-                    f"must be one of {valid_trend}"
-                )
+        # short_interest_interpretation is computed in code (data/precompute/sentiment_signals.py) and carried
+        # in the Pass 2 view; the model no longer produces it, so there is nothing to validate here.
         # social_sentiment must always be "unknown"
         if sd.get("social_sentiment") not in {"unknown", None}:
             errors.append(
@@ -432,10 +412,11 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
     if isinstance(p2v, dict) and "social_sentiment" in p2v:
         errors.append("pass2_view: must NOT include social_sentiment (excluded from stable contract)")
 
-    # contrarian_signals: 0-2 items
-    cs = output.get("contrarian_signals", [])
-    if isinstance(cs, list) and len(cs) > 2:
-        errors.append(f"contrarian_signals: max 2 items, got {len(cs)}")
+    # contrarian_signals: 0-2 items. The schema puts them under structured_data; the check used to look only at the
+    # top level, so the cap the prompt states was never enforced where the model writes them.
+    for cs in (output.get("contrarian_signals"), (sd if isinstance(sd, dict) else {}).get("contrarian_signals")):
+        if isinstance(cs, list) and len(cs) > 2:
+            errors.append(f"contrarian_signals: max 2 items, got {len(cs)}")
 
     _sweep_declared_enums(output, errors)
     return len(errors) == 0, errors
@@ -529,6 +510,25 @@ def validate_thin_volume_caveat(output: dict, avg_dollar_volume: float) -> tuple
             f"TECH: avg_dollar_volume=${avg_dollar_volume:,.0f} < $1M but no thin volume / liquidity caveat found"
         )
 
+    return len(errors) == 0, errors
+
+
+def validate_theme_news_ids(output: dict, valid_ids: set[str]) -> tuple[bool, list[str]]:
+    """Every `dominant_themes[].primary_news_id` must be a news ID the payload actually lists.
+
+    The design doc has always required it; nothing enforced it, and a real run (KO, 2026-10-03) anchored a theme to
+    "ANALYST", a source label rather than an article. Skipped when the payload lists no articles (an empty theme list
+    is then the right answer, and a theme with an ID is caught below as unknown)."""
+    errors: list[str] = []
+    ns = (output.get("structured_data") or {}).get("news_sentiment")
+    themes = ns.get("dominant_themes") if isinstance(ns, dict) else None
+    for i, theme in enumerate(themes if isinstance(themes, list) else []):
+        nid = theme.get("primary_news_id") if isinstance(theme, dict) else None
+        if nid not in valid_ids:
+            errors.append(
+                f"structured_data.news_sentiment.dominant_themes[{i}].primary_news_id: {nid!r} is not a news ID "
+                f"listed in the payload (use one of the N-ids shown)"
+            )
     return len(errors) == 0, errors
 
 

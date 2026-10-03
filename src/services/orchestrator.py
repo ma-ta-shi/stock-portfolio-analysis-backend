@@ -68,6 +68,7 @@ from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile
 from data.industry_benchmark import pe_vs_industry
 from data.precompute.insider import summarize_insider_activity
+from data.precompute.sentiment_signals import analyst_changes_for_bundle, summarize_short_interest
 from data.degradation import DegradationCollector, reset_collector, set_collector
 from data.pipeline import DataPipeline
 from data.precompute.tax_metrics import AccountStateInput, UserTaxProfileInput
@@ -142,6 +143,8 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
         bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap"),
         bundle.insider_activity.get("value_currency"), bundle.price_info.get("currency"),
     )
+    analyst = analyst_changes_for_bundle(bundle)
+    short = summarize_short_interest(bundle.short_interest)
     ti = bundle.technical_indicators
     sr = bundle.support_resistance
     m = bundle.macro_sources
@@ -170,6 +173,10 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
         "SENT": {
             "insider_activity_90d": insider["text"],
             "insider_materiality": insider["materiality"],
+            # Decided in code from the bundle's figures, not by the model (which wrote "normal volatility risk"
+            # for a three-value field in 27 of 48 first attempts): {trend, interpretation}.
+            "short_interest_interpretation": {"trend": short["trend"], "interpretation": short["interpretation"]},
+            "analyst_changes_90d": analyst["text"],
             # The Pass 2 view used to read these from the model's own output, which never contains them
             # (empty in 44 of 46 real runs); they are provider data, so they come from the bundle.
             "consensus_rating": bundle.analyst_consensus.get("consensus_rating"),
