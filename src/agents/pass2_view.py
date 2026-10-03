@@ -161,8 +161,9 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             # Code-computed, in dollars and against market cap; the interpretation above is the model's own words.
             "insider_activity_90d": b.get("insider_activity_90d"),
             "insider_materiality": b.get("insider_materiality"),
-            "short_interest_interpretation": c.get("short_interest_interpretation"),
-            "peer_sentiment_comparison": c.get("peer_sentiment_comparison"),
+            # Code-computed ({trend, interpretation}); the model no longer writes it.
+            "short_interest_interpretation": b.get("short_interest_interpretation"),
+            "analyst_changes_90d": b.get("analyst_changes_90d"),
             # Provider data passed through from the bundle, never the model.
             "consensus_rating": b.get("consensus_rating"),
             "average_price_target": b.get("average_price_target"),

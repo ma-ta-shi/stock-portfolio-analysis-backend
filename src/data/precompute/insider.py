@@ -96,5 +96,5 @@ def summarize_insider_activity(
     out["direction"] = "buying" if net > 0 else "selling" if net < 0 else "neutral"
     out["materiality"] = "notable"
     out["text"] = (f"net {out['direction']} {_money(net, ccy)} from {len(notable)} notable of {len(rows)} transactions "
-                   f"(notable means {_money(threshold, ccy)} or more, 0.001% of market cap) over 90 days")
+                   f"over 90 days (a transaction of {_money(threshold, ccy)} or more counts as notable)")
     return out

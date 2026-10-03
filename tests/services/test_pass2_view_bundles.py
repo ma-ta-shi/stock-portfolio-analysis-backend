@@ -18,6 +18,7 @@ def _bundle(benchmark=None, pe=28.5):
         peer_metrics={"industry_benchmark": benchmark},
         technical_indicators={}, support_resistance={}, macro_sources=MagicMock(),
         insider_activity={"transactions": []}, price_info={"market_cap": 1e12}, analyst_consensus={}, not_applicable=None,
+        data_vintage=datetime(2026, 10, 3, tzinfo=UTC), short_interest=None, analyst_rating_changes=None,
     )
 
 
@@ -130,3 +131,25 @@ def test_a_pe_from_near_zero_earnings_is_not_meaningful_and_has_no_percentage():
     """CRWD 2026-10-03: a trailing P/E of 9,001 printed as '+38,619% above range'."""
     fund = _build_pass2_view_bundles(_bundle(_bench(), pe=9001.0))["FUND"]
     assert fund["pe_vs_industry"] == "not_meaningful" and fund["pe_vs_industry_median_pct"] is None
+
+
+def test_the_sent_slice_decides_short_interest_and_analyst_changes_in_code():
+    """The model used to write short_interest_interpretation (27 of 48 first attempts failed the validator on it)."""
+    b = _bundle()
+    b.short_interest = {"short_interest_pct": 1.79, "days_to_cover": 8.79, "shares_short": 28_890_182,
+                        "shares_short_prior_month": 27_719_808, "as_of_date": "2026-09-15"}
+    b.price_info = {"market_cap": 1e12, "current_price": 168.07}
+    b.analyst_consensus = {"target_mean": 183.4}
+    b.analyst_rating_changes = [{"date": "2026-09-20", "action": "up", "price_target_action": "Raises"}]
+
+    sent = _build_pass2_view_bundles(b)["SENT"]
+
+    assert sent["short_interest_interpretation"] == {"trend": "stable", "interpretation": "normal"}
+    assert sent["analyst_changes_90d"].startswith("1 upgrade, 0 downgrades, 0 new initiations in the last 90d")
+    assert "average target +9.1% against the price" in sent["analyst_changes_90d"]
+
+
+def test_the_sent_slice_without_short_interest_or_changes_is_honest_not_a_crash():
+    sent = _build_pass2_view_bundles(_bundle())["SENT"]
+    assert sent["short_interest_interpretation"] == {"trend": "unknown", "interpretation": "insufficient_data"}
+    assert sent["analyst_changes_90d"] == "no data"

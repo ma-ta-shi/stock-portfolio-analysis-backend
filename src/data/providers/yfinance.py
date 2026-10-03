@@ -495,6 +495,38 @@ class YFinanceDataProvider(StockDataProvider):
             prior_month_date=_epoch_to_iso_date(info.get("sharesShortPreviousMonthDate")),
         )
 
+    async def get_analyst_rating_changes(self, ticker: str, limit: int = 100) -> list[dict]:
+        """Dated rating changes and price-target moves, newest first (yfinance `upgrades_downgrades`).
+
+        Not on the ABC: a plain method, router-chain-dispatched like get_short_interest. Both markets
+        (live 2026-10-03: TD.TO 48 rows, SHOP.TO 557, MSFT 937). `action` is Yahoo's "up", "down", "init", "main"
+        or "reit"; `price_target_action` is "Raises", "Lowers", "Maintains", "Announces", "Adjusts" or "Removes".
+        Canadian names are sparse (TD.TO's newest row was four months old), so callers must treat an empty window
+        as an answer. Bare [] when there is nothing."""
+        try:
+            df = yf.Ticker(ticker).upgrades_downgrades
+        except Exception as exc:
+            logger.warning("yfinance_rating_changes_failed", ticker=ticker)
+            report_degradation(
+                "yfinance", "get_analyst_rating_changes", FETCH_FAILED, str(exc), exc=exc, context={"symbol": ticker}
+            )
+            return []
+        if df is None or df.empty:
+            return []
+        rows = []
+        for stamp, row in df.sort_index(ascending=False).head(limit).iterrows():
+            rows.append({
+                "date": stamp.date().isoformat(),
+                "firm": row.get("Firm") or None,
+                "to_grade": row.get("ToGrade") or None,
+                "from_grade": row.get("FromGrade") or None,
+                "action": row.get("Action") or None,
+                "price_target_action": row.get("priceTargetAction") or None,
+                "price_target": _safe_float(row.get("currentPriceTarget")),
+                "prior_price_target": _safe_float(row.get("priorPriceTarget")),
+            })
+        return rows
+
     # yfinance's CA insider "Text" phrase -> NormalizedInsiderTransaction.
     # transaction_type (86bbwha5r). Seeded from 8 real CA tickers across 6
     # sectors (RY.TO, SHOP.TO, T.TO, FTS.TO, WCN.TO, REI-UN.TO, plus AEM.TO/

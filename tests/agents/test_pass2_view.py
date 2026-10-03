@@ -35,9 +35,15 @@ def test_tech_reads_interpretive_fields():
     assert view["confluence_score"] == 3
 
 
-def test_sent_reads_structured_data():
-    out = {"structured_data": {"peer_sentiment_comparison": "in line with PEER_1"}}
-    assert build_pass2_view("SENT", out)["peer_sentiment_comparison"] == "in line with PEER_1"
+def test_sent_short_interest_and_analyst_changes_come_from_the_bundle_not_the_model():
+    """The model no longer writes either; code computes them from the bundle's figures."""
+    bundle = {"short_interest_interpretation": {"trend": "stable", "interpretation": "normal"},
+              "analyst_changes_90d": "1 upgrade, 0 downgrades, 0 new initiations in the last 90d"}
+    out = {"structured_data": {"short_interest_interpretation": "model text that must not be used"}}
+    view = build_pass2_view("SENT", out, bundle)
+    assert view["short_interest_interpretation"] == {"trend": "stable", "interpretation": "normal"}
+    assert view["analyst_changes_90d"].startswith("1 upgrade")
+    assert "peer_sentiment_comparison" not in view
 
 
 # ---------- nested paths flatten correctly
@@ -125,8 +131,7 @@ def test_missing_bundle_yields_none_not_error():
     ("SENT", {"structured_data": {
         "news_sentiment": {"overall": "positive", "sentiment_trend": "stable"},
         "insider_activity_interpretation": "neutral",
-        "short_interest_interpretation": {"trend": "unknown", "interpretation": "normal"},
-        "peer_sentiment_comparison": "vs PEER_1"}}, None),
+        }}, None),
     ("MACRO", {"structured_data": {
         "overall_macro_environment": "neutral", "sector_cycle_position": "mid_cycle",
         "sector_tailwinds": ["tw"], "sector_headwinds": ["hw"]}},
@@ -151,8 +156,7 @@ def test_compressor_builds_pass2_view_when_absent():
         "assessment_summary": "s", "analysis_confidence": "medium", "narrative": "n", "caveats": [],
         "structured_data": {"news_sentiment": {"overall": "positive", "sentiment_trend": "stable"},
                             "insider_activity_interpretation": "neutral",
-                            "short_interest_interpretation": {"trend": "unknown", "interpretation": "normal"},
-                            "peer_sentiment_comparison": "vs PEER_1"}}}
+                            }}}
     view = compress_pass1_outputs(pass1)["SENT"]["pass2_view"]
     assert view, "pass2_view must be built, not read as empty"
     assert view["news_sentiment_overall"] == "positive"

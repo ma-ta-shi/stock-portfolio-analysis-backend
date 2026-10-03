@@ -17,6 +17,15 @@ only 29-34% of MSFT's Finnhub items, 56-62% of AAPL's and 39-43% of KO's do; the
 market round-ups that merely list the ticker), then higher quality tier, then rotating
 across sources so one publisher (87% of MSFT's articles are Yahoo) does not fill every slot, then newest first;
 near-duplicate headlines are dropped. First-pass heuristic, not a relevance judgement.
+
+The Sentiment sample (scored and shown) is then limited to those company-naming items, as long as the window holds
+at least MIN_NAMED_TO_FILTER of them. Measured 2026-10-03 over 10 live tickers: the old "a preference, never a
+filter" rule filled quiet days with items that never name the company, and the thinner the coverage the worse it got
+(shown headlines not naming the company: MSFT 2%, AAPL 2%, KO 10%, RDDT 17%, SHOP.TO 11%, TD.TO 17%, CNQ.TO 40%,
+ENB.TO 45%, RY.TO 57%, BAM.TO 62%): a funds notice, an Ashland sawmill, personal-finance clickbait, all scored into
+the tone and listed to the agent. Fewer, on-topic headlines are the honest picture of a thinly covered name. Below the
+minimum (a name the matcher cannot find) the old behaviour stays, so nothing is ever emptied. The Researcher's list is
+unchanged.
 """
 
 import re
@@ -25,6 +34,8 @@ from collections.abc import Sequence
 from datetime import date, datetime
 
 SCORED_PER_DAY = 6
+# The Sentiment sample is limited to items naming the company when at least this many do across the window.
+MIN_NAMED_TO_FILTER = 5
 SHOWN_PER_DAY = 2
 # The Stock Researcher reads headlines, not scores, and drops "low" tier ones (its own renderer
 # already did): this many across the window, best-ranked first within each day.
@@ -74,9 +85,9 @@ def _tier_then_source(group: list[dict]) -> list[dict]:
     return ordered
 
 
-def _rank_within_day(articles: list[dict], pattern: re.Pattern | None) -> list[dict]:
+def _rank_within_day(articles: list[dict], pattern: re.Pattern | None) -> tuple[list[dict], int]:
     """Best first: items naming the company, then by tier, then round-robin across sources;
-    duplicates (same normalised headline) dropped."""
+    duplicates (same normalised headline) dropped. Also returns how many of the leading items name the company."""
     seen: set[str] = set()
     unique = []
     for article in sorted(articles, key=lambda a: a["date"], reverse=True):
@@ -87,11 +98,11 @@ def _rank_within_day(articles: list[dict], pattern: re.Pattern | None) -> list[d
         unique.append(article)
 
     if pattern is None:
-        return _tier_then_source(unique)
+        return _tier_then_source(unique), 0
     on_topic = [a for a in unique if pattern.search(f"{a.get('headline', '')} {a.get('text', '')}")]
     on_topic_ids = {id(a) for a in on_topic}
     rest = [a for a in unique if id(a) not in on_topic_ids]
-    return _tier_then_source(on_topic) + _tier_then_source(rest)
+    return _tier_then_source(on_topic) + _tier_then_source(rest), len(on_topic)
 
 
 def select_news(
@@ -111,7 +122,9 @@ def select_news(
     - "fetched":    how many articles went in (after de-duplication)
 
     `names`: the company's name variants and ticker; items naming one rank first within their
-    day (a preference, never a filter: a day with no such item still gets its best ones).
+    day, and the scored and shown samples keep only those when the window holds at least
+    MIN_NAMED_TO_FILTER of them (see the module note); otherwise a day with no such item still
+    gets its best ones. The researcher list is never filtered.
 
     Every list is ordered oldest first, like the ids that are assigned over them."""
     shown_per_day = min(shown_per_day, scored_per_day)  # `shown` is always part of `scored`
@@ -124,11 +137,13 @@ def select_news(
     shown: list[dict] = []
     researcher: list[dict] = []
     fetched = 0
-    for day in sorted(by_day):
-        ranked = _rank_within_day(by_day[day], pattern)
+    days = [(day, *_rank_within_day(by_day[day], pattern)) for day in sorted(by_day)]
+    only_named = pattern is not None and sum(named for _, _, named in days) >= MIN_NAMED_TO_FILTER
+    for day, ranked, named in days:
         fetched += len(ranked)
-        scored.extend(ranked[:scored_per_day])
-        shown.extend(ranked[:shown_per_day])
+        pool = ranked[:named] if only_named else ranked
+        scored.extend(pool[:scored_per_day])
+        shown.extend(pool[:shown_per_day])
         researcher.extend(
             [a for a in ranked if a.get("quality_tier") != "low"][:researcher_per_day]
         )

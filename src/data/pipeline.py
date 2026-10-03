@@ -420,11 +420,10 @@ class DataPipeline:
                     research_sources_bundle, macro_sources, analyst_consensus
                 )
 
-            analyst_recommendation_trends = None
-            if not is_ca:
-                analyst_recommendation_trends = await router.get_analyst_recommendation_trends(
-                    ticker
-                )
+            # Both markets: Finnhub's monthly rating distribution for US names, yfinance's for Canadian ones
+            # (it has them; the guard that skipped Canadian names here was a stale assumption).
+            analyst_recommendation_trends = await router.get_analyst_recommendation_trends(ticker)
+            analyst_rating_changes = await router.get_analyst_rating_changes(ticker)
             short_interest = await router.get_short_interest(ticker)
 
             # sources_used merge-then-stamp: merge every Router's
@@ -478,9 +477,9 @@ class DataPipeline:
                 },
                 analyst_consensus=analyst_consensus,
                 analyst_recommendation_trends=analyst_recommendation_trends,
+                analyst_rating_changes=analyst_rating_changes,
                 insider_activity={"transactions": insider_transactions, "value_currency": insider_value_currency},
                 short_interest=short_interest,
-                peer_sentiment=[],
                 canadian_data_flags=canadian_data_flags,
                 macro_sources=macro_sources,
                 risk_metrics=risk_metrics.compute_all(

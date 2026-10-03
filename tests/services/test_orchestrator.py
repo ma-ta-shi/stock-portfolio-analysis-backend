@@ -94,6 +94,8 @@ def _fake_bundle(**overrides) -> SimpleNamespace:
         peer_metrics={"industry_benchmark": None},
         insider_activity={"transactions": []},
         analyst_consensus={"consensus_rating": "buy", "target_mean": 250.0},
+        short_interest=None,
+        analyst_rating_changes=None,
         not_applicable=None,
         technical_indicators={"volatility_regime_derived": "normal"},
         support_resistance={"nearest_support": 210.0, "nearest_resistance": 230.0},

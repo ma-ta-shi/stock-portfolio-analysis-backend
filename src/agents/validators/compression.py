@@ -30,7 +30,7 @@ def validate_pass2_view_shape(agent_id: str, pass2_view: dict) -> tuple[bool, li
         "SENT": [
             "news_sentiment_overall", "sentiment_trend",
             "insider_activity_interpretation",
-            "short_interest_interpretation", "peer_sentiment_comparison",
+            "short_interest_interpretation", "analyst_changes_90d",
         ],
         "MACRO": [
             "overall_macro_environment", "volatility_regime", "sector_cycle_position",

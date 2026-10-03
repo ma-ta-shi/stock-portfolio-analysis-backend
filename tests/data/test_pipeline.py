@@ -177,6 +177,9 @@ class _FakeRouter:
     async def get_analyst_recommendation_trends(self, ticker):
         return [{"period": "2026-08", "buy": 5}]
 
+    async def get_analyst_rating_changes(self, ticker):
+        return [{"date": "2026-09-30", "firm": "F", "action": "up", "price_target_action": "Raises"}]
+
     async def get_short_interest(self, ticker):
         return {"short_percent_of_float": 1.2}
 
@@ -450,9 +453,11 @@ async def test_prepare_us_stock_populates_every_field(patched_precompute):
     assert bundle.benchmark_ticker == "^GSPC"
     assert bundle.canadian_data_flags is None
     assert bundle.analyst_recommendation_trends is not None
+    assert bundle.analyst_rating_changes == [
+        {"date": "2026-09-30", "firm": "F", "action": "up", "price_target_action": "Raises"}
+    ]
     assert bundle.short_interest == {"short_percent_of_float": 1.2}
     assert bundle.insider_activity == {"transactions": [], "value_currency": "USD"}
-    assert bundle.peer_sentiment == []
     assert bundle.data_freshness["get_price_history"]
     assert bundle.data_freshness["get_price_history:benchmark"]
     assert bundle.data_freshness["get_price_history:sector_etf"]
@@ -495,7 +500,8 @@ async def test_prepare_ca_stock_populates_every_field(patched_precompute):
     assert bundle.stock.ticker == "RY.TO"
     assert bundle.benchmark_ticker == "^GSPTSE"
     assert bundle.canadian_data_flags is not None
-    assert bundle.analyst_recommendation_trends is None
+    # Canadian names get the analyst data too (yfinance has it; a guard used to skip them)
+    assert bundle.analyst_recommendation_trends is not None and bundle.analyst_rating_changes
     assert bundle.data_freshness["get_price_history:sector_etf"]
     assert ("RY.TO", "5y", "1d") in _FakeRouter.price_history_calls
     assert ("^GSPTSE", "5y", "1d") in _FakeRouter.price_history_calls

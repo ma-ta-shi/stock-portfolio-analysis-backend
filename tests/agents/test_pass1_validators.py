@@ -111,12 +111,10 @@ def _sentiment_analyst_output() -> dict:
             "avg_price_target": 205.0,
         },
         "insider_activity_interpretation": "CEO bought shares at $183 in March — positive signal of management conviction.",
-        "short_interest_interpretation": {"trend": "stable", "interpretation": "normal"},
         "social_sentiment": "unknown",
         "narrative_momentum": "stable",
         "positioning_assessment": "neutral",
         "analyst_consensus": "buy",
-        "peer_sentiment_comparison": "Sector broadly positive; PEER_1 (MSFT) and PEER_2 (ORCL) showing similar momentum.",
     }
     out["contrarian_signals"] = []
     out["pass2_view"] = {
@@ -131,8 +129,6 @@ def _sentiment_analyst_output() -> dict:
             "avg_price_target": 205.0,
         },
         "insider_activity_interpretation": "CEO bought shares — positive signal.",
-        "short_interest_interpretation": {"trend": "stable", "interpretation": "normal"},
-        "peer_sentiment_comparison": "PEER_1 and PEER_2 showing similar positive sentiment.",
         "contrarian_signals": [],
     }
     return out
@@ -436,11 +432,20 @@ class TestSentimentAnalyst:
         assert not passed
         assert any("social_sentiment" in e for e in errors)
 
-    def test_invalid_short_interest_interpretation_fails(self):
+    def test_more_than_two_contrarian_signals_under_structured_data_fail(self):
+        """The prompt's cap of 2 applies where the schema puts them; the check only looked at the top level."""
         out = _sentiment_analyst_output()
-        out["structured_data"]["short_interest_interpretation"] = {"trend": "stable", "interpretation": "high"}  # invalid 3-value enum
+        out["structured_data"]["contrarian_signals"] = [{"signal": f"s{i}", "evidence": "N1: x"} for i in range(3)]
         passed, errors = validate_sentiment_analyst(out)
-        assert not passed
+        assert not passed and any("contrarian_signals: max 2" in e for e in errors)
+
+    def test_the_model_is_no_longer_asked_for_short_interest_so_its_absence_is_valid(self):
+        """short_interest_interpretation is computed in code now (it failed in 27 of 48 first attempts as a
+        model field); an output without it must pass."""
+        out = _sentiment_analyst_output()
+        out["structured_data"].pop("short_interest_interpretation", None)
+        passed, errors = validate_sentiment_analyst(out)
+        assert passed, errors
 
     def test_invalid_news_sentiment_overall_fails(self):
         """Declared in the real schema (5-value, distinct from key_factors[].sentiment's

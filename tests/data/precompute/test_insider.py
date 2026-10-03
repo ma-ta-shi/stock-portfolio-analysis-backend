@@ -34,9 +34,12 @@ def test_canadian_names_use_the_same_rule_in_their_own_currency():
 
 
 def test_the_text_states_what_notable_means_and_the_net_dollars():
+    """The old wording ended '(notable means $2.7M or more, 0.001% of market cap)' and a Sentiment run read it as
+    'the $71.3M sold is only 0.001% of market cap' (SHOP.TO 2026-10-03): the threshold is no longer written as a ratio."""
     out = summarize_insider_activity([_row(value=2_000_000)] * 3 + [_row(value=1_000)], 28.3e9)
     assert out["text"] == ("net selling $6.0M from 3 notable of 4 transactions "
-                           "(notable means $283K or more, 0.001% of market cap) over 90 days")
+                           "over 90 days (a transaction of $283K or more counts as notable)")
+    assert "market cap" not in out["text"]
 
 
 def test_notable_buying_nets_against_notable_selling_by_dollars_not_counts():

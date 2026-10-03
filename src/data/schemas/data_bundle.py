@@ -149,10 +149,12 @@ class DataBundle(ContractModel):
     # {"window_days": int, "fetched": int}; None when not recorded (older callers).
     news_coverage: dict | None = None
     analyst_consensus: dict
-    analyst_recommendation_trends: list[dict] | None  # Finnhub: US only
+    analyst_recommendation_trends: list[dict] | None  # monthly rating distribution: Finnhub (US), yfinance (CA)
+    # Dated rating changes and price-target moves, newest first (yfinance upgrades_downgrades, both markets);
+    # summarised in code by precompute/sentiment_signals.py. None on older callers, [] when the name has none.
+    analyst_rating_changes: list[dict] | None = None
     insider_activity: dict
     short_interest: dict | None
-    peer_sentiment: list[dict]
     canadian_data_flags: CanadianDataFlags | None
 
     # --- Macro Economist (Pass 1) ---
@@ -204,30 +206,6 @@ class DataBundle(ContractModel):
                 f"benchmark_ticker ({self.benchmark_ticker!r}) does not match "
                 f"get_benchmark(stock) ({expected!r})"
             )
-        return self
-
-    @model_validator(mode="after")
-    def _check_us_only_sentiment_fields_are_none_for_ca_stocks(self) -> "DataBundle":
-        """Real gap caught on review: the doc comments say "Finnhub: US
-        stocks only" / "Finnhub: US only" on these two fields, and this is
-        a confirmed hard technical fact this session (finnhub.py's
-        _reject_ca_ticker raises NotImplementedError for any .TO ticker),
-        not just a note — a CA stock can never have real values here. One-
-        directional only: a US stock legitimately CAN still be None (a
-        Finnhub call can fail for any ticker), so that direction isn't
-        constrained.
-
-        news_with_sentiment's clause removed (ClickUp 86ban0wf4): its "US-
-        only" premise no longer holds — precompute/sentiment.py now scores
-        both markets via a local LLM, not Finnhub (which never had CA
-        sentiment and, confirmed this ticket, doesn't have US sentiment
-        either). analyst_recommendation_trends is untouched — a genuinely
-        separate, still-accurate Finnhub-only constraint."""
-        if _is_canadian_stock(self.stock):
-            if self.analyst_recommendation_trends is not None:
-                raise ValueError(
-                    "analyst_recommendation_trends must be None for a CA stock (Finnhub US-only)"
-                )
         return self
 
     @model_validator(mode="after")

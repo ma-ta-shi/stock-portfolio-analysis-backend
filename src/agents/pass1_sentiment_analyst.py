@@ -14,18 +14,11 @@ NOT a clean port -- field-by-field notes, verified against
   representative news_id") -- theme/aggregate synthesis is the LLM's job, the
   same "give raw data, let the LLM interpret" pattern as every other agent's
   interpretive_fields.
-- `peer_sentiment` is hardcoded `[]` in `data/pipeline.py`'s DataBundle
-  assembly today -- a real, currently-permanent gap (not this port's to fix),
-  renders as honestly unavailable.
-- `analyst_upgrades_30d`/`analyst_downgrades_30d` (harness: derived counts):
-  no precompute module derives an upgrade/downgrade count. The real
-  `analyst_recommendation_trends` (US-only, `None` for CA -- confirmed via
-  `data/providers/finnhub.py`) is a list of PER-PERIOD buy/hold/sell/
-  strong_buy/strong_sell snapshots, not a movement count -- deriving
-  "upgrades" from two periods' distributions would be a real, non-trivial
-  formula this runner doesn't have a verified source for. The two most
-  recent periods' raw distributions are rendered instead, honest about being
-  raw counts, not a movement judgment.
+- Peer sentiment was retired (2026-10-03): it was `[]` in 48 of 48 real runs, so the payload block, the coverage
+  flag, the prompt text and the output field are gone.
+- Analyst: the monthly rating distribution (Finnhub for US, yfinance for CA) plus dated rating changes and
+  price-target moves (yfinance `upgrades_downgrades`, both markets), summarised in code by
+  `data/precompute/sentiment_signals.py` as upgrade, downgrade, initiation and target-move counts over 90 days.
 - `insider_buys_90d`/`insider_sells_90d`: `insider_activity` on DataBundle is
   `{"transactions": [...]}`, a raw `NormalizedInsiderTransaction` list (date,
   insider_name, is_issuer, transaction_type, shares, value) -- not
@@ -33,12 +26,9 @@ NOT a clean port -- field-by-field notes, verified against
   `research_sources.py::_compute_insider_direction` derives its own signal
   (excludes `is_issuer=True` rows -- that's buyback activity, not personal
   insider direction -- and non-directional `exercise`/`gift`/`other` types).
-- Short interest 30-day trend: `NormalizedShortInterest`'s own docstring
-  states "the 30-day trend payload line comes from shares_short vs
-  shares_short_prior_month" -- rendered as the two raw counts (a factual
-  input line), not a pre-judged trend label; `short_interest_interpretation`
-  (trend/interpretation) stays the LLM's own output field, per
-  `agents/validators/pass1.py`'s schema for it.
+- Short interest: the trend and the three-value read are computed in code (`sentiment_signals.py`) and shown with
+  the as-of date; the model no longer produces `short_interest_interpretation` (it failed the validator in 27 of
+  48 first attempts) and the Pass 2 view carries the code's value.
 - `canadian_sentiment_inferred`: the real prompt's own caveat text ("Canadian
   articles are scored from headlines only") is CA-market-specific, not a
   proxy for the harness's old `canadian_data_limited` flag -- this reads
@@ -52,9 +42,6 @@ NOT a clean port -- field-by-field notes, verified against
 `field_presence` map `build_user_message()` already computes for
 `input_field_coverage`, via the shared `render_data_coverage_line()` helper --
 was hardcoded to "Data coverage: standard." on every run before this.
-`peer_sentiment` is always `False` (a permanent, currently-hardcoded gap, see
-`build_user_message()`'s own docstring) and is deliberately still included as
-a real, always-mentioned gap sentence, not excluded as a "known" absence.
 
 86bbummwp 1d: the retry loop's validator now also enforces the mandatory
 Canadian sentiment-inference caveat the user message already tells the model
@@ -91,15 +78,19 @@ from agents.utils import (
     to_data_coverage,
 )
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
-from agents.validators.pass1 import validate_canadian_caveat, validate_sentiment_analyst
+from agents.validators.pass1 import validate_canadian_caveat, validate_sentiment_analyst, validate_theme_news_ids
 from data.precompute.insider import summarize_insider_activity
+from data.precompute.sentiment_signals import (
+    ELEVATED_SHORT_INTEREST_PCT,
+    analyst_changes_for_bundle,
+    summarize_short_interest,
+)
 from data.schemas.data_bundle import DataBundle
 
 _INSIDER_WINDOW_DAYS = 90
 _STALE_NEWS_DAYS = 14
 _STALE_SHORT_INTEREST_DAYS = 45
 _POSITIVE_SENTIMENT_RATIO = 0.7
-_ELEVATED_SHORT_INTEREST_PCT = 10.0
 
 
 def _validate_with_caveats(
@@ -108,6 +99,7 @@ def _validate_with_caveats(
     material_absent: list[str],
     anomalies: list[str],
     stale_data: list[str],
+    news_ids: set[str] | None = None,
 ) -> tuple[bool, list[str]]:
     """Composing validator (86bbummwp 1d, extended by the follow-on
     confidence/data-quality coupling rule) -- merges the base schema check
@@ -129,15 +121,15 @@ def _validate_with_caveats(
         anomalies=anomalies,
         stale_data=stale_data,
     )
-    return passed and ca_passed and cq_passed, errors + ca_errors + cq_errors
+    id_passed, id_errors = validate_theme_news_ids(output, news_ids) if news_ids is not None else (True, [])
+    return passed and ca_passed and cq_passed and id_passed, errors + ca_errors + cq_errors + id_errors
 
 
 _COVERAGE_GAP_SENTENCES = {
     "news_block": "no news articles available",
-    "analyst_activity": "no analyst upgrade/downgrade data available",
+    "analyst_activity": "no analyst rating data available",
     "analyst_consensus": "no analyst consensus data available",
     "short_interest": "no short interest data available",
-    "peer_sentiment": "peer sentiment comparison is not yet available",
 }
 
 
@@ -147,6 +139,11 @@ def _data_coverage_line(field_presence: dict[str, bool]) -> str:
 
 def _fmt(v):
     return "N/A" if v is None else str(v)
+
+
+def _target(v) -> str:
+    """The average price target to cents: Yahoo's 578.82245 was being copied into evidence as written."""
+    return "N/A" if v is None else f"{v:.2f}"
 
 
 def _insider_counts(bundle: DataBundle) -> tuple[int, int]:
@@ -201,7 +198,7 @@ def _anomalies(bundle: DataBundle) -> list[str]:
             f"over the past {_INSIDER_WINDOW_DAYS} days ({sells_90d} sales vs {buys_90d} purchases)"
         )
     si_pct = (bundle.short_interest or {}).get("short_interest_pct")
-    if si_pct is not None and si_pct >= _ELEVATED_SHORT_INTEREST_PCT:
+    if si_pct is not None and si_pct >= ELEVATED_SHORT_INTEREST_PCT:
         flags.append(
             f"news sentiment is {positive_ratio:.0%} positive despite elevated short interest "
             f"({si_pct}% of float)"
@@ -218,12 +215,28 @@ def _article_day(article: dict) -> date:
     return date.fromisoformat(str(value)[:10])
 
 
-def _tone_counts(articles: list[dict]) -> str:
-    counts = {label: 0 for label in ("positive", "negative", "neutral")}
+_TONES = ("positive", "negative", "neutral")
+
+
+def _tally(articles: list[dict]) -> dict[str, int]:
+    counts = dict.fromkeys(_TONES, 0)
     for a in articles:
         if a.get("sentiment") in counts:
             counts[a["sentiment"]] += 1
-    return f"{counts['positive']} positive, {counts['negative']} negative, {counts['neutral']} neutral"
+    return counts
+
+
+def _tone_counts(articles: list[dict]) -> str:
+    counts = _tally(articles)
+    return ", ".join(f"{counts[k]} {k}" for k in _TONES)
+
+
+def _tone_shares(articles: list[dict]) -> str:
+    """Each tone as a share of the WHOLE scored sample, worked out here: a KO run wrote "72% positive" for 48 positive
+    of 109 scored (that is 48 of the 67 that were not neutral; the sample is 44% positive, 17% negative)."""
+    counts = _tally(articles)
+    total = sum(counts.values()) or 1
+    return ", ".join(f"{round(100 * counts[k] / total)}% {k}" for k in _TONES)
 
 
 def _coverage_lines(articles: list[dict], shown: list[dict], coverage: dict) -> list[str]:
@@ -234,7 +247,7 @@ def _coverage_lines(articles: list[dict], shown: list[dict], coverage: dict) -> 
     lines = [
         f"  Coverage: {coverage['fetched']} articles fetched over the last {coverage['window_days']} days; "
         f"{len(articles)} sampled evenly across the days and scored; {len(shown)} listed below.",
-        f"  Tone of the scored sample: {_tone_counts(articles)}.",
+        f"  Tone of the scored sample: {_tone_counts(articles)} ({_tone_shares(articles)}).",
     ]
     weeks: dict[date, list[dict]] = {}
     for a in articles:
@@ -261,43 +274,37 @@ def _news_block(bundle: DataBundle) -> RenderedField:
         lines.extend(_coverage_lines(articles, shown, coverage))
     for a in shown:
         lines.append(
-            f"  {a['id']}: {a['headline']} ({a['source']}, {a['quality_tier']}, "
+            f"  {a['id']} {_article_day(a).strftime('%m-%d')}: {a['headline']} ({a['source']}, {a['quality_tier']}, "
             f"sentiment={a.get('sentiment') or 'unscored'})"
         )
     return RenderedField(text="\n".join(lines), present=True)
 
 
 def _analyst_activity_block(bundle: DataBundle) -> RenderedField:
-    # Permanently None for CA tickers (Finnhub is US-only, confirmed via
-    # data/providers/finnhub.py -- see module docstring), not a per-run
-    # fetch failure for those; genuinely absent for a US ticker only when
-    # the fetch itself returned nothing.
     trends = bundle.analyst_recommendation_trends
-    if not trends:
-        return RenderedField(
-            text="  N/A — not available for Canadian stocks, or no data returned.", present=False
-        )
-    lines = []
-    for row in trends[:2]:  # most recent 2 periods
+    changes = getattr(bundle, "analyst_rating_changes", None)
+    if not trends and not changes:
+        return RenderedField(text="  N/A -- no rating distribution or rating changes returned.", present=False)
+    lines, seen = [], set()
+    for row in (trends or [])[:2]:  # most recent 2 periods; Yahoo's 0m and -1m are often identical, so skip a repeat
+        counts = tuple(row.get(k) for k in ("strong_buy", "buy", "hold", "sell", "strong_sell"))
+        if counts in seen:
+            continue
+        seen.add(counts)
         lines.append(
             f"  {row.get('period', '?')}: strong_buy={_fmt(row.get('strong_buy'))} "
             f"buy={_fmt(row.get('buy'))} hold={_fmt(row.get('hold'))} "
             f"sell={_fmt(row.get('sell'))} strong_sell={_fmt(row.get('strong_sell'))}"
         )
+    lines.append(f"  Rating changes: {analyst_changes_for_bundle(bundle)['text']}")
     return RenderedField(text="\n".join(lines), present=True)
 
 
 def _short_interest_block(bundle: DataBundle) -> RenderedField:
     si = bundle.short_interest
     if not si:
-        return RenderedField(text="  N/A — no short interest data available.", present=False)
-    text = (
-        f"  Short interest % of float: {_fmt(si.get('short_interest_pct'))}\n"
-        f"  Days to cover: {_fmt(si.get('days_to_cover'))}\n"
-        f"  Shares short: {_fmt(si.get('shares_short'))} "
-        f"(30d prior: {_fmt(si.get('shares_short_prior_month'))})"
-    )
-    return RenderedField(text=text, present=True)
+        return RenderedField(text="  N/A -- no short interest data available.", present=False)
+    return RenderedField(text=f"  {summarize_short_interest(si)['text']}", present=True)
 
 
 def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
@@ -306,10 +313,7 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     (buys_90d/sells_90d) has no entry: both are real counts, always
     renderable as a number (0 is a legitimate real answer, not "N/A" --
     there's no genuine absent case the way there is for the other
-    blocks). peer_sentiment always reports present=False -- a permanent,
-    currently-hardcoded gap (data/pipeline.py's own DataBundle assembly,
-    see module docstring), not a per-run signal, same D3-style permanent
-    gap as Stock Researcher's transcript_excerpts.
+    blocks).
     """
     ctx = bundle.context
     company_info = bundle.company_info
@@ -317,7 +321,7 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
 
     canadian_flag = ""
     if flags is not None:
-        canadian_flag = "\nCANADIAN DATA LIMITED: true — Finnhub analyst upgrade/downgrade data unavailable, article sentiment scored from headlines only."
+        canadian_flag = "\nCanadian stock: article sentiment is scored from headlines only (no article body)."
 
     insider_activity = summarize_insider_activity(
         bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap"),
@@ -330,31 +334,25 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
 
     text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{canadian_flag}
-social_sentiment: unknown (always — orchestrator-set, do not override)
 
 NEWS SENTIMENT (NEWS):
 {news.text}
 
 ANALYST ACTIVITY (ANALYST):
 {analyst_activity.text}
-  Consensus: {_fmt(consensus_rating)} | Avg target: {_fmt(bundle.analyst_consensus.get('target_mean'))} {bundle.stock.currency}
-  Analyst count: {_fmt(bundle.analyst_consensus.get('num_analysts'))}
+  Consensus: {_fmt(consensus_rating)} | Avg target: {_target(bundle.analyst_consensus.get('target_mean'))} {bundle.stock.currency} | Analysts: {_fmt(bundle.analyst_consensus.get('num_analysts'))}
 
 INSIDER ACTIVITY (INSIDER / SIGNALS):
   Insider activity (90d): {insider_activity}
 
 SHORT INTEREST (SHORT):
-{short_interest.text}
-
-PEER SENTIMENT:
-  N/A — not currently available (peer sentiment comparison is not yet built into the data pipeline)."""
+{short_interest.text}"""
 
     field_presence = {
         "news_block": news.present,
         "analyst_activity": analyst_activity.present,
         "analyst_consensus": consensus_rating is not None,
         "short_interest": short_interest.present,
-        "peer_sentiment": False,
     }
     return text, field_presence
 
@@ -372,14 +370,7 @@ class SentimentAnalystRunner(BaseRunner):
         self.last_data_coverage = to_data_coverage(field_presence, _COVERAGE_GAP_SENTENCES)
         self.last_stale_data = _stale_data(bundle)
         self.last_anomalies = _anomalies(bundle)
-        # peer_sentiment is permanently absent (hardcoded empty in data/pipeline.py's
-        # DataBundle assembly) -- excluded here, not in last_data_coverage itself, so the
-        # stored/badge-facing fact stays untouched while the confidence/data-quality rule
-        # and the new data_quality_assessment rollup below don't fire/downgrade on it every
-        # run (86bbummwp Tier 3 -- this exclusion was missing here, found live: the
-        # follow-on's own validator call below used to pass last_data_coverage["absent"]
-        # unfiltered, meaning it over-fired on this permanent gap on every single run).
-        material_absent = [a for a in self.last_data_coverage["absent"] if a != "peer_sentiment"]
+        material_absent = list(self.last_data_coverage["absent"])
         # 86bbummwp Tier 3 -- D6 section 3's per-agent mechanical data_quality_assessment,
         # set here for the same reason as last_field_coverage above.
         self.last_data_quality_assessment = compute_data_quality_assessment(
@@ -410,6 +401,7 @@ class SentimentAnalystRunner(BaseRunner):
                 material_absent=material_absent,
                 anomalies=self.last_anomalies,
                 stale_data=self.last_stale_data,
+                news_ids={a["id"] for a in (bundle.news_with_sentiment or []) if a.get("shown", True)},
             ),
             max_tokens=3500,
             temperature=0.3,
