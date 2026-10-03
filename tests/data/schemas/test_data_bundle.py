@@ -152,7 +152,6 @@ def _bundle(**overrides) -> DataBundle:
         analyst_recommendation_trends=None,
         insider_activity={},
         short_interest=None,
-        peer_sentiment=[],
         canadian_data_flags=None,
         macro_sources=_empty_macro_sources(),
         risk_metrics={},
@@ -282,8 +281,7 @@ def test_rejects_garbage_benchmark_ticker():
         _bundle(benchmark_ticker="not-a-real-benchmark")
 
 
-# ---------- Finnhub US-only sentiment fields must be None for CA stocks
-# (real gap caught on review — previously unenforced) ----------
+# ---------- Sentiment fields that were once US-only and are now both markets ----------
 
 
 def test_ca_stock_with_real_news_with_sentiment_is_valid():
@@ -301,14 +299,16 @@ def test_ca_stock_with_real_news_with_sentiment_is_valid():
     assert bundle.news_with_sentiment == [{"headline": "test"}]
 
 
-def test_rejects_ca_stock_with_real_analyst_recommendation_trends():
-    with pytest.raises(ValidationError):
-        _bundle(
-            stock=_ca_stock(),
-            canadian_data_flags=_ca_flags(),
-            benchmark_ticker="^GSPTSE",
-            analyst_recommendation_trends=[{"period": "0m"}],
-        )
+def test_ca_stock_with_analyst_recommendation_trends_is_valid():
+    """Inverted from a reject-test: yfinance has the monthly rating distribution for Canadian names, so the
+    pipeline now fills it for them (the old "Finnhub US-only" constraint no longer holds)."""
+    bundle = _bundle(
+        stock=_ca_stock(),
+        canadian_data_flags=_ca_flags(),
+        benchmark_ticker="^GSPTSE",
+        analyst_recommendation_trends=[{"period": "0m"}],
+    )
+    assert bundle.analyst_recommendation_trends == [{"period": "0m"}]
 
 
 def test_us_stock_may_have_none_sentiment_fields_too():

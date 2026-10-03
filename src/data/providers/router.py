@@ -209,6 +209,7 @@ US_CHAINS: dict[str, list[str]] = {
     "get_ratios_ttm": ["fmp"],  # not on the ABC — carried forward from us_equity.py
     "get_filings": [],  # no US equivalent in this ticket's scope (86bbpggr5); empty chain
     "get_short_interest": ["yfinance"],  # not on the ABC — yfinance .info is the only source
+    "get_analyst_rating_changes": ["yfinance"],  # not on the ABC — yfinance upgrades_downgrades, both markets
 }
 
 CA_CHAINS: dict[str, list[str]] = {
@@ -256,6 +257,7 @@ CA_CHAINS: dict[str, list[str]] = {
     # derives the CA percent from sharesShort / floatShares and shortRatio
     # (days_to_cover) is populated for .TO — a real block for CA too.
     "get_short_interest": ["yfinance"],
+    "get_analyst_rating_changes": ["yfinance"],
 }
 
 
@@ -478,6 +480,12 @@ class Router(StockDataProvider, NewsProvider):
         float since yfinance's own shortPercentOfFloat is US-only)."""
         result, _ = await self._try_chain("get_short_interest", ticker)
         return result if not _is_empty(result) else {}
+
+    async def get_analyst_rating_changes(self, ticker: str) -> list[dict]:
+        """Not on StockDataProvider: dated rating changes and price-target moves from yfinance, both markets
+        (the Finnhub and TMX trend snapshots carry no change events). Resolves to a list of rows or []."""
+        result, _ = await self._try_chain("get_analyst_rating_changes", ticker)
+        return result if not _is_empty(result) else []
 
     # ---------- NewsProvider ----------
 

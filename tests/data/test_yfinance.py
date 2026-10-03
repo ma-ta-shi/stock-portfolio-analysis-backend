@@ -1205,3 +1205,56 @@ async def test_earnings_calendar_falls_back_to_the_earnings_dates_table_when_cal
 async def test_earnings_calendar_fallback_degrades_quietly_when_there_is_no_table(provider, monkeypatch):
     _patch_ticker(monkeypatch, lambda ticker: FakeTicker(calendar={"Earnings Date": [pd.Timestamp("2019-01-01")]}))
     assert await provider.get_earnings_calendar("RY.TO") == [{"date": "2019-01-01", "symbol": "RY.TO"}]
+
+
+# --- get_analyst_rating_changes (Sentiment pass, 2026-10-03) ---
+
+
+def _changes_frame():
+    idx = pd.DatetimeIndex(["2026-06-01 14:18:31", "2026-09-23 12:25:07"], name="GradeDate")
+    return pd.DataFrame(
+        {
+            "Firm": ["RBC Capital", "Wedbush"],
+            "ToGrade": ["Outperform", "Outperform"],
+            "FromGrade": ["Outperform", ""],
+            "Action": ["main", "up"],
+            "priceTargetAction": ["Raises", "Announces"],
+            "currentPriceTarget": [156.0, 176.0],
+            "priorPriceTarget": [138.0, 0.0],
+        },
+        index=idx,
+    )
+
+
+async def test_get_analyst_rating_changes_maps_rows_newest_first(provider, monkeypatch):
+    from types import SimpleNamespace
+
+    _patch_ticker(monkeypatch, lambda ticker: SimpleNamespace(upgrades_downgrades=_changes_frame()))
+
+    rows = await provider.get_analyst_rating_changes("TD.TO")
+
+    assert [r["date"] for r in rows] == ["2026-09-23", "2026-06-01"]
+    assert rows[0] == {"date": "2026-09-23", "firm": "Wedbush", "to_grade": "Outperform", "from_grade": None,
+                       "action": "up", "price_target_action": "Announces", "price_target": 176.0,
+                       "prior_price_target": 0.0}
+    assert rows[1]["action"] == "main" and rows[1]["price_target_action"] == "Raises"
+
+
+async def test_get_analyst_rating_changes_empty_is_an_empty_list(provider, monkeypatch):
+    from types import SimpleNamespace
+
+    for frame in (None, pd.DataFrame()):
+        _patch_ticker(monkeypatch, lambda ticker, f=frame: SimpleNamespace(upgrades_downgrades=f))
+        assert await provider.get_analyst_rating_changes("CAR-UN.TO") == []
+
+
+async def test_a_failed_rating_changes_lookup_is_reported_and_returns_empty(provider, monkeypatch, parity):
+    def boom(ticker):
+        raise RuntimeError("yahoo is down")
+
+    _patch_ticker(monkeypatch, boom)
+
+    plain, with_collector, events = await parity(lambda: provider.get_analyst_rating_changes("KO"))
+
+    assert plain == with_collector == []
+    assert [e.key for e in events] == [("yfinance", "get_analyst_rating_changes", "fetch_failed")]

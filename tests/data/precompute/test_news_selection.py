@@ -138,12 +138,44 @@ def test_items_naming_the_company_rank_before_round_ups_that_only_list_the_ticke
     }
 
 
-def test_the_company_preference_never_drops_a_day_that_has_no_such_item():
+def test_a_name_the_matcher_cannot_find_keeps_the_old_behaviour_so_nothing_is_emptied():
+    """Below MIN_NAMED_TO_FILTER named items in the window, the preference is not a filter."""
     articles = [_a(1, 1, "A market round-up"), _a(2, 1, "Microsoft news")]
 
     shown = select_news(articles, shown_per_day=1, names=["Microsoft"])["shown"]
 
     assert {a["date"].day for a in shown} == {1, 2}
+
+
+def _named_window(named_days: int = 6) -> list[dict]:
+    """Days 1..named_days each hold one Microsoft item and two items that never name it; day 20 holds only noise."""
+    out = []
+    for day in range(1, named_days + 1):
+        out += [_a(day, 1, f"Microsoft story {day}"), _a(day, 2, f"Round-up {day}"), _a(day, 3, f"Clickbait {day}")]
+    out.append(_a(20, 1, "Sawmill expansion announced"))
+    return out
+
+
+def test_with_enough_company_items_the_sentiment_sample_keeps_only_those():
+    """RY.TO / ENB.TO / BAM.TO 2026-10-03: 45-62% of the shown headlines never named the company."""
+    result = select_news(_named_window(), shown_per_day=2, scored_per_day=3, names=["Microsoft"])
+
+    assert all("Microsoft" in a["headline"] for a in result["shown"] + result["scored"])
+    assert {a["date"].day for a in result["shown"]} == {1, 2, 3, 4, 5, 6}  # the noise-only day 20 is not listed
+
+
+def test_the_researcher_list_is_not_filtered():
+    result = select_news(_named_window(), researcher_per_day=2, names=["Microsoft"])
+
+    assert any("Microsoft" not in a["headline"] for a in result["researcher"])
+
+
+def test_the_filter_needs_the_minimum_number_of_company_items_across_the_window():
+    few = [_a(1, 1, "Microsoft one"), _a(2, 1, "Microsoft two"), _a(2, 2, "Other news"), _a(3, 1, "More other news")]
+
+    result = select_news(few, shown_per_day=2, names=["Microsoft"])
+
+    assert any("Microsoft" not in a["headline"] for a in result["shown"])  # 2 named is under the minimum of 5
 
 
 def test_the_ticker_is_matched_as_a_whole_word_and_without_its_canadian_suffix():

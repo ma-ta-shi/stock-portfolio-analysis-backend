@@ -467,6 +467,19 @@ async def test_get_short_interest_ca_also_calls_yfinance():
     assert await router.get_short_interest("SHOP.TO") == {"days_to_cover": 4.0}
 
 
+# --- get_analyst_rating_changes: yfinance upgrades_downgrades, both markets ---
+
+
+async def test_get_analyst_rating_changes_calls_yfinance_for_both_markets():
+    rows = [{"date": "2026-09-30", "action": "up"}]
+    us = Router(ticker="AAPL", yfinance=FakeProvider(get_analyst_rating_changes=_ok(rows)),
+                fmp=FakeProvider(), edgartools=FakeProvider(), finnhub=FakeProvider())
+    ca = Router(ticker="TD.TO", yfinance=FakeProvider(get_analyst_rating_changes=_ok(rows)),
+                openbb_tmx=FakeProvider(), yfinance_news=FakeProvider())
+    assert await us.get_analyst_rating_changes("AAPL") == rows
+    assert await ca.get_analyst_rating_changes("TD.TO") == rows
+
+
 # --- CA get_analyst_recommendation_trends routes to the yfinance news class ---
 
 
@@ -640,6 +653,7 @@ _METHOD_ARGS: dict[str, tuple] = {
     "get_ratios_ttm": ("AAPL",),
     "get_filings": ("AAPL", 20),
     "get_short_interest": ("AAPL",),
+    "get_analyst_rating_changes": ("AAPL",),
 }
 
 _METHOD_EMPTY_TYPE: dict[str, type] = {
@@ -659,6 +673,7 @@ _METHOD_EMPTY_TYPE: dict[str, type] = {
     "get_ratios_ttm": dict,
     "get_filings": list,
     "get_short_interest": dict,
+    "get_analyst_rating_changes": list,
 }
 
 # Recent timestamp column so get_financials samples are a correct_alignment no-op.
@@ -693,6 +708,7 @@ _METHOD_SAMPLE_VALUE: dict[str, object] = {
         "as_of_date": "2026-08-14",
         "prior_month_date": "2026-07-15",
     },
+    "get_analyst_rating_changes": [{"date": "2026-09-30", "action": "up", "price_target_action": "Raises"}],
 }
 
 _US_BRANCH_KEYS = ["fmp", "edgartools", "finnhub"]
