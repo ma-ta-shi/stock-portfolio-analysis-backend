@@ -27,7 +27,6 @@ ClickUp 86ban0wcr for the full reasoning):
   source), a separate, still-pending prompt-file inconsistency.
 """
 
-import statistics
 from datetime import date
 
 import structlog
@@ -41,41 +40,6 @@ from data.providers.base import (
 )
 
 logger = structlog.get_logger(__name__)
-
-# Fields both the sector-median PEER block and each peer_records entry need —
-# a subset of valuation/profitability/balance_sheet_metrics, not the full
-# dicts (peers don't need e.g. free_cash_flow/cash_position/dividend fields).
-# Single source of truth: keys() doubles as the peer-metric whitelist (was
-# a separate _PEER_METRIC_KEYS tuple until review — two structures that had
-# to be kept in sync by hand for no reason, since dicts are insertion-ordered).
-# Maps each metric key -> the prompt's own sector_median_* placeholder name
-# (macro_sources.py convention: field names match prompt placeholders 1:1,
-# avoids a renaming step at the payload-builder layer).
-_SECTOR_MEDIAN_KEYS = {
-    "pe_ratio": "sector_median_pe",
-    "pb_ratio": "sector_median_pb",
-    "revenue_growth_yoy": "sector_median_rev_growth",
-    "gross_margin": "sector_median_gross_margin",
-    "operating_margin": "sector_median_op_margin",
-    "roe": "sector_median_roe",
-    "debt_to_equity": "sector_median_de",
-    "ev_ebitda": "sector_median_ev_ebitda",
-}
-
-# Peer-median guard (ClickUp 86bbq04wm). The unguarded statistics.median() over
-# whatever survived a None filter was feeding the Fundamental Analyst corrupt
-# sector medians (a -98 P/B median from one peer's negative book equity, a
-# peer-wide D/E of exactly 0.0, a 105% revenue-growth median from a spinoff
-# stub) — used by the model in 3 of 3 live runs as both a key_factor and a
-# risk. Guard here at the source, not the payload renderer: this is a data
-# defect (a median that shouldn't exist), and peer_metrics feeds more than the
-# prompt payload once DataPipeline.prepare() exists.
-
-# Checked per-metric against the count of VALID contributors, not len(peer_data):
-# each median stands on its own evidence. 2 not 3 — real peer sets are ~3
-# tickers and after validity filtering a 3 floor would render N/A almost
-# always (the block must stay useful, not just uncorrupt).
-_MIN_PEERS_FOR_SECTOR_MEDIAN = 2
 
 # Per-metric plausibility ranges (exclusive both ends). The 0.0 lower bound on
 # pe/pb/ev_ebitda/debt_to_equity is a principled sign check — these go negative
@@ -113,20 +77,9 @@ _PEER_METRIC_VALID_RANGE: dict[str, tuple[float, float]] = {
     "operating_margin": (-1.0, 0.9),
     "roe": (-2.0, 3.0),  # a real buyback-shrunk-equity ROE reaches ~1.2 (AAPL/HD live)
 }
-# _PEER_METRIC_VALID_RANGE must stay 1:1 with _SECTOR_MEDIAN_KEYS — a missing
-# entry KeyErrors in _valid_peer_value (asserted in test_fundamentals.py).
-
-
-def _valid_peer_value(metric: str, value: float | None) -> float | None:
-    """None (renders N/A downstream) unless value is present AND strictly
-    inside the metric's plausibility range. Per-metric because the metrics
-    fail in different ways — a negative P/B from negative book equity, a D/E
-    of exactly 0.0 as a missing-data signature, a spinoff's absurd first-year
-    revenue growth."""
-    if value is None:
-        return None
-    low, high = _PEER_METRIC_VALID_RANGE[metric]
-    return value if low < value < high else None
+# These ranges now serve one consumer: the Fundamental agent's plausibility check on the subject's own values
+# (pass1_fundamental_analyst._anomalies). The peer table they once also sanitised is gone (the industry P/E
+# benchmark, data/industry_benchmark.py, replaced it).
 
 
 def _ttm(periods: list[dict], field: str) -> float | None:
@@ -346,9 +299,7 @@ def compute_growth_metrics(
     None would misreport a real, empty result as missing data. forward_pe
     is a VAL-block field (compute_valuation_metrics), not GROWTH — it was
     briefly duplicated here by mistake (caught on review: it showed
-    up twice in missing_fields, once per dict, and would have been a
-    silent last-write-wins collision in compute_peer_comparison's
-    dict merge)."""
+    up twice in missing_fields, once per dict)."""
     annual = fin.annual
     revenue_growth_annual = None
     eps_growth_yoy = None
@@ -381,7 +332,7 @@ def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
             "fcf_to_net_income": None,
         }
     # Margins over the trailing twelve months, not one (often seasonal) quarter —
-    # keeps them stable and comparable across a peer set with mixed fiscal
+    # keeps them stable and comparable across companies with mixed fiscal
     # calendars. _ttm_metric is the real 4-quarter sum on the CA path, the
     # provider-supplied TTM on the US path.
     ttm_revenue = _ttm_metric(fin, "revenue")
@@ -407,7 +358,7 @@ def compute_profitability_metrics(fin: NormalizedFinancials) -> dict:
     total_equity = fin.balance_sheet.get("total_equity")
     # total_equity > 0, not just truthy: negative book equity makes ROE
     # meaningless (a net loss over negative equity reads as a positive ROE) —
-    # None is the honest answer for both peers and the subject (86bbq04wm).
+    # None is the honest answer (86bbq04wm).
     # Period-end equity (not an average) — standard, and no extra fetch; runs
     # low for buyback-heavy names whose equity shrank over the year.
     if ttm_net_income is not None and total_equity is not None and total_equity > 0:
@@ -488,8 +439,7 @@ def compute_valuation_metrics(
         # for preferred-heavy names where total net income runs 5-9% low. Falls
         # back to total net_income for filers that don't disclose the common
         # split (identical for names with no preferred). A real TTM loss leaves
-        # pe_ratio None, same as a negative real-EPS P/E. compute_peer_comparison
-        # runs this per peer, so sector_median_pe is derived the same way.
+        # pe_ratio None, same as a negative real-EPS P/E.
         ttm_ni = _ttm_metric(fin, "net_income_common") or _ttm_metric(fin, "net_income")
         if ttm_ni is not None and ttm_ni > 0 and market_cap is not None:
             pe_ratio = market_cap / ttm_ni
@@ -645,69 +595,10 @@ def _not_applicable(industry: str | None, **buckets: dict) -> dict | None:
     return {"reason": kind, "fields": empty} if empty else None
 
 
-def compute_peer_comparison(
-    peer_data: list[tuple[str, NormalizedFinancials, NormalizedQuote]],
-    usd_cad: float | None = None,
-) -> dict:
-    """Reuses compute_valuation_metrics/compute_profitability_metrics/
-    compute_balance_sheet_metrics per peer rather than a parallel
-    calculation path. Returns both peer placeholders the live prompt
-    needs: sector_medians (keyed to the prompt's own sector_median_*
-    placeholder names) and peer_records (per-peer, for {peer_data_block}'s
-    individual "PEER MSFT: ..." lines).
-
-    Real, confirmed dead parameters removed on review: the original
-    ticket's own proposed signature also took the primary stock's fin/
-    valuation/profitability/balance_sheet, copied here without
-    independently checking whether they were actually needed — they
-    weren't referenced anywhere in this function. The prompt's PEER block
-    only needs sector medians and individual peer records; any "P/E 25 vs
-    median 18" comparison is the LLM's own SYNTHESIS-step reasoning
-    (Design Decision #2: LLM produces interpretive fields only), not a
-    precomputed field."""
-    if not peer_data:
-        return {"sector_medians": {}, "peer_records": []}
-
-    peer_records = []
-    for ticker, peer_fin, peer_price_info in peer_data:
-        # A peer that reports in a different currency than it trades in (a CAD-listed USD reporter) gets its
-        # statements converted first, the same as the subject (see data/precompute/currency.py).
-        peer_fin, peer_mismatch = to_quote_currency(peer_fin, peer_price_info.get("currency"), usd_cad)
-        peer_growth = compute_growth_metrics(peer_fin)
-        peer_valuation = compute_valuation_metrics(peer_fin, peer_price_info, peer_growth)
-        peer_profitability = compute_profitability_metrics(peer_fin)
-        peer_balance_sheet = compute_balance_sheet_metrics(peer_fin)
-        merged = {**peer_valuation, **peer_growth, **peer_profitability, **peer_balance_sheet}
-        if peer_mismatch is not None and not peer_mismatch["converted"]:
-            merged.update({key: None for key in PRICE_BASED_MULTIPLES})
-        record = {"ticker": ticker}
-        # Sanitize once, here (86bbq04wm): the median loop reads from
-        # peer_records, so this fixes both the medians and the per-peer
-        # {peer_data_block} lines. A rejected value stores None (renders N/A).
-        record.update({key: _valid_peer_value(key, merged.get(key)) for key in _SECTOR_MEDIAN_KEYS})
-        if all(record[key] is None for key in _SECTOR_MEDIAN_KEYS):
-            # Nothing usable (a delisted peer that Finnhub still lists, a ticker the
-            # provider has no statements for): it would only render as a metric-less
-            # "PEER_n (TICKER)" line. No median can change: they ignore None.
-            logger.info("peer_dropped_no_usable_metrics", peer_ticker=ticker)
-            continue
-        peer_records.append(record)
-
-    sector_medians = {}
-    for key, placeholder_name in _SECTOR_MEDIAN_KEYS.items():
-        values = [r[key] for r in peer_records if r[key] is not None]
-        sector_medians[placeholder_name] = (
-            statistics.median(values) if len(values) >= _MIN_PEERS_FOR_SECTOR_MEDIAN else None
-        )
-
-    return {"sector_medians": sector_medians, "peer_records": peer_records}
-
-
 def compute_all(
     fin: NormalizedFinancials,
     price_info: NormalizedQuote,
     dividend_history: list[NormalizedDividendRecord],
-    peer_data: list[tuple[str, NormalizedFinancials, NormalizedQuote]],
     analyst_estimates: NormalizedAnalystEstimates | None = None,
     earnings_surprises: list[dict] | None = None,
     usd_cad: float | None = None,
@@ -737,7 +628,6 @@ def compute_all(
     balance_sheet = compute_balance_sheet_metrics(fin)
     valuation = compute_valuation_metrics(fin, price_info, growth, analyst_estimates)
     dividend = compute_dividend_info(fin, price_info, dividend_history)
-    peer = compute_peer_comparison(peer_data, usd_cad)
     if currency_mismatch is not None and not currency_mismatch["converted"]:
         valuation.update({key: None for key in PRICE_BASED_MULTIPLES if key in valuation})
         dividend["payout_ratio"] = None
@@ -765,7 +655,6 @@ def compute_all(
         "profitability_metrics": profitability,
         "balance_sheet_metrics": balance_sheet,
         "dividend_info": dividend,
-        "peer_metrics": peer,
         "quarters_available": len(fin.quarters),
         "missing_fields": missing_fields,
         "currency_mismatch": currency_mismatch,

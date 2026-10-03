@@ -29,11 +29,12 @@ from data.precompute.macro_sources import compute_macro_sources
 from data.precompute.news_id_assignment import assign_news_ids
 from data.precompute.news_selection import select_news
 from data.precompute.research_sources import build_research_sources, company_name_variants
+from data.industry_benchmark import industry_benchmark
 from data.precompute.currency import convert_insider_values
 from data.providers.boc import BOCMacroDataProvider
 from data.providers.finnhub import FinnhubDataProvider
 from data.providers.fred import FredMacroDataProvider
-from data.providers.router import Router, is_canadian_ticker
+from data.providers.router import Router
 from data.providers.stats_canada import StatsCanadaProvider
 from data.schemas.common import StockRef
 from data.schemas.context import AnalysisContext
@@ -96,38 +97,6 @@ async def _fetch_usd_cad() -> float | None:
         return None
     rate = result.get("rate")
     return float(rate) if rate else None
-
-
-async def _fetch_peer(router, peer_ticker: str, *, subject_is_ca: bool):
-    """One peer's financials and quote, or None when they cannot be fetched (BB-030).
-
-    The financials source follows the PEER's market, not the subject's: edgartools is
-    SEC EDGAR and has no Canadian company, so a `.TO` peer of a US stock (Finnhub
-    returned PRMW.TO for KO) raised CompanyNotFoundError inside the shared gather and
-    failed the whole run. Canadian subjects already used yfinance for every peer, US
-    ones included, so only a US subject with a Canadian peer changes.
-
-    A peer that still raises is dropped and reported (it shows in the run summary), not
-    allowed to fail the analysis: one comparison company is not worth the run. The
-    subject's own fetches are not guarded this way; those should still fail it."""
-    provider_key = "yfinance" if subject_is_ca or is_canadian_ticker(peer_ticker) else "edgartools"
-    try:
-        peer_fin, peer_quote = await asyncio.gather(
-            router._providers[provider_key].normalize_financials(peer_ticker),
-            router.get_quote(peer_ticker),
-        )
-    except Exception as exc:
-        logger.warning("pipeline_peer_fetch_failed", peer_ticker=peer_ticker, exc_info=True)
-        report_degradation(
-            "pipeline",
-            "peer_financials",
-            FETCH_FAILED,
-            f"{peer_ticker}: {exc}",
-            exc=exc,
-            context={"symbol": peer_ticker},
-        )
-        return None
-    return peer_ticker, peer_fin, peer_quote
 
 
 def resolve_sector_etf(sector: str | None, is_ca: bool) -> str | None:
@@ -259,7 +228,7 @@ class DataPipeline:
                 fin,
                 price_info,
                 dividend_history,
-                peer_tickers,
+                benchmark,
                 analyst_estimates,
                 earnings_surprises,
                 usd_cad,
@@ -267,7 +236,7 @@ class DataPipeline:
                 fin_provider.normalize_financials(ticker),
                 router.get_quote(ticker),
                 router.get_dividend_history(ticker, dividend_from, dividend_to),
-                router.get_peers(ticker),
+                industry_benchmark(ticker),
                 router.get_analyst_estimates(ticker),
                 router.get_earnings_surprises(ticker),
                 _fetch_usd_cad(),
@@ -282,21 +251,10 @@ class DataPipeline:
                 if reported_currency and reported_currency != fin.currency:
                     fin = dataclasses.replace(fin, currency=reported_currency)
 
-            # All peers fetched concurrently, not one at a time - each
-            # normalize_financials() call is itself several sub-requests
-            # (yfinance/edgartools), and rate limiting against the
-            # underlying APIs is already the provider libraries' own job
-            # (pyrate_limiter), not something this loop needs to hand-roll.
-            peer_results = await asyncio.gather(
-                *(_fetch_peer(router, t, subject_is_ca=is_ca) for t in peer_tickers)
-            )
-            peer_data = [result for result in peer_results if result is not None]
-
             fundamentals_result = fundamentals.compute_all(
                 fin=fin,
                 price_info=price_info,
                 dividend_history=dividend_history,
-                peer_data=peer_data,
                 analyst_estimates=analyst_estimates,
                 earnings_surprises=earnings_surprises,
                 usd_cad=usd_cad,
@@ -418,7 +376,8 @@ class DataPipeline:
                 if not insider_converted:
                     insider_value_currency = "USD"
             research_sources_bundle = await build_research_sources(
-                ticker, news_selection["researcher"], stock, capture=capture
+                ticker, news_selection["researcher"], stock, capture=capture,
+                peer_tickers=list(benchmark.closest) if benchmark else [],
             )
             # The scored sample is kept whole (the Sentiment agent's tone figures and its
             # anomaly check use all of it); only the `shown` ones are listed in its prompt.
@@ -492,7 +451,8 @@ class DataPipeline:
                 balance_sheet_metrics=fundamentals_result["balance_sheet_metrics"],
                 dividend_info=fundamentals_result["dividend_info"],
                 dividend_history=dividend_history,
-                peer_metrics=fundamentals_result["peer_metrics"],
+                # the industry P/E benchmark (data/industry_benchmark.py); its `closest` feeds the Researcher
+                peer_metrics={"industry_benchmark": benchmark.as_dict() if benchmark else None},
                 price_info=price_info,
                 missing_fields=fundamentals_result["missing_fields"],
                 currency_mismatch=fundamentals_result["currency_mismatch"],

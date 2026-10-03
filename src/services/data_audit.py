@@ -43,7 +43,7 @@ KNOWN = {
     "ps_ratio": "Yahoo's P/S divides a CAD market cap by USD revenue for USD reporters",
 }
 # Pass 2 fields that are empty for a good reason and so are not reported as gaps.
-EXPECTED_EMPTY = {"commodity_context", "peer_pe_median", "pe_vs_peer_median_pct"}
+EXPECTED_EMPTY = {"commodity_context", "industry_pe_median", "industry_pe_range", "industry_pe_count", "pe_vs_industry_median_pct", "pe_vs_industry"}
 
 
 @dataclass

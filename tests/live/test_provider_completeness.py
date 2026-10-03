@@ -71,6 +71,14 @@ _LIST_DICT_METHODS = {
     "get_analyst_recommendation_trends",
     "get_filings",
 }
+_DICT_METHODS = {
+    "get_insider_trading",
+    "get_earnings_calendar",
+    "get_dividend_history",
+    "get_news",
+    "get_analyst_recommendation_trends",
+    "get_filings",
+}
 # get_peers returns list[str] per the ABC (StockDataProvider.get_peers),
 # not list[dict] — confirmed live 2026-08-04 (Finnhub returns real ticker
 # strings like ['DELL', 'SNDK', ...]); a separate category from the other
@@ -92,7 +100,6 @@ _ARG_BUILDERS = {
     "get_analyst_ratings": lambda ticker: (ticker,),
     "get_short_interest": lambda ticker: (ticker,),
     "get_insider_trading": lambda ticker: (ticker,),
-    "get_peers": lambda ticker: (ticker,),
     "get_earnings_calendar": lambda ticker: (ticker,),
     "get_dividend_history": lambda ticker: (ticker, "2024-01-01", "2026-08-04"),
     "get_news": lambda ticker: (ticker, 30),
@@ -100,8 +107,6 @@ _ARG_BUILDERS = {
     "get_filings": lambda ticker: (ticker,),
 }
 
-# peers_json isn't a live provider (router-only static file, already
-# covered by test_router.py's fakes) — deliberately excluded here.
 _PROVIDER_FACTORIES = {
     "fmp": FMPDataProvider,
     "yfinance": YFinanceDataProvider,
@@ -130,11 +135,6 @@ def _assert_correct_type(method_name: str, result) -> None:
         assert all(isinstance(row, dict) for row in result), (
             f"{method_name} must return list[dict], got a list with non-dict rows"
         )
-    elif method_name in _LIST_STR_METHODS:
-        assert isinstance(result, list), f"{method_name} must return a list, got {type(result)}"
-        assert all(isinstance(row, str) for row in result), (
-            f"{method_name} must return list[str], got a list with non-str rows"
-        )
     elif method_name in _DICT_METHODS:
         assert isinstance(result, dict), f"{method_name} must return a dict, got {type(result)}"
 
@@ -156,7 +156,7 @@ _US_PRIMARY_METHODS = [
 _CA_PRIMARY_METHODS = [
     (method, chain[0])
     for method, chain in CA_CHAINS.items()
-    if chain and chain[0] != "peers_json" and method in _ARG_BUILDERS
+    if chain and method in _ARG_BUILDERS
 ]
 
 

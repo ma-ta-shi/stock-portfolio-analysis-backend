@@ -415,7 +415,7 @@ def _fake_router_factory(peers=None, summaries=None, news=None, names=None):
     summaries = summaries or {}
     news = news or {}
     names = names or {}
-    calls = {"get_peers": [], "get_news": [], "get_company_info": []}
+    calls = {"get_news": [], "get_company_info": []}
 
     class _FakeRouter:
         def __init__(self, ticker):
@@ -426,10 +426,6 @@ def _fake_router_factory(peers=None, summaries=None, news=None, names=None):
 
         async def __aexit__(self, *exc):
             return False
-
-        async def get_peers(self, ticker, limit):
-            calls["get_peers"].append((ticker, limit))
-            return peers.get(ticker, [])[:limit]
 
         async def get_business_summary(self, ticker):
             return summaries.get(ticker)
@@ -450,7 +446,7 @@ async def test_no_peers_returns_empty_list(monkeypatch):
     fake_cls, _ = _fake_router_factory(peers={"AAPL": []})
     monkeypatch.setattr("data.precompute.research_sources.Router", fake_cls)
 
-    assert await build_peer_blocks("AAPL") == []
+    assert await build_peer_blocks("AAPL", []) == []
 
 
 async def test_renders_and_numbers_peer_blocks(monkeypatch):
@@ -465,7 +461,7 @@ async def test_renders_and_numbers_peer_blocks(monkeypatch):
     )
     monkeypatch.setattr("data.precompute.research_sources.Router", fake_cls)
 
-    result = await build_peer_blocks("AAPL")
+    result = await build_peer_blocks("AAPL", ["MSFT", "GOOG"])
 
     assert [(b.peer_id, name) for b, name in result] == [
         ("PEER_1", "Microsoft Corporation"),
@@ -474,7 +470,6 @@ async def test_renders_and_numbers_peer_blocks(monkeypatch):
     assert "Microsoft makes software." in result[0][0].content
     assert "MSFT news" in result[0][0].content
     assert "Google makes search." in result[1][0].content
-    assert calls["get_peers"] == [("AAPL", 2)]
     assert ("MSFT", 30) in calls["get_news"]
     assert ("GOOG", 30) in calls["get_news"]
     assert set(calls["get_company_info"]) == {"MSFT", "GOOG"}
@@ -492,7 +487,7 @@ async def test_peer_with_no_data_dropped_and_remaining_renumber(monkeypatch):
     )
     monkeypatch.setattr("data.precompute.research_sources.Router", fake_cls)
 
-    result = await build_peer_blocks("AAPL", limit=3)
+    result = await build_peer_blocks("AAPL", ["MSFT", "EMPTY", "GOOG"])
 
     # EMPTY has no summary and no news (both default to nothing in the fakes),
     # so it must be dropped - not rendered as a hollow PEER_2 - and GOOG
@@ -527,7 +522,7 @@ async def test_peer_with_content_but_no_name_dropped_and_remaining_renumber(monk
     )
     monkeypatch.setattr("data.precompute.research_sources.Router", fake_cls)
 
-    result = await build_peer_blocks("AAPL", limit=3)
+    result = await build_peer_blocks("AAPL", ["MSFT", "NONAME", "GOOG"])
 
     assert [(b.peer_id, name) for b, name in result] == [
         ("PEER_1", "Microsoft Corporation"),
@@ -535,15 +530,14 @@ async def test_peer_with_content_but_no_name_dropped_and_remaining_renumber(monk
     ]
 
 
-async def test_limit_and_news_days_forwarded(monkeypatch):
+async def test_news_days_forwarded(monkeypatch):
     fake_cls, calls = _fake_router_factory(
         peers={"AAPL": ["MSFT"]}, summaries={"MSFT": "x"}, names={"MSFT": "MSFT Corp"}
     )
     monkeypatch.setattr("data.precompute.research_sources.Router", fake_cls)
 
-    await build_peer_blocks("AAPL", limit=1, news_days=7)
+    await build_peer_blocks("AAPL", ["MSFT"], news_days=7)
 
-    assert calls["get_peers"] == [("AAPL", 1)]
     assert calls["get_news"] == [("MSFT", 7)]
     assert calls["get_company_info"] == ["MSFT"]
 
@@ -1239,9 +1233,6 @@ async def test_build_research_sources_full_assembly(monkeypatch):
                 return {"name": "Peer Company"}
             return {}
 
-        async def get_peers(self, ticker, limit):
-            return ["PEERCO"]
-
         async def get_business_summary(self, ticker):
             return "Peer Company makes widgets."
 
@@ -1273,7 +1264,7 @@ async def test_build_research_sources_full_assembly(monkeypatch):
         }
     ]
 
-    bundle = await build_research_sources("AAPL", articles)
+    bundle = await build_research_sources("AAPL", articles, peer_tickers=["PEERCO"])
 
     assert isinstance(bundle, ResearchSourcesBundle)
     assert len(bundle.filing_digests) == 2
@@ -1342,9 +1333,6 @@ async def test_build_research_sources_dual_class_flag_wired_from_fetched_company
         async def get_company_info(self, ticker):
             return {"name": "Shopify Inc. Class A Subordinate Voting Shares"}
 
-        async def get_peers(self, ticker, limit):
-            return []
-
         async def get_insider_trading(self, ticker, days):
             return []
 
@@ -1377,9 +1365,6 @@ async def test_build_research_sources_degrades_cleanly_with_nothing_available(mo
 
         async def get_company_info(self, ticker):
             return {"name": "Some Co"}
-
-        async def get_peers(self, ticker, limit):
-            return []
 
         async def get_insider_trading(self, ticker, days):
             return []
@@ -1429,9 +1414,6 @@ async def test_build_research_sources_latest_news_age_days_handles_aware_article
         async def get_company_info(self, ticker):
             return {"name": "Some Co"}
 
-        async def get_peers(self, ticker, limit):
-            return []
-
         async def get_insider_trading(self, ticker, days):
             return []
 
@@ -1476,9 +1458,6 @@ async def test_build_research_sources_logs_when_main_company_name_unresolvable(m
         async def get_company_info(self, ticker):
             return {}
 
-        async def get_peers(self, ticker, limit):
-            return []
-
         async def get_insider_trading(self, ticker, days):
             return []
 
@@ -1492,3 +1471,19 @@ async def test_build_research_sources_logs_when_main_company_name_unresolvable(m
 
     assert bundle is not None  # did not raise
     assert any(log["event"] == "research_sources_no_company_name" for log in logs)
+
+
+async def test_a_canadian_name_gets_peer_blocks_from_the_benchmarks_closest_companies(monkeypatch):
+    """TD.TO had no peers at all before the industry benchmark (peers.json held nine other names); the closest
+    companies now come from the benchmark for any ticker."""
+    fake_cls, _ = _fake_router_factory(
+        peers={},
+        summaries={"RY.TO": "A big Canadian bank.", "BMO.TO": "Another big Canadian bank."},
+        news={"RY.TO": [{"headline": "RY news", "published_at": "2026-09-01 00:00:00"}], "BMO.TO": []},
+        names={"RY.TO": "Royal Bank of Canada", "BMO.TO": "Bank of Montreal"},
+    )
+    monkeypatch.setattr("data.precompute.research_sources.Router", fake_cls)
+
+    result = await build_peer_blocks("TD.TO", ["RY.TO", "BMO.TO"])
+
+    assert [(b.peer_id, name) for b, name in result] == [("PEER_1", "Royal Bank of Canada"), ("PEER_2", "Bank of Montreal")]

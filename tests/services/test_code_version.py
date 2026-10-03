@@ -57,12 +57,12 @@ def test_windows_and_unix_line_endings_hash_the_same(src_dir):
 
 
 def test_editing_a_json_data_file_changes_the_hash(src_dir):
-    """peers.json and the cross-listing map change behavior with no Python edit."""
+    """The cross-listing map changes behavior with no Python edit."""
     (src_dir / "data").mkdir()
-    peers = src_dir / "data" / "peers.json"
-    peers.write_text('{"RY.TO": ["TD.TO"]}', encoding="utf-8")
+    crosslisting = src_dir / "data" / "ca_us_crosslisting.json"
+    crosslisting.write_text('{"RY.TO": {"us_ticker": "RY"}}', encoding="utf-8")
     before = code_fingerprint()
-    peers.write_text('{"RY.TO": ["BMO.TO"]}', encoding="utf-8")
+    crosslisting.write_text('{"RY.TO": {"us_ticker": "RYAA"}}', encoding="utf-8")
     assert code_fingerprint() != before
 
 

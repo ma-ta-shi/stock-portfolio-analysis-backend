@@ -66,6 +66,7 @@ from api.tables.run_quality_summary import RunQualitySummary
 from api.tables.shadow_predictions import ShadowPrediction
 from api.tables.stock import Stock
 from api.tables.user_profile import UserProfile
+from data.industry_benchmark import pe_vs_industry
 from data.precompute.insider import summarize_insider_activity
 from data.degradation import DegradationCollector, reset_collector, set_collector
 from data.pipeline import DataPipeline
@@ -119,15 +120,6 @@ _NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b
 _NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
 
 
-def _pe_vs_peer_median_pct(pe: float | None, median: float | None) -> float | None:
-    """P/E premium (+) or discount (-) to the peer median in percent, computed here so the Pass 2 agents
-    copy the direction instead of working it out (a real MSFT Bear run wrote "a 28.6x P/E sits far above the
-    peer median of 62.8"). None unless both are positive numbers."""
-    if not isinstance(pe, (int, float)) or not isinstance(median, (int, float)) or pe <= 0 or median <= 0:
-        return None
-    return round((pe / median - 1) * 100, 1)
-
-
 def _plain(value):
     """A numpy scalar as a plain Python number; anything else unchanged."""
     return value.item() if hasattr(value, "item") and not isinstance(value, (list, dict, str)) else value
@@ -144,8 +136,8 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     growth = bundle.growth_metrics
     prof = bundle.profitability_metrics
     bal = bundle.balance_sheet_metrics
-    sector_medians = bundle.peer_metrics.get("sector_medians", {})
-    peer_records = bundle.peer_metrics.get("peer_records", [])
+    industry = bundle.peer_metrics.get("industry_benchmark")
+    pe_pct, pe_position = pe_vs_industry(fund.get("pe_ratio"), industry)
     insider = summarize_insider_activity(
         bundle.insider_activity.get("transactions", []), bundle.price_info.get("market_cap"),
         bundle.insider_activity.get("value_currency"), bundle.price_info.get("currency"),
@@ -158,11 +150,13 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
         "FUND": {
             "pe_ratio": fund.get("pe_ratio"),
             "margin_trend": prof.get("margin_trend"),
-            # Not a sector benchmark: the median of the 2-5 named peers that have a P/E (MSFT's "Technology
-            # median" of 61.85 was one cybersecurity peer). The count lets the Pass 2 agents say so.
-            "peer_pe_median": sector_medians.get("sector_median_pe"),
-            "peer_pe_count": sum(1 for p in peer_records if p.get("pe_ratio") is not None),
-            "pe_vs_peer_median_pct": _pe_vs_peer_median_pct(fund.get("pe_ratio"), sector_medians.get("sector_median_pe")),
+            # The industry P/E benchmark (data/industry_benchmark.py) and where this P/E sits in it, computed in code so
+            # Pass 2 copies the position instead of judging a noisy median.
+            "industry_pe_median": industry["median_pe"] if industry else None,
+            "industry_pe_range": f"{industry['p25_pe']:.1f} to {industry['p75_pe']:.1f}" if industry else None,
+            "industry_pe_count": industry["companies"] if industry else None,
+            "pe_vs_industry_median_pct": pe_pct,
+            "pe_vs_industry": pe_position,
             "roe": prof.get("roe"),
             "debt_to_equity": bal.get("debt_to_equity"),
             "net_margin": prof.get("net_margin"),
@@ -198,8 +192,11 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     # A metric that does not exist for this kind of company (a bank's operating margin, a REIT's P/E) is passed as
     # "not_applicable", not None, so Pass 2 does not read it as missing data.
     na_fields = set((bundle.not_applicable or {}).get("fields", []))
+    industry_keys = {"industry_pe_median", "industry_pe_range", "industry_pe_count", "pe_vs_industry_median_pct", "pe_vs_industry"}
     if "pe_ratio" in na_fields:
-        na_fields |= {"peer_pe_median", "pe_vs_peer_median_pct"}
+        # a REIT's earnings multiples mislead: its industry P/E is not applicable either, even though the screener has one
+        for key in industry_keys:
+            views["FUND"][key] = "not_applicable"
     for key in na_fields:
         if key in views["FUND"] and views["FUND"][key] is None:
             views["FUND"][key] = "not_applicable"

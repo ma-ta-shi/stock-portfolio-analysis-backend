@@ -105,7 +105,7 @@ class ResearchSourcesBundle(ContractModel):
     # no way to reverse a peer token, only the main COMPANY_X/TICKER_X pair
     # (which DataBundle.company_info/stock already cover independently).
     # Re-deriving this at merge time isn't a safe alternative: a fresh
-    # Router.get_peers() call could return a different peer list, and
+    # industry_benchmark() call could return a different peer list, and
     # wouldn't reproduce build_peer_blocks()'s own drop-and-renumber logic
     # (a peer with nothing citable is dropped, survivors renumber with no
     # gap) - the only correct source is the exact mapping computed at

@@ -20,13 +20,11 @@ loop could silently violate.
 Out of scope: per-provider ticker normalization (each adapter's own job —
 this router passes the canonical ticker through unchanged), MacroDataProvider
 routing, building new provider adapters (e.g. Gap 6's openbb-tmx health
-check, Gap 1's live peers source, Gap 2/3's openbb-tmx news/insider support
+check, Gap 2/3's openbb-tmx news/insider support
 are all still NotImplementedError stubs on their adapters — this router
 just skips them the same way it skips any other empty link).
 """
 
-import json
-from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
@@ -44,7 +42,6 @@ from data.providers.yfinance import YFinanceDataProvider, YFinanceNewsProvider, 
 
 logger = structlog.get_logger(__name__)
 
-_DEFAULT_PEERS_PATH = Path(__file__).resolve().parent.parent / "peers.json"
 
 # .TO (TSX) and .V (TSXV) — confirmed live a .TO-only check misses TSXV
 # listings like PLAN.V. Fallback only: used when no Stock record exists.
@@ -124,7 +121,7 @@ def is_canadian(stock: StockLike | None = None, *, ticker: str | None = None) ->
     """Preferred: Stock.primary_exchange/currency — same check as
     get_benchmark(stock) in data-pipeline.md, so both stay in sync. Only
     falls back to ticker-suffix detection when no Stock record exists
-    (e.g. a bare string from data/peers.json)."""
+    (e.g. a bare string)."""
     if stock is not None:
         return stock.primary_exchange in ("TSX", "TSXV") or stock.currency == "CAD"
     if ticker is not None:
@@ -207,7 +204,6 @@ US_CHAINS: dict[str, list[str]] = {
     "get_analyst_ratings": ["yfinance"],
     "get_earnings_surprises": ["fmp", "yfinance"],  # FMP has revenue+EPS; yfinance is EPS-only
     "get_earnings_calendar": ["fmp", "finnhub"],  # FMP large-cap only; finnhub covers the rest
-    "get_peers": ["finnhub"],
     "get_news": ["finnhub"],
     "get_analyst_recommendation_trends": ["finnhub"],
     "get_ratios_ttm": ["fmp"],  # not on the ABC — carried forward from us_equity.py
@@ -252,7 +248,6 @@ CA_CHAINS: dict[str, list[str]] = {
     # ticker next report", and adds nothing yfinance lacks even then
     # (_earnings_proximity reads only `date`). Diagnosed live 2026-09-08.
     "get_earnings_calendar": ["yfinance"],
-    "get_peers": ["peers_json"],  # static file, not a live provider — Gap 1
     "get_news": ["openbb_tmx"],
     "get_analyst_recommendation_trends": ["yfinance_news"],
     "get_ratios_ttm": [],  # no CA equivalent — empty chain resolves to {} via _try_chain
@@ -292,7 +287,6 @@ class Router(StockDataProvider, NewsProvider):
         yfinance_news: YFinanceNewsProvider | None = None,
         finnhub: FinnhubDataProvider | None = None,
         openbb_tmx: OpenBBTMXProvider | None = None,
-        peers_path: Path | str | None = None,
     ) -> None:
         self.is_ca = is_canadian(stock, ticker=ticker)
         self.sources_used: dict[str, str] = {}
@@ -306,7 +300,6 @@ class Router(StockDataProvider, NewsProvider):
         self._add_provider("fmp", fmp, FMPDataProvider, needed=not self.is_ca)
         self._add_provider("edgartools", edgartools, EdgarToolsDataProvider, needed=not self.is_ca)
         self._add_provider("finnhub", finnhub, FinnhubDataProvider, needed=not self.is_ca)
-        self._peers_path = Path(peers_path) if peers_path else _DEFAULT_PEERS_PATH
 
     def _add_provider(self, key: str, override: object | None, ctor: type, *, needed: bool) -> None:
         if override is not None:
@@ -450,12 +443,6 @@ class Router(StockDataProvider, NewsProvider):
         result, _ = await self._try_chain("get_insider_trading", ticker, days)
         return result if not _is_empty(result) else []
 
-    async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
-        if self.is_ca:
-            return self._load_ca_peers(ticker, limit)
-        result, _ = await self._try_chain("get_peers", ticker, limit)
-        return result if not _is_empty(result) else []
-
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
         result, _ = await self._try_chain("get_earnings_calendar", ticker)
         return result if not _is_empty(result) else []
@@ -543,20 +530,3 @@ class Router(StockDataProvider, NewsProvider):
     async def get_analyst_recommendation_trends(self, ticker: str) -> list[dict]:
         result, _ = await self._try_chain("get_analyst_recommendation_trends", ticker)
         return result if not _is_empty(result) else []
-
-    # ---------- CA get_peers static file (Gap 1 — not a live provider) ----------
-
-    def _load_ca_peers(self, ticker: str, limit: int) -> list[str]:
-        try:
-            content = self._peers_path.read_text(encoding="utf-8").strip()
-        except FileNotFoundError:
-            logger.warning("router_peers_json_missing", path=str(self._peers_path))
-            return []
-        if not content:
-            return []
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError:
-            logger.warning("router_peers_json_invalid", path=str(self._peers_path))
-            return []
-        return list(data.get(ticker.upper(), []))[:limit]

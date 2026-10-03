@@ -312,34 +312,6 @@ async def test_get_analyst_recommendation_trends_ca_ticker_raises_without_callin
     assert session.calls == []
 
 
-# --- get_peers ---
-
-
-async def test_get_peers_excludes_self_and_applies_limit(provider):
-    _wire(provider, FakeResponse(200, json_data=["AAPL", "DELL", "SNDK", "WDC", "HPE", "NTAP"]))
-
-    result = await provider.get_peers("AAPL", limit=3)
-
-    assert result == ["DELL", "SNDK", "WDC"]
-
-
-async def test_get_peers_ca_ticker_raises_without_calling_api(provider):
-    session = _wire(provider, FakeResponse(200, json_data=["should not be reached"]))
-
-    with pytest.raises(NotImplementedError, match="US-only"):
-        await provider.get_peers("SHOP.TO")
-
-    assert session.calls == []
-
-
-async def test_get_peers_etf_returns_empty_list(provider):
-    _wire(provider, FakeResponse(200, json_data=[]))
-
-    result = await provider.get_peers("QQQ")
-
-    assert result == []
-
-
 # --- get_general_news ---
 
 

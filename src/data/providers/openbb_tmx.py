@@ -12,8 +12,7 @@ claimed "not supported by TMX" with no live check). Live-verified 2026-08-04
 (ClickUp 86bb7j0kh) against real `openbb` calls that all four are actually
 real, working `tmx`-provider endpoints — CLAUDE.md's Data Providers section
 already listed "calendar, news" as openbb-tmx coverage; the code just never
-matched. Only get_peers is a genuine gap (obb.equity.compare.peers has no
-tmx provider) — that one stays NotImplementedError.
+matched. (obb.equity.compare.peers has no tmx provider; peers now come from data/industry_benchmark.py.)
 
 Updated 86bbdu04a: get_analyst_estimates specifically no longer calls
 obb.equity.estimates.consensus at all — that endpoint (still real and
@@ -71,7 +70,7 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
     Covers price history, fundamentals, company info, dividends, analyst
     ratings, insider trading, earnings calendar, and news via the
     `openbb-tmx` data provider. Two real gaps: peers (no tmx provider on
-    obb.equity.compare.peers — use the router's static peers_json fallback)
+    obb.equity.compare.peers; peers now come from data/industry_benchmark.py)
     and analyst *estimates* specifically (TMX's consensus endpoint has no
     forward-EPS field — get_analyst_estimates() always returns {} without
     calling the API; get_analyst_ratings() owns the real consensus call).
@@ -282,12 +281,6 @@ class OpenBBTMXProvider(StockDataProvider, NewsProvider):
                 )
             )
         return records
-
-    async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
-        # Confirmed live 2026-08-04: obb.equity.compare.peers genuinely has
-        # no tmx provider (unlike the other four methods here) — use
-        # router.py's static peers_json fallback instead.
-        raise NotImplementedError("Peer comparison is not available via openbb-tmx.")
 
     async def get_earnings_calendar(self, ticker: str) -> list[dict]:
         """Live-verified 2026-08-04 (86bb7j0kh): real data, but bulk (no

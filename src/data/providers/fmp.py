@@ -67,7 +67,7 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
     - No news at any endpoint (HTTP 402 "Restricted Endpoint") — Finnhub is the sole
       US news source; `get_news` and `get_analyst_recommendation_trends` here raise
       NotImplementedError.
-    - `get_financials`, `get_insider_trading`, and `get_peers` are also out of scope
+    - `get_financials` and `get_insider_trading` are also out of scope
       here — edgartools.py and finnhub.py own those per the routing rule.
     """
 
@@ -336,9 +336,6 @@ class FMPDataProvider(StockDataProvider, NewsProvider):
             "Business summary is yfinance.py's job — FMP's description field is "
             "US-only (confirmed live, empty for .TO tickers) where yfinance covers both markets"
         )
-
-    async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
-        raise NotImplementedError("Peers are Finnhub's job — GET /stock/peers")
 
     async def get_news(self, ticker: str, days: int) -> list[dict]:
         raise NotImplementedError(

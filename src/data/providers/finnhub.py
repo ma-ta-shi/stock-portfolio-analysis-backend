@@ -57,13 +57,11 @@ def _reject_ca_ticker(ticker: str) -> None:
 
 
 class FinnhubDataProvider(NewsProvider):
-    """US news, analyst recommendation trends, and peer identification via
+    """US news and analyst recommendation trends via
     Finnhub's free tier.
 
-    Deliberately does NOT inherit StockDataProvider despite implementing
-    get_peers (which lives on that ABC) — Finnhub is a supplemental source
-    for one StockDataProvider method, not a drop-in provider for the other
-    eight. Stubbing those with NotImplementedError just to satisfy the ABC
+    Deliberately does NOT inherit StockDataProvider — Finnhub is a supplemental
+    source for a few methods, not a drop-in provider for the others. Stubbing those with NotImplementedError just to satisfy the ABC
     would be noise with no caller. FMPDataProvider/EdgarToolsDataProvider
     earn the full StockDataProvider inheritance because they ARE pluggable
     US-stock backends; this class isn't.
@@ -276,22 +274,6 @@ class FinnhubDataProvider(NewsProvider):
             }
             for row in data
         ]
-
-    async def get_peers(self, ticker: str, limit: int = 5) -> list[str]:
-        """US stocks only. Canadian peers come from the static
-        data/peers.json (Gap 1) — confirmed live that Finnhub 403s on .TO
-        symbols here, so this is checked up front rather than surfaced as a
-        confusing "forbidden" result."""
-        if ticker.upper().endswith(".TO"):
-            raise NotImplementedError(
-                "Finnhub peers are US-only — Canadian peers come from data/peers.json (Gap 1)"
-            )
-        data = await self._request("stock/peers", {"symbol": ticker})
-        if not data:
-            return []
-        ticker_upper = ticker.upper()
-        peers = [symbol for symbol in data if symbol.upper() != ticker_upper]
-        return peers[:limit]
 
     async def get_general_news(self, category: str = "general") -> list[dict]:
         """Not on NewsProvider — no symbol needed. Used by the Macro

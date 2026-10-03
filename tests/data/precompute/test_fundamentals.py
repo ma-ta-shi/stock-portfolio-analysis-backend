@@ -1,16 +1,12 @@
 import pytest
 
 from data.precompute.fundamentals import (
-    _PEER_METRIC_VALID_RANGE,
-    _SECTOR_MEDIAN_KEYS,
     _peg,
     _ttm_metric,
-    _valid_peer_value,
     compute_all,
     compute_balance_sheet_metrics,
     compute_dividend_info,
     compute_growth_metrics,
-    compute_peer_comparison,
     compute_profitability_metrics,
     compute_valuation_metrics,
 )
@@ -552,153 +548,6 @@ def test_compute_dividend_info_unsorted_input_handled_correctly():
     assert result["dividend_regularity"] == "regular"
 
 
-# --- compute_peer_comparison ---
-
-
-def test_compute_peer_comparison_happy_path():
-    peer_fin = _fin(quarters=_QUARTERS, annual=_ANNUAL, balance_sheet=_BALANCE_SHEET)
-    peer_price = _price_info(current_price=25.0, market_cap=2500.0)
-    peer_data = [("PEER1", peer_fin, peer_price), ("PEER2", peer_fin, peer_price)]
-
-    result = compute_peer_comparison(peer_data)
-
-    assert len(result["peer_records"]) == 2
-    assert result["peer_records"][0]["ticker"] == "PEER1"
-    assert "pe_ratio" in result["peer_records"][0]
-    # identical peers -> median equals either peer's own value
-    assert result["sector_medians"]["sector_median_pe"] == pytest.approx(
-        result["peer_records"][0]["pe_ratio"]
-    )
-    assert set(result["sector_medians"].keys()) == {
-        "sector_median_pe",
-        "sector_median_pb",
-        "sector_median_rev_growth",
-        "sector_median_gross_margin",
-        "sector_median_op_margin",
-        "sector_median_roe",
-        "sector_median_de",
-        "sector_median_ev_ebitda",
-    }
-
-
-def test_compute_peer_comparison_derived_pe_flows_into_sector_median():
-    """Peers hit the same yfinance EPS-NaN problem as the subject — the derived
-    market_cap / net-income-to-common P/E must flow through so sector_median_pe
-    stays on the same footing as the subject's own derived P/E, not N/A."""
-    peer_fin = _fin(quarters=_QUARTERS_NO_EPS)
-    peer_price = _price_info(current_price=25.0, market_cap=2500.0)
-    peer_data = [("PEER1", peer_fin, peer_price), ("PEER2", peer_fin, peer_price)]
-
-    result = compute_peer_comparison(peer_data)
-
-    ttm_nic = 140.0 + 130.0 + 120.0 + 110.0
-    assert result["peer_records"][0]["pe_ratio"] == pytest.approx(2500.0 / ttm_nic)
-    assert result["sector_medians"]["sector_median_pe"] == pytest.approx(2500.0 / ttm_nic)
-
-
-def test_compute_peer_comparison_empty_peers_returns_empty():
-    result = compute_peer_comparison([])
-
-    assert result == {"sector_medians": {}, "peer_records": []}
-
-
-# --- peer-median guard (86bbq04wm) ---
-
-
-@pytest.mark.parametrize(
-    "metric, in_range, out_of_range",
-    [
-        ("pe_ratio", 20.0, -5.0),
-        ("pb_ratio", 3.0, -1.0),
-        ("ev_ebitda", 12.0, -8.0),
-        ("debt_to_equity", 0.5, -2.0),
-        ("revenue_growth_yoy", 0.15, 1.75),  # SNDK spinoff-stub value
-        ("gross_margin", 0.4, -0.2),
-        ("operating_margin", 0.2, 1.5),
-        ("roe", 0.25, 5.0),
-    ],
-)
-def test_valid_peer_value_bounds(metric, in_range, out_of_range):
-    assert _valid_peer_value(metric, in_range) == in_range
-    assert _valid_peer_value(metric, out_of_range) is None
-    assert _valid_peer_value(metric, None) is None
-
-
-@pytest.mark.parametrize("metric", ["pe_ratio", "pb_ratio", "ev_ebitda", "debt_to_equity"])
-def test_valid_peer_value_rejects_negative_and_exact_zero(metric):
-    assert _valid_peer_value(metric, -1.0) is None
-    assert _valid_peer_value(metric, 0.0) is None
-
-
-def test_peer_metric_valid_range_covers_all_sector_median_keys():
-    assert set(_PEER_METRIC_VALID_RANGE) == set(_SECTOR_MEDIAN_KEYS)
-
-
-def test_compute_peer_comparison_single_peer_yields_no_medians():
-    result = compute_peer_comparison([("SOLO", _fin(), _price_info(current_price=25.0))])
-
-    assert len(result["peer_records"]) == 1
-    assert result["peer_records"][0]["pe_ratio"] is not None  # the real value is kept
-    assert all(v is None for v in result["sector_medians"].values())
-
-
-# revenue 10000 vs 3000 -> revenue_growth_yoy 2.33, past the 1.5 upper bound
-_EXTREME_GROWTH_ANNUAL = [
-    _quarter(10000.0, 500.0, 5.0, period_end="2025-12-31"),
-    _quarter(3000.0, 400.0, 4.0, period_end="2024-12-31"),
-]
-
-
-@pytest.mark.parametrize(
-    "override, metric, median_key",
-    [
-        (
-            {"balance_sheet": {**_BALANCE_SHEET, "total_equity": -500.0}},
-            "pb_ratio",
-            "sector_median_pb",
-        ),
-        (
-            {"balance_sheet": {**_BALANCE_SHEET, "total_equity": -500.0}},
-            "debt_to_equity",
-            "sector_median_de",
-        ),
-        (
-            {"balance_sheet": {**_BALANCE_SHEET, "total_debt": 0.0}},
-            "debt_to_equity",
-            "sector_median_de",
-        ),
-        ({"annual": _EXTREME_GROWTH_ANNUAL}, "revenue_growth_yoy", "sector_median_rev_growth"),
-    ],
-)
-def test_compute_peer_comparison_rejects_implausible_values(override, metric, median_key):
-    price = _price_info(current_price=25.0)
-    peer_data = [("BAD", _fin(**override), price), ("GOOD", _fin(), price)]
-
-    result = compute_peer_comparison(peer_data)
-
-    bad_record = next(r for r in result["peer_records"] if r["ticker"] == "BAD")
-    assert bad_record[metric] is None
-    # GOOD alone leaves 1 valid contributor < _MIN_PEERS_FOR_SECTOR_MEDIAN
-    assert result["sector_medians"][median_key] is None
-
-
-def test_compute_peer_comparison_three_peers_two_valid_yields_median():
-    price = _price_info(current_price=25.0)
-    good = _fin()
-    bad = _fin(balance_sheet={**_BALANCE_SHEET, "total_equity": -500.0})  # negative pb + de
-    peer_data = [("A", good, price), ("B", good, price), ("C", bad, price)]
-
-    result = compute_peer_comparison(peer_data)
-
-    a_pb = result["peer_records"][0]["pb_ratio"]
-    assert a_pb is not None
-    assert result["peer_records"][2]["pb_ratio"] is None  # C rejected (negative pb)
-    assert (
-        result["peer_records"][2]["roe"] is None
-    )  # C's roe suppressed at source (negative equity)
-    assert result["sector_medians"]["sector_median_pb"] == pytest.approx(a_pb)  # median of A, B
-
-
 # --- compute_all ---
 
 
@@ -711,7 +560,7 @@ def _fin_scaled(factor: float, currency: str):
 
 
 def test_compute_all_happy_path_returns_full_shape():
-    result = compute_all(_fin(), _price_info(), _dividend_history(), [])
+    result = compute_all(_fin(), _price_info(), _dividend_history())
 
     assert set(result.keys()) == {
         "valuation_metrics",
@@ -719,7 +568,6 @@ def test_compute_all_happy_path_returns_full_shape():
         "profitability_metrics",
         "balance_sheet_metrics",
         "dividend_info",
-        "peer_metrics",
         "quarters_available",
         "missing_fields",
         "currency_mismatch",
@@ -738,8 +586,8 @@ def test_compute_all_converts_a_usd_reporter_on_a_cad_quote_so_the_multiples_are
     divided by a USD profit (BB-021). With the Bank of Canada rate the statements are converted first, so the result
     equals a company that reported the same numbers in CAD."""
     rate = 1.4
-    usd_result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], [], usd_cad=rate)
-    cad_equivalent = compute_all(_fin_scaled(rate, "CAD"), _price_info(currency="CAD"), [], [])
+    usd_result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], usd_cad=rate)
+    cad_equivalent = compute_all(_fin_scaled(rate, "CAD"), _price_info(currency="CAD"), [])
 
     assert usd_result["currency_mismatch"] == {
         "financials_currency": "USD", "quote_currency": "CAD", "converted": True, "usd_cad": rate,
@@ -747,13 +595,13 @@ def test_compute_all_converts_a_usd_reporter_on_a_cad_quote_so_the_multiples_are
     for key in ("pe_ratio", "pb_ratio", "ps_ratio"):
         assert usd_result["valuation_metrics"][key] == pytest.approx(cad_equivalent["valuation_metrics"][key])
     # the distortion removed is exactly the exchange rate: the naive P/E (USD profit read as CAD) divided by the rate
-    naive = compute_all(_fin(currency="CAD"), _price_info(currency="CAD"), [], [])
+    naive = compute_all(_fin(currency="CAD"), _price_info(currency="CAD"), [])
     assert usd_result["valuation_metrics"]["pe_ratio"] == pytest.approx(naive["valuation_metrics"]["pe_ratio"] / rate)
     assert usd_result["valuation_metrics"]["pb_ratio"] == pytest.approx(naive["valuation_metrics"]["pb_ratio"] / rate)
 
 
 def test_compute_all_drops_price_based_multiples_when_a_mismatch_cannot_be_converted():
-    result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], [], usd_cad=None)
+    result = compute_all(_fin(currency="USD"), _price_info(currency="CAD"), [], usd_cad=None)
 
     assert result["currency_mismatch"]["converted"] is False
     for key in ("pe_ratio", "pb_ratio", "ps_ratio", "ev_ebitda", "peg_ratio"):
@@ -765,7 +613,7 @@ def test_compute_all_drops_price_based_multiples_when_a_mismatch_cannot_be_conve
 
 def test_compute_all_missing_fields_lists_none_valued_keys():
     thin_fin = _fin(quarters=_QUARTERS[:1], annual=[])
-    result = compute_all(thin_fin, _price_info(), [], [])
+    result = compute_all(thin_fin, _price_info(), [])
 
     assert "valuation_metrics.pe_ratio" in result["missing_fields"]
     assert "growth_metrics.revenue_growth_yoy" in result["missing_fields"]
@@ -778,7 +626,7 @@ def test_compute_all_latest_financials_period_end_none_when_no_quarters():
     """86bbummwp Tier 2 -- nothing to report a period_end from when the
     company has zero reported quarters at all."""
     empty_fin = _fin(quarters=[], annual=[])
-    result = compute_all(empty_fin, _price_info(), [], [])
+    result = compute_all(empty_fin, _price_info(), [])
     assert result["latest_financials_period_end"] is None
 
 
@@ -789,49 +637,12 @@ def test_compute_all_wires_analyst_estimates_and_earnings_surprises():
     earnings_surprises = [{"period_end": "2026-07-30", "eps_actual": 2.02, "eps_estimated": 1.89}]
 
     result = compute_all(
-        _fin(), _price_info(), _dividend_history(), [], analyst_estimates, earnings_surprises
+        _fin(), _price_info(), _dividend_history(), analyst_estimates, earnings_surprises
     )
 
     assert result["valuation_metrics"]["forward_pe"] == pytest.approx(50.0 / 5.0)
     assert result["growth_metrics"]["earnings_surprises"] == earnings_surprises
     assert "valuation_metrics.forward_pe" not in result["missing_fields"]
-
-
-# --- a peer with nothing usable is dropped, and no median moves (BB-030) ---
-
-
-def _no_statements() -> NormalizedFinancials:
-    """What yfinance returns for a delisted ticker: a currency and nothing else."""
-    return _fin(quarters=[], annual=[], balance_sheet={})
-
-
-def test_a_peer_with_no_usable_metrics_is_dropped_and_medians_do_not_move():
-    """A delisted ticker that a provider still lists (KO's PRMW.TO) comes back with a
-    currency and nothing else: it must not render as a metric-less PEER line."""
-    good = _fin(quarters=_QUARTERS, annual=_ANNUAL, balance_sheet=_BALANCE_SHEET)
-    price = _price_info(current_price=25.0, market_cap=2500.0)
-    empty = _no_statements()
-    with_empty = compute_peer_comparison(
-        [("A", good, price), ("DELISTED.TO", empty, price), ("B", good, price)]
-    )
-    without = compute_peer_comparison([("A", good, price), ("B", good, price)])
-
-    assert [r["ticker"] for r in with_empty["peer_records"]] == ["A", "B"]
-    assert with_empty["sector_medians"] == without["sector_medians"]
-
-
-def test_a_peer_with_some_metrics_is_kept():
-    good = _fin(quarters=_QUARTERS, annual=_ANNUAL, balance_sheet=_BALANCE_SHEET)
-    price = _price_info(current_price=25.0, market_cap=2500.0)
-    result = compute_peer_comparison([("A", good, price)])
-    assert [r["ticker"] for r in result["peer_records"]] == ["A"]
-    assert any(v is not None for k, v in result["peer_records"][0].items() if k != "ticker")
-
-
-def test_all_peers_empty_gives_no_records_and_no_medians():
-    result = compute_peer_comparison([("X", _no_statements(), _price_info())])
-    assert result["peer_records"] == []
-    assert all(v is None for v in result["sector_medians"].values())
 
 
 # --- revenue growth over the most recent period (2026-10-02 accuracy audit) ---
@@ -887,7 +698,7 @@ def test_growth_is_none_with_no_usable_periods_and_the_label_says_so():
 
 def test_latest_financials_period_end_is_the_newest_period_any_statement_covers():
     fin = _fin(quarters=[_q("2026-03-31", 1.0)] + [{**q} for q in _QUARTERS[1:2]], annual=[_q("2026-06-30", 1.0), _q("2025-06-30", 1.0)])
-    assert compute_all(fin, _price_info(), [], [])["latest_financials_period_end"] == "2026-06-30"
+    assert compute_all(fin, _price_info(), [])["latest_financials_period_end"] == "2026-06-30"
 
 
 # --- debt metrics and metrics that do not exist for a kind of company (2026-10-02 accuracy audit) ---
@@ -926,13 +737,13 @@ def test_interest_coverage_prefers_the_latest_quarter_when_it_has_one():
 
 
 def test_a_bank_has_its_nonexistent_metrics_marked_not_applicable_not_missing():
-    result = compute_all(_fin(), _price_info(), [], [], industry="Banking")
+    result = compute_all(_fin(), _price_info(), [], industry="Banking")
     # _fin() has operating_income so operating_margin exists; remove it to look like a bank
     bank_fin = _fin()
     for entry in [*bank_fin.quarters, *bank_fin.annual]:
         entry["operating_income"] = None
         entry["cost_of_revenue"] = None
-    bank = compute_all(bank_fin, _price_info(), [], [], industry="Banks - Diversified")
+    bank = compute_all(bank_fin, _price_info(), [], industry="Banks - Diversified")
     assert bank["not_applicable"]["reason"] == "bank"
     assert {"operating_margin", "gross_margin"} <= set(bank["not_applicable"]["fields"])
     assert "profitability_metrics.operating_margin" not in bank["missing_fields"]
@@ -945,10 +756,10 @@ def test_a_reit_has_its_earnings_multiples_marked_not_applicable_when_empty():
         entry["net_income"] = None
         entry["net_income_common"] = None
         entry["eps"] = None
-    out = compute_all(no_earnings, _price_info(), [], [], industry="REITs")
+    out = compute_all(no_earnings, _price_info(), [], industry="REITs")
     assert out["not_applicable"]["reason"] == "REIT" and "pe_ratio" in out["not_applicable"]["fields"]
     assert "valuation_metrics.pe_ratio" not in out["missing_fields"]
 
 
 def test_other_industries_have_no_not_applicable_list():
-    assert compute_all(_fin(), _price_info(), [], [], industry="Software - Infrastructure")["not_applicable"] is None
+    assert compute_all(_fin(), _price_info(), [], industry="Software - Infrastructure")["not_applicable"] is None

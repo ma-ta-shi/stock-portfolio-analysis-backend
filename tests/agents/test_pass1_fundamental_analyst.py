@@ -31,7 +31,7 @@ def _bundle(**overrides) -> SimpleNamespace:
                        "dividend_growth_5yr": None, "dividend_regularity": "none"},
         analyst_consensus={"consensus_rating": "buy", "num_analysts": 32, "target_mean": 118.5,
                             "buy_count": 22, "hold_count": 8, "sell_count": 2},
-        peer_metrics={"sector_medians": {"sector_median_pe": 20.1}, "peer_records": []},
+        peer_metrics={"industry_benchmark": None},
         missing_fields=[],
         latest_financials_period_end="2026-06-30",  # 86bbummwp Tier 2 -- well within threshold
         currency_mismatch=None,
@@ -54,15 +54,35 @@ def test_renders_percentage_fields_as_percent_not_raw_fraction():
     assert "0.142" not in msg
 
 
-def test_renders_sector_median_from_peer_metrics_not_a_stale_key_name():
-    msg, _ = build_user_message(_bundle())
-    assert "vs Peer median: 20.1" in msg
+_BENCH = {"industry_benchmark": {"industry": "Software—Infrastructure", "market": "US", "companies": 82, "median_pe": 23.5, "p25_pe": 12.9, "p75_pe": 50.7, "closest": ["ORCL", "PLTR"]}, "closest": ["ORCL", "PLTR"]}
 
 
-def test_missing_sector_median_renders_honestly():
-    bundle = _bundle(peer_metrics={"sector_medians": {}, "peer_records": []})
+def test_the_industry_pe_benchmark_is_rendered_with_its_basis_and_the_stocks_position():
+    """MSFT 2026-10-03: P/E 28.6 against a median of 23.5 is +22% but inside the 12.9 to 50.7 middle half: in line."""
+    bundle = _bundle(valuation_metrics={"pe_ratio": 28.6, "forward_pe": 22.1, "peg_ratio": 1.8}, peer_metrics=_BENCH)
+    bundle.stock.ticker = "MSFT"
     msg, _ = build_user_message(bundle)
-    assert "vs Peer median: N/A (0 peers with a P/E)" in msg
+    assert "Industry P/E: median 23.5, middle half 12.9 to 50.7 (82 companies, Software—Infrastructure, US, Yahoo trailing P/E)" in msg
+    assert "This P/E is within_range (+22% against the median)" in msg
+
+
+def test_a_pe_outside_the_middle_half_is_labelled_above_or_below():
+    above = build_user_message(_bundle(valuation_metrics={"pe_ratio": 80.0, "forward_pe": 1.0, "peg_ratio": 1.0}, peer_metrics=_BENCH))[0]
+    below = build_user_message(_bundle(valuation_metrics={"pe_ratio": 10.0, "forward_pe": 1.0, "peg_ratio": 1.0}, peer_metrics=_BENCH))[0]
+    assert "above_range" in above and "below_range" in below
+
+
+def test_a_canadian_stock_on_the_us_industry_says_why():
+    bundle = _bundle(peer_metrics=_BENCH)
+    bundle.stock.ticker = "SHOP.TO"
+    msg, _ = build_user_message(bundle)
+    assert "the TSX industry has too few companies" in msg
+
+
+def test_a_missing_benchmark_says_so_instead_of_inventing_a_median():
+    msg, _ = build_user_message(_bundle())
+    assert "Industry P/E: N/A — no industry benchmark available" in msg
+    assert "median" not in msg.split("Industry P/E:")[1].split("\n")[0].replace("no industry benchmark", "")
 
 
 def test_renders_analyst_consensus_from_real_field_names():
@@ -109,28 +129,17 @@ def test_dividend_data_renders_as_percentage():
     assert "Regularity: regular" in msg
 
 
-def test_peer_data_block_renders_when_present():
-    bundle = _bundle(peer_metrics={
-        "sector_medians": {"sector_median_pe": 20.1},
-        "peer_records": [{"ticker": "ETSY", "pe_ratio": 18.2, "roe": 0.22}],
-    })
-    msg, _ = build_user_message(bundle)
-    assert "PEER_1 (ETSY):" in msg
-    assert "pe_ratio=18.2" in msg
-
-
-def test_no_peer_data_omits_peer_block_not_fabricated():
-    msg, _ = build_user_message(_bundle())  # defaults: peer_records=[]
-    assert "PEER_1" not in msg
-    assert "PEER DATA" not in msg
+def test_there_is_no_per_peer_table_any_more():
+    msg, _ = build_user_message(_bundle(peer_metrics=_BENCH))
+    assert "PEER_1" not in msg and "PEER DATA" not in msg
 
 
 # ---------- field_presence (86bbwachy Phase 4) ----------
 
 
-def test_field_presence_all_true_with_default_bundle_except_no_earnings_or_peers():
+def test_field_presence_all_true_with_default_bundle_except_no_earnings_or_benchmark():
     """Default fixture has every VAL/GROWTH/PROF/BAL field populated and an
-    empty missing_fields list -- only earnings_surprises/peers_block (both
+    empty missing_fields list -- only earnings_surprises/industry_benchmark (both
     genuinely empty in the default fixture) should read False."""
     _, presence = build_user_message(_bundle())
     assert presence == {
@@ -140,7 +149,7 @@ def test_field_presence_all_true_with_default_bundle_except_no_earnings_or_peers
         "roe": True, "fcf_to_net_income": True,
         "debt_to_equity": True, "current_ratio": True,
         "interest_coverage": True, "cash_position": True,
-        "earnings_surprises": False, "peers_block": False,
+        "earnings_surprises": False, "industry_benchmark": False,
     }
 
 
@@ -168,13 +177,10 @@ def test_field_presence_earnings_surprises_true_with_real_history():
     assert presence["earnings_surprises"] is True
 
 
-def test_field_presence_peers_block_true_when_records_present():
-    bundle = _bundle(peer_metrics={
-        "sector_medians": {"sector_median_pe": 20.1},
-        "peer_records": [{"ticker": "ETSY", "pe_ratio": 18.2, "roe": 0.22}],
-    })
-    _, presence = build_user_message(bundle)
-    assert presence["peers_block"] is True
+def test_field_presence_industry_benchmark_true_when_there_is_one():
+    _, presence = build_user_message(_bundle(peer_metrics=_BENCH))
+    assert presence["industry_benchmark"] is True
+    assert build_user_message(_bundle())[1]["industry_benchmark"] is False
 
 
 def test_field_presence_has_no_entry_for_dividend_or_analyst_consensus():
@@ -189,11 +195,8 @@ def test_field_presence_has_no_entry_for_dividend_or_analyst_consensus():
 # ---------- _data_coverage_line (86bbummwp Tier 1a) ----------
 
 
-def test_data_coverage_line_standard_when_peers_and_earnings_surprises_present():
-    _, presence = build_user_message(_bundle(peer_metrics={
-        "sector_medians": {"sector_median_pe": 20.1},
-        "peer_records": [{"ticker": "ETSY", "pe_ratio": 18.2}],
-    }, growth_metrics={
+def test_data_coverage_line_standard_when_the_benchmark_and_earnings_surprises_are_present():
+    _, presence = build_user_message(_bundle(peer_metrics=_BENCH, growth_metrics={
         "revenue_growth_yoy": 0.1, "revenue_growth_3yr_cagr": 0.1, "eps_growth_yoy": 0.1,
         "earnings_surprises": [{"period_end": "2026-06-30", "eps_actual": 1.2,
                                  "eps_estimated": 1.1, "eps_surprise_pct": 9.09}],
@@ -201,13 +204,13 @@ def test_data_coverage_line_standard_when_peers_and_earnings_surprises_present()
     assert _data_coverage_line(presence) == "standard."
 
 
-def test_data_coverage_line_flags_missing_peers_and_earnings_surprises():
+def test_data_coverage_line_flags_a_missing_benchmark_and_earnings_surprises():
     """Default fixture has neither -- the coarse coverage line mentions both,
     unlike the 15 per-ratio keys in the same field_presence dict, which stay
     granular-only in input_field_coverage."""
     _, presence = build_user_message(_bundle())
     line = _data_coverage_line(presence)
-    assert "no peer data available" in line
+    assert "no industry P/E benchmark available" in line
     assert "no earnings surprise history available" in line
 
 
@@ -218,7 +221,7 @@ def test_data_coverage_line_ignores_the_15_per_ratio_keys():
     _, presence = build_user_message(bundle)
     line = _data_coverage_line(presence)
     assert "peg_ratio" not in line
-    assert "no peer data available" in line  # still real (default fixture has none)
+    assert "no industry P/E benchmark available" in line  # still real (default fixture has none)
 
 
 # ---------- _anomalies (86bbummwp Tier 2) ----------
@@ -408,3 +411,15 @@ def test_revenue_growth_shows_its_basis_and_the_fiscal_year_figure():
                                      "earnings_surprises": []})
     msg, _ = build_user_message(bundle)
     assert "Revenue growth YoY: 6.74% (quarter ended 2026-07-03 vs 2025-06-27) | Last fiscal year: 1.87%" in msg
+
+
+def test_a_reit_is_told_its_industry_pe_is_not_applicable():
+    bundle = _bundle(peer_metrics=_BENCH, not_applicable={"reason": "REIT", "fields": ["pe_ratio"]})
+    msg, presence = build_user_message(bundle)
+    assert "Industry P/E: not applicable (REIT" in msg and "median 23.5" not in msg
+
+
+def test_a_pe_from_near_zero_earnings_is_called_not_meaningful():
+    msg, _ = build_user_message(_bundle(valuation_metrics={"pe_ratio": 9001.0, "forward_pe": 1.0, "peg_ratio": 1.0}, peer_metrics=_BENCH))
+    assert "not_meaningful against the industry (earnings are near zero)" in msg
+    assert "against the median" not in msg

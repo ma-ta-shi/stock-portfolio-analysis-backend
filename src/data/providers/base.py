@@ -403,8 +403,7 @@ class StockDataProvider(ABC):
         the CA fallback only (CA_CHAINS prefers yfinance)."""
         ...
 
-    @abstractmethod
-    async def get_peers(self, ticker: str, limit: int = 5) -> list[str]: ...
+    # No get_peers: peers come from the industry P/E benchmark (data/industry_benchmark.py).
     @abstractmethod
     async def get_earnings_calendar(self, ticker: str) -> list[dict]: ...
     @abstractmethod
