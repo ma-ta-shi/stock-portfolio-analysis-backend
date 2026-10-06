@@ -148,6 +148,7 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     ti = bundle.technical_indicators
     sr = bundle.support_resistance
     m = bundle.macro_sources
+    is_ca_macro = bundle.canadian_data_flags is not None  # the same test the Macro runner uses
 
     views = {
         "FUND": {
@@ -189,8 +190,11 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
             "volatility_regime_derived": ti.get("volatility_regime_derived"),
         },
         "MACRO": {
-            "interest_rate_direction": m.rate_trend,
-            "inflation_trend": m.cpi_trend,
+            # A Canadian stock's view carries the Bank of Canada and Canadian CPI trends (the Macro payload shows
+            # both countries for it); it used to carry the Fed's and US CPI's, so Bull, Bear and the CIO read
+            # "tightening" for TD.TO while the BoC was pausing. None, not the US figure, when the Canadian one is missing.
+            "interest_rate_direction": m.boc_rate_trend if is_ca_macro else m.rate_trend,
+            "inflation_trend": m.ca_cpi_trend if is_ca_macro else m.cpi_trend,
             "currency_trend": m.cad_trend,
             "commodity_context": m.sector_commodity_direction,
             "volatility_regime": m.vix_regime,

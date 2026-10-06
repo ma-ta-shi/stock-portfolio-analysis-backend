@@ -12,8 +12,8 @@ def _bench(median=23.5, p25=12.9, p75=50.7, companies=82):
             "p25_pe": p25, "p75_pe": p75, "closest": ["ORCL", "PLTR"]}
 
 
-def _bundle(benchmark=None, pe=28.5):
-    return SimpleNamespace(
+def _bundle(benchmark=None, pe=28.5, canadian=False):
+    return SimpleNamespace(canadian_data_flags=object() if canadian else None,
         valuation_metrics={"pe_ratio": pe}, growth_metrics={}, profitability_metrics={}, balance_sheet_metrics={},
         peer_metrics={"industry_benchmark": benchmark},
         technical_indicators={}, support_resistance={}, macro_sources=MagicMock(),
@@ -153,3 +153,30 @@ def test_the_sent_slice_without_short_interest_or_changes_is_honest_not_a_crash(
     sent = _build_pass2_view_bundles(_bundle())["SENT"]
     assert sent["short_interest_interpretation"] == {"trend": "unknown", "interpretation": "insufficient_data"}
     assert sent["analyst_changes_90d"] == "no data"
+
+
+def _macro_bundle(canadian):
+    bundle = _bundle(canadian=canadian)
+    bundle.macro_sources = SimpleNamespace(
+        rate_trend="tightening", cpi_trend="rising", cad_trend="stable", sector_commodity_direction=None,
+        vix_regime="low", boc_rate_trend="pausing", ca_cpi_trend="stable")
+    return bundle
+
+
+def test_a_canadian_stocks_macro_view_carries_the_bank_of_canada_and_canadian_cpi_trends():
+    """TD.TO 2026-10-06: the BoC was pausing and Canadian CPI stable, but Bull, Bear and the CIO were given the Fed's
+    "tightening" and US CPI's trend."""
+    macro = _build_pass2_view_bundles(_macro_bundle(canadian=True))["MACRO"]
+    assert macro["interest_rate_direction"] == "pausing" and macro["inflation_trend"] == "stable"
+
+
+def test_a_us_stocks_macro_view_still_carries_the_fed_and_us_cpi_trends():
+    macro = _build_pass2_view_bundles(_macro_bundle(canadian=False))["MACRO"]
+    assert macro["interest_rate_direction"] == "tightening" and macro["inflation_trend"] == "rising"
+
+
+def test_a_missing_canadian_trend_is_none_not_the_us_one():
+    bundle = _macro_bundle(canadian=True)
+    bundle.macro_sources.boc_rate_trend = None
+    assert _build_pass2_view_bundles(bundle)["MACRO"]["interest_rate_direction"] is None
+

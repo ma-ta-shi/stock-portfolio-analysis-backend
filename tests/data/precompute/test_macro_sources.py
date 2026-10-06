@@ -87,8 +87,8 @@ def _full_fred_series() -> dict[str, pd.Series]:
         "CPIAUCSL": _series({455: 310.0, 365: 313.0, 90: 320.0, 0: 322.0}),
         "CPILFESL": _series({365: 320.0, 0: 330.0}),
         "GDP": _series({0: 28000.0}),
-        # GDPC1: 5 quarterly points so _real_gdp_growth can do QoQ + YoY
-        "GDPC1": _series({365: 22800.0, 273: 22900.0, 182: 23000.0, 91: 23100.0, 0: 23300.0}),
+        # GDPC1: 6 quarterly points so _real_gdp_growth can do QoQ, YoY and last quarter's YoY
+        "GDPC1": _series({456: 22700.0, 365: 22800.0, 273: 22900.0, 182: 23000.0, 91: 23100.0, 0: 23300.0}),
         "UNRATE": _series({180: 3.9, 0: 4.2}),
         "VIXCLS": _series({20: 15.0, 10: 16.0, 0: 16.5}),
         "DEXCAUS": _series({90: 1.35, 0: 1.40}),
@@ -193,7 +193,7 @@ async def test_us_and_boc_derived_fields_populated():
     assert bundle.us_cpi_yoy == pytest.approx(2.88, abs=0.02)
     assert bundle.us_core_cpi_yoy == pytest.approx(3.12, abs=0.02)
     assert bundle.us_gdp_qoq == pytest.approx(3.51, abs=0.05)
-    assert bundle.us_gdp_4q_trend == "rising"  # yoy ~2.2% > 1.0 deadband
+    assert bundle.us_gdp_4q_trend == "rising"  # YoY 2.19% against 1.75% last quarter, change +0.44pp > 0.3 deadband
     assert bundle.vix_30d_avg == pytest.approx(15.83, abs=0.02)
     assert bundle.boc_rate_90d_delta_bp == pytest.approx(-50.0, abs=0.1)
     assert bundle.boc_rate_trend == "easing"
@@ -340,7 +340,7 @@ async def test_rate_trend_thresholds(delta_bp, expected):
 
 
 @pytest.mark.parametrize(
-    "vix_level,expected", [(10.0, "low"), (14.9, "low"), (20.0, "elevated"), (30.0, "high")]
+    "vix_level,expected", [(10.0, "low"), (14.9, "low"), (17.0, "normal"), (22.0, "elevated"), (30.0, "high")]
 )
 @pytest.mark.asyncio
 async def test_vix_regime_thresholds(vix_level, expected):
@@ -509,6 +509,7 @@ async def test_statcan_called_and_populated_for_a_canadian_stock():
             "value": 116.8,
             "qoq_annualized_pct": 2.1,
             "yoy_pct": -1.5,
+            "prior_yoy_pct": -0.5,
             "reference_period": "2026-01-01",
             "released": "2026-05-29T08:30",
         },
@@ -523,7 +524,7 @@ async def test_statcan_called_and_populated_for_a_canadian_stock():
     assert bundle.ca_cpi_3m_delta == 0.5
     assert bundle.ca_cpi_trend == "rising"  # 0.5 > 0.3 deadband
     assert bundle.ca_gdp_qoq == 2.1
-    assert bundle.ca_gdp_4q_trend == "falling"  # yoy_pct -1.5 < -1.0 deadband
+    assert bundle.ca_gdp_4q_trend == "falling"  # YoY -1.5 against -0.5 last quarter, change -1.0pp
 
 
 @pytest.mark.asyncio
@@ -957,3 +958,24 @@ async def test_a_permanently_failing_statcan_metric_gives_up_after_three_attempt
 
     bundle = await _compute(is_canadian_stock=True, stats_canada=_Down())
     assert calls["n"] == 3 and bundle.statcan_unemployment_ca is None
+
+
+def test_gdp_trend_is_the_change_in_yoy_growth_not_its_level():
+    """It used to classify the YoY level, so it said "rising" for almost every run (the Macro agent then wrote
+    growth_outlook "accelerating" in 73 of 80 outputs)."""
+    from data.precompute.macro_sources import _gdp_trend
+
+    assert _gdp_trend(2.2, 1.8) == "rising"
+    assert _gdp_trend(2.2, 2.7) == "falling"  # a healthy level that is slowing is not "rising"
+    assert _gdp_trend(2.2, 2.0) == "stable"  # inside the 0.3pp deadband
+    assert _gdp_trend(2.2, None) is None
+    assert _gdp_trend(None, 2.0) is None
+
+
+def test_vix_regime_calls_the_normal_range_normal():
+    """15.3 used to read "elevated" and the Macro agent wrote that volatility "may increase financing costs"."""
+    from data.precompute.macro_sources import _vix_regime
+
+    assert [_vix_regime(v) for v in (12.0, 14.99, 15.0, 15.31, 20.0, 20.1, 25.0, 25.1, 40.0)] == [
+        "low", "low", "normal", "normal", "normal", "elevated", "elevated", "high", "high"]
+    assert _vix_regime(None) is None

@@ -492,3 +492,34 @@ async def test_healthy_statcan_calls_report_nothing(provider, monkeypatch, colle
     _always(monkeypatch, provider, [_success_row(_point("2026-06-01", 238.971, 3))])
     assert (await provider.get_housing_starts())["value"] == pytest.approx(238971.0)
     assert collector.drain() == []
+
+
+async def test_get_real_gdp_index_gives_last_quarters_yoy_for_the_growth_trend(provider, monkeypatch):
+    """The 6th point is the base for last quarter's YoY, so the trend can say growth is picking up or slowing."""
+    row = _success_row(
+        _point("2024-10-01", 100.0),  # 4 quarters before the prior quarter
+        _point("2025-01-01", 100.0),  # 4 quarters ago
+        _point("2025-04-01", 101.0),
+        _point("2025-07-01", 102.0),
+        _point("2025-10-01", 104.0),  # prior quarter
+        _point("2026-01-01", 105.0),  # latest
+    )
+    _mock_fetch(monkeypatch, provider, [[row]])
+
+    result = await provider.get_real_gdp_index()
+
+    assert result["yoy_pct"] == pytest.approx(5.0)  # 105 vs 100
+    assert result["prior_yoy_pct"] == pytest.approx(4.0)  # 104 vs 100
+
+
+async def test_get_real_gdp_index_has_no_prior_yoy_when_the_sixth_quarter_is_missing(provider, monkeypatch):
+    """The growth trend then has nothing to compare against and is left unknown rather than guessed."""
+    row = _success_row(
+        _point("2025-01-01", 100.0), _point("2025-04-01", 101.0), _point("2025-07-01", 102.0),
+        _point("2025-10-01", 104.0), _point("2026-01-01", 105.0),
+    )
+    _mock_fetch(monkeypatch, provider, [[row]])
+
+    result = await provider.get_real_gdp_index()
+
+    assert result["yoy_pct"] == pytest.approx(5.0) and result["prior_yoy_pct"] is None

@@ -196,7 +196,7 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             "sector_tailwinds": c.get("sector_tailwinds") or [],
             "sector_headwinds": c.get("sector_headwinds") or [],
             # Orchestrator-owned: classify_vix(src.vix), thresholds <15 low,
-            # 15-25 elevated, >25 high (MACRO prompt line 352).
+            # 15-20 normal, 20-25 elevated, >25 high.
             "volatility_regime": b.get("volatility_regime"),
         }
 

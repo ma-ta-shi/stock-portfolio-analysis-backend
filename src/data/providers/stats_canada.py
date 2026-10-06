@@ -399,10 +399,19 @@ class StatsCanadaProvider:
         else:
             logger.warning("statcan_gdp_index_no_prior_year", latest_period=latest_period)
 
+        # YoY of the previous quarter (the 6th point), for the growth trend: picking up or slowing
+        prior_yoy_pct = None
+        prior_quarter_period = _shift_months(latest_period, -3)
+        prior_quarter_year_ago = points.get(_shift_year(prior_quarter_period, -1))
+        if prior_quarter is not None and prior_quarter_year_ago is not None:
+            prior_value = self._scaled_value(prior_quarter_year_ago)
+            prior_yoy_pct = ((prior_quarter_value - prior_value) / prior_value) * 100
+
         return {
             "value": latest_value,
             "qoq_annualized_pct": qoq_annualized_pct,
             "yoy_pct": yoy_pct,
+            "prior_yoy_pct": prior_yoy_pct,
             "reference_period": latest_period,
             "released": latest["releaseTime"],
         }
