@@ -60,6 +60,7 @@ def test_resolve_sector_etf_us_every_mapped_sector(sector, expected):
         ("Utilities", "XUT.TO"),
         ("Healthcare", "XHC.TO"),
         ("Media & Telecommunications", "XTC.TO"),
+        ("Consumer Staples", "XST.TO"),  # DOL.TO and L.TO had no sector benchmark before 2026-10-04
     ],
 )
 def test_resolve_sector_etf_ca_every_mapped_sector(sector, expected):

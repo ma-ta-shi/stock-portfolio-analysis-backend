@@ -335,7 +335,7 @@ def check_snapshot(bundle) -> list[Finding]:
 
 
 def check_technicals(bundle) -> list[Finding]:
-    """SMA 20/50/200, RSI 14, ATR 14 and MACD recomputed from raw yfinance price history."""
+    """SMA 20/50/200, RSI 14, ATR 14, MACD and the Bollinger bands recomputed from raw yfinance price history."""
     import pandas as pd
     import yfinance as yf
 
@@ -352,6 +352,16 @@ def check_technicals(bundle) -> list[Finding]:
     findings = compare(t, "technicals", bundle.technical_indicators, {k: float(v) for k, v in theirs.items()}, tol=0.05,
                        abs_tol={"rsi_14": 3.0})
     findings += compare(t, "technicals", bundle.technical_indicators, {"macd_line": float(macd.iloc[-1]), "macd_signal": float(macd.ewm(span=9, adjust=False).mean().iloc[-1])}, tol=0.3)
+    # Bollinger bands (20-day mean, 2 standard deviations, population) and where price sits in them, and the MACD
+    # histogram three sessions ago (the input to momentum direction): all recomputed independently.
+    mid, sd = c.rolling(20).mean(), c.rolling(20).std(ddof=0)
+    lower, upper = mid - 2 * sd, mid + 2 * sd
+    hist_line = macd - macd.ewm(span=9, adjust=False).mean()
+    findings += compare(t, "technicals", bundle.technical_indicators,
+                        {"bb_lower": float(lower.iloc[-1]), "bb_middle": float(mid.iloc[-1]), "bb_upper": float(upper.iloc[-1]),
+                         "macd_histogram_3d_ago": float(hist_line.iloc[-4])}, tol=0.05)
+    percent_b = (c.iloc[-1] - lower.iloc[-1]) / (upper.iloc[-1] - lower.iloc[-1]) * 100
+    findings += compare(t, "technicals", bundle.technical_indicators, {"bb_percent_b": float(percent_b)}, tol=0.05, abs_tol={"bb_percent_b": 5.0})
     return findings
 
 

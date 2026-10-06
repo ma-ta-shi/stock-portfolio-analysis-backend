@@ -69,6 +69,7 @@ _CA_SECTOR_ETF: dict[str, str] = {
     "Industrials": "XID.TO",
     "Real Estate": "XRE.TO",
     "Utilities": "XUT.TO",
+    "Consumer Staples": "XST.TO",  # added 2026-10-04: DOL.TO and L.TO had no sector benchmark (5 of 30 CA tickers lacked one)
     "Healthcare": "XHC.TO",
     "Media & Telecommunications": "XTC.TO",
 }
