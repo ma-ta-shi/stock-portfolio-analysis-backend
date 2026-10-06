@@ -128,7 +128,9 @@ IF_SPEC_FUNDAMENTAL = {
 }
 
 IF_SPEC_TECHNICAL = {
-    "required": ("primary_trend", "trend_strength", "momentum_zone"),
+    # momentum_zone is decided in code now (data/precompute/technical_signals.py) and merged after the model returns,
+    # so the model's output is not required to carry it (its enum is still checked if a model writes one anyway).
+    "required": ("trend_strength",),  # primary_trend is the SMA stack, decided in code (technical_signals.py)
     "enums": {
         "primary_trend": {"bullish", "bearish", "mixed"},
         "trend_strength": {"strong", "moderate", "weak"},
@@ -350,7 +352,8 @@ def validate_technical_analyst(output: dict) -> tuple[bool, list[str]]:
     if word_count(summary) > 80:
         errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 80)")
 
-    _check_narrative_chars(output, 720, 1080, errors)
+    # Floor 600, as Sentiment's (2026-10-03): the shorter prompt made too-short narratives 641-692 characters in 3 of 18 replays.
+    _check_narrative_chars(output, 600, 1080, errors)
     _check_key_factors(output.get("key_factors", []), errors)
     _check_risks(output.get("risks", []), errors)
 
