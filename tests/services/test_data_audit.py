@@ -117,3 +117,40 @@ def test_a_mismatch_in_an_old_bundle_becomes_known_but_a_fresh_one_stays():
     aged = downgrade_if_stale(mismatch, old)
     assert [f.status for f in aged] == ["known", "ok"] and "10h old" in aged[0].note
     assert [f.status for f in downgrade_if_stale(mismatch, fresh)] == ["mismatch", "ok"]
+
+
+def _research_bundle(ticker, canadian, sections, profile=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        stock=SimpleNamespace(ticker=ticker), canadian_data_flags=object() if canadian else None,
+        research_sources=SimpleNamespace(filing_digests=[SimpleNamespace(section=s) for s in sections],
+                                         business_profile=profile))
+
+
+def test_a_us_name_without_its_filing_digest_is_a_gap_not_a_quiet_omission():
+    """2026-10-03 to 2026-10-06 every US name lost its digest and nothing said so."""
+    from services.data_audit import check_research
+
+    by_field = {f.field: f for f in check_research(_research_bundle("KO", False, []))}
+
+    assert by_field["filing_digest.Business"].status == "gap" and by_field["filing_digest.MDA"].status == "gap"
+    assert by_field["business_profile"].status == "gap"  # no digest and no fallback
+
+
+def test_a_name_with_both_sections_is_clean():
+    from services.data_audit import check_research
+
+    findings = check_research(_research_bundle("KO", False, ["Business", "MDA"]))
+
+    assert {f.status for f in findings} == {"ok"}
+
+
+def test_a_pure_canadian_name_is_known_to_have_no_filing_and_needs_the_profile_fallback():
+    from services.data_audit import check_research
+
+    findings = {f.field: f for f in check_research(_research_bundle("ZZZ.TO", True, [], profile="A profile."))}
+
+    assert findings["filing_digest.Business"].status == "known"
+    assert findings["business_profile"].status == "ok"
+

@@ -49,6 +49,7 @@ from datetime import date
 from pathlib import Path
 
 from edgar import Company, Filing, set_identity
+from edgar._filings import FilingHomepage
 import structlog
 
 from data.providers.base import NormalizedFilingSection
@@ -433,6 +434,22 @@ async def _find_mda_source(cik: int) -> NormalizedFilingSection | None:
     return candidate if candidate["filing_date"] >= annual["filing_date"] else annual
 
 
+def _use_folder_index_url(filing: Filing) -> None:
+    """Point the filing at its index page by the folder URL form.
+
+    edgartools 5.43 fetches `/data/{cik}/{accession}-index.html`, and the SEC now answers that with 403, so the
+    filing's document list comes back empty, `.business` and `.management_discussion` are None, and every US
+    Researcher run lost its filing digest (KO, MSFT and RDDT on 2026-10-06; first seen 2026-10-03). The
+    `/data/{cik}/{accession without dashes}/{accession}-index.htm` form still returns 200 with the same page.
+    Failing to build the page leaves the filing as it was, so the caller degrades to None as before."""
+    try:
+        accession = filing.accession_no
+        url = f"https://www.sec.gov/Archives/edgar/data/{filing.cik}/{accession.replace('-', '')}/{accession}-index.htm"
+        filing._filing_homepage = FilingHomepage.load(url)
+    except Exception:
+        logger.info("edgar_folder_index_unavailable", accession_no=getattr(filing, "accession_no", None))
+
+
 async def get_native_filing_section(
     cik_or_ticker: int | str, form: str, attr: str
 ) -> NormalizedFilingSection | None:
@@ -478,6 +495,7 @@ async def get_native_filing_section(
     if not filings:
         return None
     filing = filings[0]
+    await asyncio.to_thread(_use_folder_index_url, filing)
     obj = await asyncio.to_thread(filing.obj)
     text = getattr(obj, attr, None)
     if not text:

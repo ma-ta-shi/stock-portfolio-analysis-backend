@@ -942,3 +942,28 @@ async def test_get_crosslisted_interim_exhibits_20f_filer_returns_recent_filings
     result = await get_crosslisted_interim_exhibits("GOOS.TO")
 
     assert result == [{"filing_date": "2026-03-01", "accession_no": "0001"}]
+
+
+async def test_the_filing_is_pointed_at_its_folder_style_index_page_before_parsing(monkeypatch):
+    """2026-10-06: the SEC answers 403 to the `{accession}-index.html` URL edgartools uses, so the filing's document
+    list was empty and every US Researcher run lost its filing digest. The folder form still works."""
+    loaded = []
+
+    class FakeHomepage:
+        @staticmethod
+        def load(url):
+            loaded.append(url)
+            return "homepage"
+
+    filing = Fake10KFiling(FakeTenKObj(business="Business text"), accession_no="0001628280-26-010047")
+    filing.cik = 21344
+    fake = FakeCompany(filings_by_form={"10-K": [filing]})
+    monkeypatch.setattr("data.providers.ca_crosslisting.Company", lambda cik: fake)
+    monkeypatch.setattr("data.providers.ca_crosslisting.FilingHomepage", FakeHomepage)
+
+    result = await get_native_filing_section("KO", "10-K", "business")
+
+    assert result["text"] == "Business text"
+    assert loaded == ["https://www.sec.gov/Archives/edgar/data/21344/000162828026010047/0001628280-26-010047-index.htm"]
+    assert filing._filing_homepage == "homepage"
+

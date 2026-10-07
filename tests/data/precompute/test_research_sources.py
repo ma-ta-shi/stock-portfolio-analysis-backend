@@ -6,7 +6,6 @@ import structlog
 from data.precompute.research_sources import (
     _compute_buyback_activity,
     _compute_dividend_activity,
-    _compute_insider_direction,
     _derive_short_name,
     _render_peer_content,
     _truncate_to_tokens,
@@ -334,77 +333,15 @@ def test_truncate_to_tokens_ignores_early_abbreviation_period():
 # --- _render_peer_content ---
 
 
-def test_render_peer_content_both_pieces_present():
-    content = _render_peer_content(
-        "A leading widget maker.",
-        [{"headline": "Widgets up", "published_at": "2026-09-01 00:00:00"}],
-    )
-    assert content is not None
-    assert "Business: A leading widget maker." in content
-    assert "Recent news: Widgets up" in content
+def test_render_peer_content_no_summary_returns_none():
+    assert _render_peer_content(None) is None
+    assert _render_peer_content("") is None
 
 
-def test_render_peer_content_no_summary_no_news_returns_none():
-    assert _render_peer_content(None, []) is None
-    assert _render_peer_content("", []) is None
-
-
-def test_render_peer_content_summary_only():
-    content = _render_peer_content("A leading widget maker.", [])
-    assert content == "Business: A leading widget maker."
-
-
-def test_render_peer_content_news_only():
-    content = _render_peer_content(
-        None, [{"headline": "Widgets up", "published_at": "2026-09-01 00:00:00"}]
-    )
-    assert content == "Recent news: Widgets up"
-
-
-def test_render_peer_content_sorts_news_and_takes_top_two():
-    news = [
-        {"headline": "Oldest", "published_at": "2026-01-01 00:00:00"},
-        {"headline": "Newest", "published_at": "2026-09-01 00:00:00"},
-        {"headline": "Middle", "published_at": "2026-05-01 00:00:00"},
-    ]
-    content = _render_peer_content(None, news)
-    assert "Newest" in content
-    assert "Middle" in content
-    assert "Oldest" not in content
-
-
-def test_render_peer_content_dedupes_repeated_headline():
-    """Real bug caught against real data: Router.get_news() merges a
-    crosslisted CA ticker's TMX feed with its matching Finnhub feed and
-    dedupes only on URL - the same real story reaches both feeds under
-    two different URLs and survives as two entries with an identical
-    headline (confirmed live on TD.TO and RY.TO, ~15-16% of 180-day news
-    volume). The top-2 "recent news" selection must not waste both slots
-    on the same story - it should fall through to the next distinct one."""
-    news = [
-        {"headline": "Same story", "published_at": "2026-09-01 07:00:00"},
-        {"headline": "Same story", "published_at": "2026-09-01 07:00:00"},
-        {"headline": "Different story", "published_at": "2026-08-01 00:00:00"},
-    ]
-    content = _render_peer_content(None, news)
-    assert content.count("Same story") == 1
-    assert "Different story" in content
-
-
-def test_render_peer_content_stays_within_whole_block_budget():
-    """Regression test for a real bug caught during implementation review:
-    the "Recent news: " label's own token cost wasn't subtracted before
-    truncating headlines to fit, so a worst-case business summary +
-    headlines combination rendered ~204 tokens against a 200-token budget.
-    A maxed-out 50-token business summary plus two very long headlines
-    must still land at or under 200 tokens once rendered."""
-    summary = "x" * 200  # ~50 tokens, fills its own fixed budget exactly
-    news = [
-        {"headline": "y" * 300, "published_at": "2026-09-02 00:00:00"},
-        {"headline": "z" * 300, "published_at": "2026-09-01 00:00:00"},
-    ]
-    content = _render_peer_content(summary, news)
-    assert len(content) // 4 <= 200
+def test_render_peer_content_is_the_business_summary_cut_to_its_budget():
+    assert _render_peer_content("A leading widget maker.") == "Business: A leading widget maker."
+    content = _render_peer_content("x" * 1000)
+    assert len(content) // 4 <= 200  # the 50 token summary budget, well inside the block budget
 
 
 # --- build_peer_blocks ---
@@ -468,10 +405,9 @@ async def test_renders_and_numbers_peer_blocks(monkeypatch):
         ("PEER_2", "Alphabet Inc."),
     ]
     assert "Microsoft makes software." in result[0][0].content
-    assert "MSFT news" in result[0][0].content
+    assert "MSFT news" not in result[0][0].content and "Recent news" not in result[0][0].content
     assert "Google makes search." in result[1][0].content
-    assert ("MSFT", 30) in calls["get_news"]
-    assert ("GOOG", 30) in calls["get_news"]
+    assert calls["get_news"] == []  # a peer's news is no longer fetched: echoed in 2 of 49 real runs, one list was wrong
     assert set(calls["get_company_info"]) == {"MSFT", "GOOG"}
 
 
@@ -530,15 +466,15 @@ async def test_peer_with_content_but_no_name_dropped_and_remaining_renumber(monk
     ]
 
 
-async def test_news_days_forwarded(monkeypatch):
+async def test_a_peers_news_is_not_fetched(monkeypatch):
     fake_cls, calls = _fake_router_factory(
         peers={"AAPL": ["MSFT"]}, summaries={"MSFT": "x"}, names={"MSFT": "MSFT Corp"}
     )
     monkeypatch.setattr("data.precompute.research_sources.Router", fake_cls)
 
-    await build_peer_blocks("AAPL", ["MSFT"], news_days=7)
+    await build_peer_blocks("AAPL", ["MSFT"])
 
-    assert calls["get_news"] == [("MSFT", 7)]
+    assert calls["get_news"] == []
     assert calls["get_company_info"] == ["MSFT"]
 
 
@@ -568,67 +504,6 @@ def _insider_row(
 
 def _dividend_record(ex_date: str, amount: float):
     return {"ex_date": ex_date, "payment_date": None, "amount_per_share": amount}
-
-
-# --- _compute_insider_direction ---
-
-
-def test_insider_direction_buying_when_purchases_exceed_sales():
-    rows = [
-        _insider_row("purchase", value=5000, date=_days_ago(10)),
-        _insider_row("sale", value=1000, date=_days_ago(20)),
-    ]
-    assert _compute_insider_direction(rows) == "buying"
-
-
-def test_insider_direction_selling_when_sales_exceed_purchases():
-    rows = [
-        _insider_row("purchase", value=1000, date=_days_ago(10)),
-        _insider_row("sale", value=5000, date=_days_ago(20)),
-    ]
-    assert _compute_insider_direction(rows) == "selling"
-
-
-def test_insider_direction_neutral_when_values_equal():
-    rows = [
-        _insider_row("purchase", value=1000, date=_days_ago(10)),
-        _insider_row("sale", value=1000, date=_days_ago(20)),
-    ]
-    assert _compute_insider_direction(rows) == "neutral"
-
-
-def test_insider_direction_excludes_issuer_rows():
-    """is_issuer=True is buyback_activity's signal, not personal insider
-    direction - a huge issuer buyback must not count here."""
-    rows = [_insider_row("purchase", is_issuer=True, value=100_000, date=_days_ago(5))]
-    assert _compute_insider_direction(rows) is None
-
-
-def test_insider_direction_excludes_non_directional_types():
-    rows = [
-        _insider_row("exercise", value=1000, date=_days_ago(5)),
-        _insider_row("gift", value=1000, date=_days_ago(5)),
-        _insider_row("other", value=1000, date=_days_ago(5)),
-        _insider_row("buyback", is_issuer=True, value=1000, date=_days_ago(5)),
-    ]
-    assert _compute_insider_direction(rows) is None
-
-
-def test_insider_direction_excludes_rows_outside_90_day_window():
-    rows = [_insider_row("purchase", value=5000, date=_days_ago(120))]
-    assert _compute_insider_direction(rows) is None
-
-
-def test_insider_direction_none_for_empty_input():
-    assert _compute_insider_direction([]) is None
-
-
-def test_insider_direction_treats_missing_value_as_zero():
-    rows = [
-        _insider_row("purchase", value=None, date=_days_ago(5)),
-        _insider_row("sale", value=100, date=_days_ago(5)),
-    ]
-    assert _compute_insider_direction(rows) == "selling"
 
 
 # --- _compute_buyback_activity ---
@@ -755,7 +630,6 @@ async def test_build_management_signals_wires_real_derivations(monkeypatch):
 
     signals = await build_management_signals("AAPL")
 
-    assert signals.insider_net_direction_90d == "buying"
     assert signals.dividend_activity == "held"
     assert signals.buyback_activity == "none"
     assert calls["get_insider_trading"] == [("AAPL", 365)]
@@ -1042,7 +916,6 @@ def _minimal_research_sources(news_items: list[NewsItem]) -> ResearchSourcesBund
         management_signals=ManagementSignals(
             c_suite_changes_12mo=None,
             changes_detail="",
-            insider_net_direction_90d=None,
             buyback_activity="",
             dividend_activity="",
         ),
@@ -1070,6 +943,7 @@ def test_build_hydrated_developments_resolves_real_id_to_real_record():
     )
     assert result == [
         {
+            "news_id": "N1",  # kept: the narrative cites "N1", so a reader can match the two
             "event": "Earnings beat expectations",
             "date": "2026-08-01T09:00:00",
             "source": "Benzinga",
@@ -1282,7 +1156,6 @@ async def test_build_research_sources_full_assembly(monkeypatch):
     assert bundle.has_filing_digest is True
     assert bundle.cik_verified is True  # plain US, has_filing_digest=True
     assert bundle.dual_class_flag is False
-    assert bundle.management_signals.insider_net_direction_90d == "buying"
     assert bundle.management_signals.c_suite_changes_12mo is None
     assert bundle.missing_sources_list == []
     # Filing digest token_count must be rescaled from the pre-anonymization
@@ -1487,3 +1360,96 @@ async def test_a_canadian_name_gets_peer_blocks_from_the_benchmarks_closest_comp
     result = await build_peer_blocks("TD.TO", ["RY.TO", "BMO.TO"])
 
     assert [(b.peer_id, name) for b, name in result] == [("PEER_1", "Royal Bank of Canada"), ("PEER_2", "Bank of Montreal")]
+
+
+def _router_with_profile(profile, calls):
+    class _FakeRouter:
+        def __init__(self, ticker):
+            self.ticker = ticker
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def get_company_info(self, ticker):
+            return {"name": "Acme Corporation"}
+
+        async def get_business_summary(self, ticker):
+            calls.append(ticker)
+            if isinstance(profile, Exception):
+                raise profile
+            return profile
+
+        async def get_insider_trading(self, ticker, days):
+            return []
+
+        async def get_dividend_history(self, ticker, from_date, to_date):
+            return []
+
+    return _FakeRouter
+
+
+async def test_a_missing_digest_falls_back_to_the_anonymized_company_profile(monkeypatch):
+    """With no digest the Researcher had no description of what the company does at all."""
+    monkeypatch.setattr("data.precompute.research_sources.is_crosslisted", lambda t: False)
+    monkeypatch.setattr("data.precompute.research_sources.is_canadian", lambda stock, ticker: True)
+    calls = []
+    monkeypatch.setattr("data.precompute.research_sources.Router",
+                        _router_with_profile("Acme Corporation makes anvils for Wile E. Coyote.", calls))
+
+    bundle = await build_research_sources("ACME", [])
+
+    assert bundle.has_filing_digest is False
+    assert bundle.business_profile == "COMPANY_X makes anvils for Wile E. Coyote."
+    assert "Acme" not in bundle.business_profile
+    assert calls == ["ACME"]
+
+
+async def test_no_profile_is_fetched_when_a_business_digest_exists(monkeypatch):
+    monkeypatch.setattr("data.precompute.research_sources.is_crosslisted", lambda t: False)
+    monkeypatch.setattr("data.precompute.research_sources.is_canadian", lambda stock, ticker: False)
+
+    class _FakeEdgarProvider:
+        async def get_filing_section(self, ticker, section):
+            return _section(f"{section} text", "2026-01-01")
+
+    monkeypatch.setattr("data.precompute.research_sources.EdgarToolsDataProvider", _FakeEdgarProvider)
+
+    async def fake_summarize(session, text, section, **kwargs):
+        return _digest(section, text)
+
+    monkeypatch.setattr("data.precompute.research_sources.summarize_filing_section", fake_summarize)
+    calls = []
+    monkeypatch.setattr("data.precompute.research_sources.Router", _router_with_profile("A profile.", calls))
+
+    bundle = await build_research_sources("ACME", [])
+
+    assert bundle.has_filing_digest is True and bundle.business_profile is None
+    assert calls == []
+
+
+async def test_a_failing_profile_fetch_does_not_fail_the_build(monkeypatch):
+    monkeypatch.setattr("data.precompute.research_sources.is_crosslisted", lambda t: False)
+    monkeypatch.setattr("data.precompute.research_sources.is_canadian", lambda stock, ticker: True)
+    monkeypatch.setattr("data.precompute.research_sources.Router", _router_with_profile(RuntimeError("down"), []))
+
+    bundle = await build_research_sources("ACME", [])
+
+    assert bundle.business_profile is None
+
+
+def test_a_business_profile_alongside_a_business_digest_is_rejected():
+    import pytest as _pytest
+
+    from data.schemas.research_sources_bundle import FilingDigest
+
+    sources = _minimal_research_sources([_news_item("N1")])
+    data = sources.model_dump()
+    data["filing_digests"] = [FilingDigest(section="Business", content="x", token_count=1).model_dump()]
+    data["has_filing_digest"] = True
+    data["latest_filing_age_days"] = 10
+    data["business_profile"] = "a profile"
+    with _pytest.raises(ValueError, match="business_profile must be None"):
+        type(sources).model_validate(data)

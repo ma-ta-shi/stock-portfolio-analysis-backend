@@ -241,7 +241,6 @@ async def _fake_build_research_sources(ticker, id_assigned_articles, stock=None,
         management_signals=ManagementSignals(
             c_suite_changes_12mo=None,
             changes_detail="",
-            insider_net_direction_90d=None,
             buyback_activity="",
             dividend_activity="",
         ),
@@ -718,7 +717,6 @@ async def test_prepare_with_run_id_adds_llm_call_rows_from_both_precompute_sourc
             management_signals=ManagementSignals(
                 c_suite_changes_12mo=None,
                 changes_detail="",
-                insider_net_direction_90d=None,
                 buyback_activity="",
                 dividend_activity="",
             ),

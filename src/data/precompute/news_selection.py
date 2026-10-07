@@ -24,8 +24,12 @@ filter" rule filled quiet days with items that never name the company, and the t
 (shown headlines not naming the company: MSFT 2%, AAPL 2%, KO 10%, RDDT 17%, SHOP.TO 11%, TD.TO 17%, CNQ.TO 40%,
 ENB.TO 45%, RY.TO 57%, BAM.TO 62%): a funds notice, an Ashland sawmill, personal-finance clickbait, all scored into
 the tone and listed to the agent. Fewer, on-topic headlines are the honest picture of a thinly covered name. Below the
-minimum (a name the matcher cannot find) the old behaviour stays, so nothing is ever emptied. The Researcher's list is
-unchanged.
+minimum (a name the matcher cannot find) the old behaviour stays, so nothing is ever emptied.
+
+The Researcher's list follows the same rule and is also capped at RESEARCHER_MAX items spread evenly across the window (newest included). Measured 2026-10-06 over
+18 current-format runs: the list held a median of 52 headlines, the model cited a median of 4 (max 21), the KO list carried a
+crypto exchange valuation, a Monster Beverage stock pick and a Georgia income piece, and 44% of the cited headlines came
+from the oldest quarter of the list against 16% from the newest.
 """
 
 import re
@@ -40,6 +44,9 @@ SHOWN_PER_DAY = 2
 # The Stock Researcher reads headlines, not scores, and drops "low" tier ones (its own renderer
 # already did): this many across the window, best-ranked first within each day.
 RESEARCHER_PER_DAY = 2
+# The most headlines the Researcher is shown, spread evenly across the window (it cites about 4 of the 52 it used to get).
+# Keeping the newest 20 instead covered only 9 to 10 of the 30 days for MSFT, KO and SHOP.TO.
+RESEARCHER_MAX = 20
 
 _TIER_RANK = {"primary": 0, "secondary": 1, "low": 2}
 
@@ -105,12 +112,26 @@ def _rank_within_day(articles: list[dict], pattern: re.Pattern | None) -> tuple[
     return _tier_then_source(on_topic) + _tier_then_source(rest), len(on_topic)
 
 
+def _spread(items: list[dict], limit: int) -> list[dict]:
+    """At most `limit` items, evenly spaced through the (oldest-first) list, first and last included, so a busy ticker's
+    cap still covers the whole window instead of only its most recent days."""
+    if limit <= 0:
+        return []
+    if len(items) <= limit:
+        return items
+    if limit == 1:
+        return [items[-1]]
+    picks = sorted({round(i * (len(items) - 1) / (limit - 1)) for i in range(limit)})
+    return [items[i] for i in picks]
+
+
 def select_news(
     articles: list[dict],
     *,
     scored_per_day: int = SCORED_PER_DAY,
     shown_per_day: int = SHOWN_PER_DAY,
     researcher_per_day: int = RESEARCHER_PER_DAY,
+    researcher_max: int = RESEARCHER_MAX,
     names: Sequence[str] = (),
 ) -> dict:
     """Takes the dated, fetched articles (dicts with at least `date`, `headline`, `source`,
@@ -118,13 +139,14 @@ def select_news(
 
     - "scored":     the sample whose sentiment gets scored (superset of "shown")
     - "shown":      the subset the Sentiment agent lists
-    - "researcher": the Stock Researcher's headlines ("low" tier excluded)
+    - "researcher": the Stock Researcher's headlines ("low" tier excluded, company-naming items only when the window
+                    holds enough of them, `researcher_max` spread evenly across the window)
     - "fetched":    how many articles went in (after de-duplication)
 
     `names`: the company's name variants and ticker; items naming one rank first within their
     day, and the scored and shown samples keep only those when the window holds at least
     MIN_NAMED_TO_FILTER of them (see the module note); otherwise a day with no such item still
-    gets its best ones. The researcher list is never filtered.
+    gets its best ones. The researcher list follows the same rule.
 
     Every list is ordered oldest first, like the ids that are assigned over them."""
     shown_per_day = min(shown_per_day, scored_per_day)  # `shown` is always part of `scored`
@@ -145,7 +167,7 @@ def select_news(
         scored.extend(pool[:scored_per_day])
         shown.extend(pool[:shown_per_day])
         researcher.extend(
-            [a for a in ranked if a.get("quality_tier") != "low"][:researcher_per_day]
+            [a for a in pool if a.get("quality_tier") != "low"][:researcher_per_day]
         )
 
     def oldest_first(items: list[dict]) -> list[dict]:
@@ -154,6 +176,6 @@ def select_news(
     return {
         "scored": oldest_first(scored),
         "shown": oldest_first(shown),
-        "researcher": oldest_first(researcher),
+        "researcher": _spread(oldest_first(researcher), researcher_max),
         "fetched": fetched,
     }

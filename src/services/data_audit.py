@@ -435,6 +435,35 @@ def downgrade_if_stale(findings: list[Finding], bundle, hours: float = 6.0) -> l
             if f.status == "mismatch" else f for f in findings]
 
 
+def check_research(bundle) -> list[Finding]:
+    """Whether the Researcher's filing text arrived. The digest was silently missing for every US name for days
+    (2026-10-03 to 2026-10-06: the SEC refused the URL edgartools asked for) and was found only by counting a caveat
+    in outputs. A US or cross-listed Canadian name should have both sections; a pure-Canadian name has no filing source
+    by design and should fall back to the company profile."""
+    from data.precompute.research_sources import is_crosslisted
+
+    ticker = bundle.stock.ticker
+    rs = bundle.research_sources
+    sections = {d.section for d in rs.filing_digests}
+    expect_filing = bundle.canadian_data_flags is None or is_crosslisted(ticker)
+    findings = []
+    for section in ("Business", "MDA"):
+        have = section in sections
+        if have:
+            findings.append(Finding(ticker, "research", f"filing_digest.{section}", "ok", True, True))
+        elif expect_filing:
+            findings.append(Finding(ticker, "research", f"filing_digest.{section}", "gap", False, True,
+                                    "a US or cross-listed name should have this section; check the SEC fetch"))
+        else:
+            findings.append(Finding(ticker, "research", f"filing_digest.{section}", "known", False, None,
+                                    "no filing source for a pure-Canadian name"))
+    if "Business" not in sections:
+        has_profile = bool(rs.business_profile)
+        findings.append(Finding(ticker, "research", "business_profile", "ok" if has_profile else "gap",
+                                has_profile, True, "" if has_profile else "no digest and no company profile fallback"))
+    return findings
+
+
 def check_gaps(bundle) -> list[Finding]:
     """Pass 2 fields that come through empty (not marked not_applicable, not expected empty)."""
     from services.orchestrator import _build_pass2_view_bundles

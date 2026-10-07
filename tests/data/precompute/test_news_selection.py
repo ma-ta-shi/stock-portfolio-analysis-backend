@@ -164,10 +164,37 @@ def test_with_enough_company_items_the_sentiment_sample_keeps_only_those():
     assert {a["date"].day for a in result["shown"]} == {1, 2, 3, 4, 5, 6}  # the noise-only day 20 is not listed
 
 
-def test_the_researcher_list_is_not_filtered():
+def test_the_researcher_list_keeps_only_company_items_when_the_window_holds_enough():
+    """KO 2026-10-06: the list held a crypto exchange valuation, a Monster Beverage stock pick and a Georgia income piece."""
     result = select_news(_named_window(), researcher_per_day=2, names=["Microsoft"])
 
-    assert any("Microsoft" not in a["headline"] for a in result["researcher"])
+    assert result["researcher"] and all("Microsoft" in a["headline"] for a in result["researcher"])
+
+
+def test_the_researcher_list_is_not_emptied_when_the_name_cannot_be_found():
+    few = [_a(1, 1, "Microsoft one"), _a(2, 1, "Other news"), _a(3, 1, "More other news")]
+
+    assert len(select_news(few, names=["Microsoft"])["researcher"]) == 3
+
+
+def test_the_researcher_list_is_capped_but_still_spans_the_window():
+    """The model cited a median of 4 of 52 headlines. Keeping only the newest 20 covered 9 to 10 of the 30 days for MSFT, KO
+    and SHOP.TO, so the cap is spread evenly through the window instead."""
+    articles = [_a(day, 1, f"Microsoft story {day}") for day in range(1, 29)]
+
+    kept = select_news(articles, names=["Microsoft"], researcher_max=5)["researcher"]
+
+    days = [a["date"].day for a in kept]
+    assert len(days) == 5 and days[0] == 1 and days[-1] == 28  # first and newest both kept
+    assert days == sorted(days) and max(b - a for a, b in zip(days, days[1:])) <= 8  # no big hole in the window
+
+
+def test_a_list_under_the_cap_is_left_whole_and_a_cap_of_one_keeps_the_newest():
+    articles = [_a(day, 1, f"Microsoft story {day}") for day in range(1, 5)]
+
+    assert len(select_news(articles, names=["Microsoft"], researcher_max=10)["researcher"]) == 4
+    assert [a["date"].day for a in select_news(articles, names=["Microsoft"], researcher_max=1)["researcher"]] == [4]
+    assert select_news(articles, names=["Microsoft"], researcher_max=0)["researcher"] == []
 
 
 def test_the_filter_needs_the_minimum_number_of_company_items_across_the_window():

@@ -22,8 +22,8 @@ NOT a clean port -- field-by-field notes, verified against
 - `insider_buys_90d`/`insider_sells_90d`: `insider_activity` on DataBundle is
   `{"transactions": [...]}`, a raw `NormalizedInsiderTransaction` list (date,
   insider_name, is_issuer, transaction_type, shares, value) -- not
-  pre-aggregated. Counted here the same way
-  `research_sources.py::_compute_insider_direction` derives its own signal
+  pre-aggregated. Counted here the way
+  `precompute/insider.py::summarize_insider_activity` does
   (excludes `is_issuer=True` rows -- that's buyback activity, not personal
   insider direction -- and non-directional `exercise`/`gift`/`other` types).
 - Short interest: the trend and the three-value read are computed in code (`sentiment_signals.py`) and shown with
