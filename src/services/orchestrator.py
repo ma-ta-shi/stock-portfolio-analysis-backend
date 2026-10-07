@@ -170,6 +170,13 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
             "revenue_growth_annual": growth.get("revenue_growth_annual"),
             "revenue_growth_3yr_cagr": growth.get("revenue_growth_3yr_cagr"),
             "fcf_to_net_income": prof.get("fcf_to_net_income"),
+            # What this kind of company is judged on (data/precompute/fundamentals.py::metric_group): P/B and ROA are
+            # the bank and insurer lens, the runway the pre-profit one, and the lens sentence says it once.
+            "pb_ratio": fund.get("pb_ratio"),
+            "roa": prof.get("roa"),
+            "equity_to_assets": bal.get("equity_to_assets"),
+            "cash_runway_quarters": bal.get("cash_runway_quarters"),
+            "valuation_lens": (bundle.metric_profile or {}).get("lens") or None,
         },
         "SENT": {
             "insider_activity_90d": insider["text"],
@@ -211,6 +218,16 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
     for key in na_fields:
         if key in views["FUND"] and views["FUND"][key] is None:
             views["FUND"][key] = "not_applicable"
+    # A metric the stock's profile hides is left out of what Pass 2 reads (None, which the renderer skips for FUND), not
+    # passed as a number that does not describe it (D/E 3.58 for TD.TO was cited in 14 of 16 Bull outputs) or as a
+    # "not_applicable" token.
+    hidden = set((bundle.metric_profile or {}).get("hidden", []))
+    for key in hidden:
+        if key in views["FUND"]:
+            views["FUND"][key] = None
+    if "pe_ratio" in hidden:
+        for key in industry_keys:
+            views["FUND"][key] = None
     return views
 
 

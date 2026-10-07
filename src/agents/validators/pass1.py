@@ -116,8 +116,10 @@ def _check_narrative_chars(obj: dict, min_c: int, max_c: int, errors: list[str])
 # documented prompts emit this one. Which becomes canonical is a project
 # decision (see end-to-end-audit-findings.md E12/E18), not a validator's.
 IF_SPEC_FUNDAMENTAL = {
-    "required": ("valuation_vs_sector", "health_rating", "guidance_vs_consensus",
-                 "dividend_sustainability", "peer_comparison_summary"),
+    # guidance_vs_consensus is decided in code from the earnings surprises (fundamentals.py::earnings_surprise_pattern) and
+    # merged after the model returns; peer_comparison_summary is no longer asked for (never passed to Pass 2, and the P/E
+    # position it described is computed in code). Their enums are still checked if a model writes them anyway.
+    "required": ("valuation_vs_sector", "health_rating", "dividend_sustainability"),
     "enums": {
         # Vocabularies quoted from the Fundamental Output Schema, NOT authored here.
         "valuation_vs_sector": {"undervalued", "fair", "overvalued", "insufficient_data"},
@@ -322,8 +324,9 @@ def validate_fundamental_analyst(output: dict) -> tuple[bool, list[str]]:
         # a FUND output with 5 key_factors passed a 2-4 bound.
         return len(errors) == 0, errors
 
-    # narrative: floor 720; ceiling 1300 (the stated 1080 + 20%, see the note above validate_stock_researcher)
-    _check_narrative_chars(output, 720, 1300, errors)
+    # narrative: floor 600 like the other agents (2 of 63 first attempts were short); ceiling 1300 (the stated 1080 + 20%,
+    # see the note above validate_stock_researcher)
+    _check_narrative_chars(output, 600, 1300, errors)
 
     _check_key_factors(output.get("key_factors", []), errors)
     _check_risks(output.get("risks", []), errors)

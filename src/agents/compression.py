@@ -22,7 +22,7 @@ data/schemas/data_bundle.py, not yet a typed sub-schema), `bundle.context`
 import json
 
 from agents.pass2_view import build_pass2_view
-from agents.utils import truncate_to_tokens
+from agents.utils import as_of_date, truncate_to_tokens
 from data.schemas.data_bundle import DataBundle
 
 # How much of each Pass 1 narrative Pass 2 reads (about 4 characters a token). Raised from 300 (2026-10-06) to cover the
@@ -153,7 +153,7 @@ def build_pass2_user_message(
     currency = bundle.stock.currency
     timeline = bundle.context.timeline
     acct = account_type or bundle.context.account_type
-    timestamp = bundle.data_vintage.isoformat()
+    timestamp = as_of_date(bundle)
 
     lines = [
         f"{ticker} ({company}) | {sector} | {exchange} | {currency}",
@@ -196,6 +196,8 @@ def build_pass2_user_message(
 
         # Serialize pass2_view fields compactly
         for k, v in p2v.items():
+            if v is None and agent_id == "FUND":
+                continue  # a metric this kind of company is not judged on is left out, not printed as None
             v = _rounded(v)
             if isinstance(v, dict):
                 lines.append(f"  {k}: {json.dumps(v)}")

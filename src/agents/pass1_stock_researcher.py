@@ -90,7 +90,7 @@ from functools import partial
 
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
-from agents.utils import RenderedField, compute_data_quality_assessment, currency_note, render_data_warnings
+from agents.utils import RenderedField, as_of_date, compute_data_quality_assessment, currency_note, render_data_warnings
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import (
     validate_filing_depth_caveat,
@@ -421,7 +421,7 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     dividend = _dividend_context(bundle)
 
     text = f"""COMPANY_X (TICKER_X) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
-Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{canadian_flag}{currency_note(bundle.currency_mismatch, filings=True)}
+Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {as_of_date(bundle)}{canadian_flag}{currency_note(bundle.currency_mismatch, filings=True)}
 
 DATA COVERAGE: {_data_coverage_line(bundle)}
 

@@ -17,7 +17,7 @@ def _bundle(benchmark=None, pe=28.5, canadian=False):
         valuation_metrics={"pe_ratio": pe}, growth_metrics={}, profitability_metrics={}, balance_sheet_metrics={},
         peer_metrics={"industry_benchmark": benchmark},
         technical_indicators={}, support_resistance={}, macro_sources=MagicMock(),
-        insider_activity={"transactions": []}, price_info={"market_cap": 1e12}, analyst_consensus={}, not_applicable=None,
+        insider_activity={"transactions": []}, price_info={"market_cap": 1e12}, analyst_consensus={}, not_applicable=None, metric_profile=None,
         data_vintage=datetime(2026, 10, 3, tzinfo=UTC), short_interest=None, analyst_rating_changes=None,
     )
 
@@ -179,3 +179,29 @@ def test_a_missing_canadian_trend_is_none_not_the_us_one():
     bundle = _macro_bundle(canadian=True)
     bundle.macro_sources.boc_rate_trend = None
     assert _build_pass2_view_bundles(bundle)["MACRO"]["interest_rate_direction"] is None
+
+
+def test_the_fund_slice_leaves_out_what_the_stocks_profile_hides_and_carries_the_lens():
+    """TD.TO: D/E 3.58 reached Pass 2 (cited in 14 of 16 Bull outputs) beside a not_applicable token for operating margin."""
+    bundle = _bundle()
+    bundle.valuation_metrics = {"pe_ratio": 17.6, "pb_ratio": 2.16}
+    bundle.profitability_metrics = {"roe": 0.1275, "roa": 0.008, "fcf_to_net_income": 0.31, "operating_margin": None, "net_margin": 0.25}
+    bundle.balance_sheet_metrics = {"debt_to_equity": 3.58, "equity_to_assets": 0.06}
+    bundle.metric_profile = {"group": "financials", "lens": "Value on P/B against ROE, with P/E.", "limits": "",
+                             "hidden": ["debt_to_equity", "fcf_to_net_income", "operating_margin"]}
+
+    fund = _build_pass2_view_bundles(bundle)["FUND"]
+
+    assert fund["debt_to_equity"] is None and fund["fcf_to_net_income"] is None and fund["operating_margin"] is None
+    assert fund["pb_ratio"] == 2.16 and fund["roa"] == 0.008 and fund["equity_to_assets"] == 0.06
+    assert fund["valuation_lens"] == "Value on P/B against ROE, with P/E."
+    assert "not_applicable" not in fund.values()
+
+
+def test_a_hidden_pe_takes_the_industry_pe_position_with_it():
+    bundle = _bundle(_bench())
+    bundle.metric_profile = {"group": "pre_profit", "lens": "No earnings yet.", "limits": "", "hidden": ["pe_ratio"]}
+
+    fund = _build_pass2_view_bundles(bundle)["FUND"]
+
+    assert fund["pe_ratio"] is None and fund["industry_pe_median"] is None and fund["pe_vs_industry"] is None

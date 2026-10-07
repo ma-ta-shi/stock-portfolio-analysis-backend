@@ -15,7 +15,7 @@ from agents.pass1_fundamental_analyst import (
 def _bundle(**overrides) -> SimpleNamespace:
     defaults = dict(
         stock=SimpleNamespace(ticker="SHOP.TO", currency="CAD", exchange="TSX"),
-        company_info={"name": "Shopify Inc", "sector": "Technology"},
+        company_info={"name": "Shopify Inc", "sector": "Technology", "industry": "Software - Application"},
         context=SimpleNamespace(account_type="tfsa", timeline="medium_term"),
         data_vintage=datetime(2026, 9, 23, tzinfo=UTC),
         price_info={"current_price": 105.0, "market_cap": 1.3e11, "currency": "CAD",
@@ -35,14 +35,14 @@ def _bundle(**overrides) -> SimpleNamespace:
         missing_fields=[],
         latest_financials_period_end="2026-06-30",  # 86bbummwp Tier 2 -- well within threshold
         currency_mismatch=None,
-        not_applicable=None,
+        not_applicable=None, metric_profile=None,
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
 
 def test_renders_real_header_fields():
     msg, _ = build_user_message(_bundle())
-    assert "SHOP.TO (Shopify Inc) | Technology | TSX | CAD" in msg
+    assert "SHOP.TO (Shopify Inc) | Technology | Software - Application | TSX | CAD" in msg
     assert "Timeline: medium_term | Account: tfsa" in msg
 
 
@@ -50,7 +50,7 @@ def test_renders_percentage_fields_as_percent_not_raw_fraction():
     """DataBundle fields are raw fractions (0.142), not the harness's
     already-scaled _pct values (14.2) -- must be *100'd on render."""
     msg, _ = build_user_message(_bundle())
-    assert "14.20%" in msg  # revenue_growth_yoy
+    assert "14.2%" in msg  # revenue_growth_yoy, one decimal as the design doc specifies
     assert "0.142" not in msg
 
 
@@ -107,7 +107,7 @@ def test_earnings_surprises_rendered_as_raw_data_not_a_verdict():
         ],
     })
     msg, _ = build_user_message(bundle)
-    assert "2026-06-30: EPS actual 1.2 vs estimate 1.1 (9.09% surprise)" in msg
+    assert "2026-06-30: EPS actual 1.20 vs estimate 1.10 (+9.1%)" in msg
     assert "guidance_vs_consensus" not in msg
 
 
@@ -118,14 +118,14 @@ def test_no_earnings_surprises_renders_honestly():
 
 def test_no_dividend_data_renders_honestly():
     msg, _ = build_user_message(_bundle())
-    assert "Yield: N/A | Payout: N/A" in msg
+    assert "No dividend paid." in msg and "Yield" not in msg  # a non-payer is not a row of N/A
 
 
 def test_dividend_data_renders_as_percentage():
     bundle = _bundle(dividend_info={"dividend_yield": 0.032, "payout_ratio": 0.45,
                                      "dividend_growth_5yr": 0.05, "dividend_regularity": "regular"})
     msg, _ = build_user_message(bundle)
-    assert "Yield: 3.20% | Payout: 45.00%" in msg
+    assert "Yield: 3.2% | Payout: 45.0%" in msg
     assert "Regularity: regular" in msg
 
 
@@ -372,17 +372,69 @@ def test_validate_with_caveats_passes_high_confidence_stale_data_with_caveat_pre
     assert passed, errors
 
 
-def test_a_banks_nonexistent_metrics_read_not_applicable_not_n_a():
+_BANK_PROFILE = {"group": "financials", "lens": "Value on P/B against ROE, with P/E.", "limits": "credit quality is not available",
+                 "hidden": ["operating_margin", "gross_margin", "current_ratio", "interest_coverage", "debt_to_equity",
+                            "fcf_to_net_income", "free_cash_flow", "ev_ebitda", "ps_ratio"]}
+
+
+def test_a_banks_hidden_metrics_are_absent_not_labelled_not_applicable():
+    """TD.TO risks read "High leverage: D/E=3.58", "earnings quality concerns: FCF to net income=0.31" and "Limited
+    operating margin visibility: not applicable": a label or a number that does not describe a bank was judged."""
     bundle = _bundle(
-        profitability_metrics={"gross_margin": None, "operating_margin": None, "net_margin": 0.32, "roe": 0.15,
-                               "fcf_to_net_income": 1.1},
-        balance_sheet_metrics={"debt_to_equity": 4.1, "current_ratio": None, "interest_coverage": None, "cash_position": 5.2e9},
-        not_applicable={"reason": "bank", "fields": ["gross_margin", "operating_margin", "current_ratio", "interest_coverage"]},
+        valuation_metrics={"pe_ratio": 17.6, "forward_pe": 15.0, "peg_ratio": None, "pb_ratio": 2.16, "ps_ratio": 4.2, "ev_ebitda": None},
+        profitability_metrics={"gross_margin": None, "operating_margin": None, "net_margin": 0.25, "roe": 0.13,
+                               "fcf_to_net_income": 0.31, "roa": 0.008, "margin_trend": "expanding"},
+        balance_sheet_metrics={"debt_to_equity": 3.58, "current_ratio": None, "interest_coverage": None, "cash_position": 1.1e11,
+                               "equity_to_assets": 0.06},
+        metric_profile=_BANK_PROFILE, peer_metrics=_BENCH,
+        growth_metrics={"revenue_growth_yoy": 0.08, "revenue_growth_yoy_basis": "quarter ended 2026-07-31 vs 2025-07-31",
+                        "revenue_growth_annual": 0.09, "revenue_growth_3yr_cagr": 0.1, "eps_growth_yoy": 0.2, "earnings_surprises": []},
     )
     msg, _ = build_user_message(bundle)
-    assert "Gross margin: not applicable (bank) | Operating margin: not applicable (bank)" in msg
-    assert "Current ratio: not applicable (bank)" in msg and "Interest coverage: not applicable (bank)" in msg
-    assert "N/A" not in msg.split("PROFITABILITY")[1].split("BALANCE SHEET")[0]
+    assert "LENS: Value on P/B against ROE, with P/E." in msg
+    assert "P/B: 2.16" in msg and "ROA: 0.8%" in msg and "Equity to assets: 6.0%" in msg and "Net margin trend (YoY): expanding" in msg
+    for gone in ("D/E", "FCF to net income", "Operating margin", "Gross margin", "Current ratio", "Interest coverage", "P/S",
+                 "EV/EBITDA", "not applicable", "N/A", "Cash:"):
+        assert gone not in msg.split("EARNINGS SURPRISE")[0], gone
+
+
+def test_the_coverage_line_says_once_what_no_source_gives_for_the_group():
+    from agents.pass1_fundamental_analyst import _data_coverage_line
+
+    assert _data_coverage_line({}, "credit quality is not available") == "credit quality is not available."
+    line = _data_coverage_line({"earnings_surprises": False}, "credit quality is not available")
+    assert line.startswith("no earnings surprise history available") and line.endswith("credit quality is not available.")
+    assert _data_coverage_line({}, "") == "standard."
+
+
+def test_a_pre_profit_company_shows_its_cash_burn_and_runway_and_no_pe():
+    bundle = _bundle(
+        valuation_metrics={"pe_ratio": None, "forward_pe": None, "peg_ratio": None, "pb_ratio": 11.0, "ps_ratio": 33.4, "ev_ebitda": None},
+        balance_sheet_metrics={"debt_to_equity": 0.09, "current_ratio": 2.3, "interest_coverage": None, "cash_position": 1.2e9,
+                               "free_cash_flow": -4.0e8, "cash_runway_quarters": 12.0},
+        metric_profile={"group": "pre_profit", "lens": "No earnings yet: weigh P/S.", "limits": "",
+                        "hidden": ["pe_ratio", "forward_pe", "peg_ratio", "roe", "payout_ratio", "interest_coverage", "ev_ebitda", "fcf_to_net_income"]},
+    )
+    msg, _ = build_user_message(bundle)
+    assert "P/S: 33.40" in msg and "Free cash flow (TTM): -400.00M CAD" in msg and "Cash runway: 12.0 quarters at this burn" in msg
+    assert "P/E" not in msg and "ROE" not in msg and "Industry P/E" not in msg
+
+
+def test_eps_growth_over_100_percent_is_flagged_as_a_likely_base_year_distortion():
+    """TD.TO 144.9% and BCE 3672% were shown with no flag."""
+    bundle = _bundle(growth_metrics={"revenue_growth_yoy": 0.08, "revenue_growth_3yr_cagr": 0.1, "eps_growth_yoy": 1.449,
+                                     "earnings_surprises": []})
+    msg, _ = build_user_message(bundle)
+    assert "EPS growth (last fiscal year): 144.9% (over 100%: base-year distortion likely, not used for PEG)" in msg
+
+
+def test_earnings_surprises_show_up_to_four_quarters_newest_first():
+    rows = [{"period_end": p, "eps_actual": 1.0, "eps_estimated": 0.9, "eps_surprise_pct": 5.0}
+            for p in ("2026-07-31", "2026-04-30", "2026-01-31", "2025-10-31", "2025-07-31")]
+    msg, _ = build_user_message(_bundle(growth_metrics={"revenue_growth_yoy": 0.1, "revenue_growth_3yr_cagr": 0.1,
+                                                         "eps_growth_yoy": 0.1, "earnings_surprises": rows}))
+    shown = [ln.strip().split(":")[0] for ln in msg.split("EARNINGS SURPRISE HISTORY (newest first):")[1].strip().split("\n")]
+    assert shown == ["2026-07-31", "2026-04-30", "2026-01-31", "2025-10-31"]
 
 
 def test_a_gap_that_is_not_on_the_not_applicable_list_still_reads_n_a():
@@ -410,7 +462,7 @@ def test_revenue_growth_shows_its_basis_and_the_fiscal_year_figure():
                                      "revenue_growth_annual": 0.0187, "revenue_growth_3yr_cagr": 0.11, "eps_growth_yoy": 0.08,
                                      "earnings_surprises": []})
     msg, _ = build_user_message(bundle)
-    assert "Revenue growth YoY: 6.74% (quarter ended 2026-07-03 vs 2025-06-27) | Last fiscal year: 1.87%" in msg
+    assert "Revenue growth YoY: 6.7% (quarter ended 2026-07-03 vs 2025-06-27) | Last fiscal year: 1.9%" in msg
 
 
 def test_a_reit_is_told_its_industry_pe_is_not_applicable():
@@ -423,3 +475,52 @@ def test_a_pe_from_near_zero_earnings_is_called_not_meaningful():
     msg, _ = build_user_message(_bundle(valuation_metrics={"pe_ratio": 9001.0, "forward_pe": 1.0, "peg_ratio": 1.0}, peer_metrics=_BENCH))
     assert "not_meaningful against the industry (earnings are near zero)" in msg
     assert "against the median" not in msg
+
+
+def test_guidance_vs_consensus_is_decided_in_code_and_merged_after_the_model_returns():
+    """The model wrote "above" 22, "not_available" 25 for the same all-beats input."""
+    from agents.pass1_fundamental_analyst import merge_decided_fields
+
+    bundle = _bundle(growth_metrics={"earnings_surprises": [
+        {"period_end": p, "eps_surprise_pct": 5.0} for p in ("2026-07-31", "2026-04-30", "2026-01-31", "2025-10-31")]})
+    out = {"interpretive_fields": {"valuation_vs_sector": "fair", "guidance_vs_consensus": "not_available"}}
+
+    merged = merge_decided_fields(out, bundle)
+
+    assert merged["interpretive_fields"]["guidance_vs_consensus"] == "above"
+    assert merged["interpretive_fields"]["valuation_vs_sector"] == "fair"
+    assert out["interpretive_fields"]["guidance_vs_consensus"] == "not_available"  # the model's answer is not mutated
+    assert merge_decided_fields(None, bundle) is None
+
+
+def test_the_model_is_no_longer_required_to_write_the_fields_code_decides_or_nobody_reads():
+    from agents.validators.pass1 import IF_SPEC_FUNDAMENTAL
+
+    assert "guidance_vs_consensus" not in IF_SPEC_FUNDAMENTAL["required"]
+    assert "peer_comparison_summary" not in IF_SPEC_FUNDAMENTAL["required"]
+
+
+async def test_the_runner_returns_the_merged_answer(monkeypatch):
+    """Through the real run(): what comes back is what gets stored."""
+    from agents.pass1_fundamental_analyst import FundamentalAnalystRunner
+
+    async def fake_call(self, system, user, validator, **kwargs):
+        return {"interpretive_fields": {"valuation_vs_sector": "fair"}}, []
+
+    monkeypatch.setattr(FundamentalAnalystRunner, "call_with_validation", fake_call)
+    bundle = _bundle(growth_metrics={"earnings_surprises": [
+        {"period_end": "2026-07-31", "eps_surprise_pct": -9.0}, {"period_end": "2026-04-30", "eps_surprise_pct": -8.0}]})
+
+    out, errors = await FundamentalAnalystRunner().run(bundle)
+
+    assert errors == [] and out["interpretive_fields"]["guidance_vs_consensus"] == "below"
+
+
+def test_the_as_of_line_carries_the_date_only_in_every_payload():
+    """Every age limit in the pipeline is in days; the full stamp had seconds and microseconds nothing reads."""
+    from datetime import UTC, datetime
+
+    from agents.utils import as_of_date
+
+    bundle = SimpleNamespace(data_vintage=datetime(2026, 10, 7, 3, 7, 23, 722117, tzinfo=UTC))
+    assert as_of_date(bundle) == "2026-10-07"

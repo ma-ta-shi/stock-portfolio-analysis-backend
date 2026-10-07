@@ -12,12 +12,13 @@ def test_it_teaches_the_position_labels_the_payload_prints():
 def test_it_no_longer_refers_to_a_peer_table_or_per_metric_sector_medians():
     """The per-peer table and the margin, growth, ROE and leverage medians were removed 2026-10-03: the prompt must not
     ask for comparisons the payload cannot supply."""
-    assert "PEER" not in PROMPT.replace("peer_comparison_summary", "")
+    assert "PEER" not in PROMPT
     assert "sector_median" not in PROMPT
     assert "vs peers" not in PROMPT
     assert "P/B-vs-sector" not in PROMPT
 
 
-def test_the_peer_comparison_field_is_kept_but_asks_about_the_industry_benchmark():
-    assert '"peer_comparison_summary"' in PROMPT
-    assert "industry benchmark" in PROMPT.split('"peer_comparison_summary"')[1][:200]
+def test_the_peer_comparison_field_is_gone_because_the_position_is_computed_in_code():
+    """It was written every run and never passed to Pass 2; the P/E position it described is in the payload and the view."""
+    assert "peer_comparison_summary" not in PROMPT
+    assert "A P/E `within_range` is in line with its industry" in PROMPT

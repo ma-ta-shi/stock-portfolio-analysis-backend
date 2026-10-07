@@ -134,18 +134,28 @@ def compare(
     return findings
 
 
-def without_not_applicable(theirs: dict, not_applicable: dict | None) -> dict:
-    """`theirs` minus the fields the bundle marks not applicable (a bank's operating margin is not a gap)."""
-    skip = set((not_applicable or {}).get("fields", []))
+def without_not_applicable(theirs: dict, not_applicable: dict | None, hidden: list[str] | None = None) -> dict:
+    """`theirs` minus the fields the bundle marks not applicable or its metric profile hides (a bank's operating margin is
+    not a gap)."""
+    skip = set((not_applicable or {}).get("fields", [])) | set(hidden or [])
     return {k: v for k, v in theirs.items() if k not in skip}
 
 
-def empty_pass2_fields(views: dict[str, dict]) -> list[tuple[str, str]]:
-    """(agent, field) for every Pass 2 passthrough that is empty and neither marked not_applicable nor expected empty."""
+# Fields the metric profile adds for one group only: empty for every other group, and a real gap only for their own.
+_GROUP_ONLY_FIELDS = {"roa": "financials", "equity_to_assets": "financials", "cash_runway_quarters": "pre_profit"}
+
+
+def empty_pass2_fields(views: dict[str, dict], profile: dict | None = None) -> list[tuple[str, str]]:
+    """(agent, field) for every Pass 2 passthrough that is empty and neither marked not_applicable, hidden by the metric
+    profile, belonging to another group, nor expected empty."""
+    profile = profile or {}
+    hidden, group = set(profile.get("hidden", [])), profile.get("group")
     gaps = []
     for agent, view in views.items():
         for field, value in view.items():
-            if value is None and field not in EXPECTED_EMPTY:
+            if value is None and field not in EXPECTED_EMPTY and field not in hidden:
+                if field == "valuation_lens" or (field in _GROUP_ONLY_FIELDS and _GROUP_ONLY_FIELDS[field] != group):
+                    continue
                 gaps.append((agent, field))
     return gaps
 
@@ -261,13 +271,15 @@ def check_fundamentals(bundle, usd_cad: float | None) -> list[Finding]:
         "capex": trailing_sum(_series(cf, "Capital Expenditure")),
     }
     ours = {**bundle.valuation_metrics, **bundle.profitability_metrics, **bundle.balance_sheet_metrics, **bundle.growth_metrics}
-    hand = without_not_applicable(hand_ratios(raw, bundle.price_info["market_cap"], factor), bundle.not_applicable)
+    hand = without_not_applicable(hand_ratios(raw, bundle.price_info["market_cap"], factor), bundle.not_applicable,
+                              (bundle.metric_profile or {}).get("hidden"))
     findings = compare(t, "fundamentals/hand", ours, hand)
     de = info.get("debtToEquity")
     yahoo = {"pe_ratio": info.get("trailingPE"), "forward_pe": info.get("forwardPE"), "pb_ratio": info.get("priceToBook"),
              "roe": info.get("returnOnEquity"), "operating_margin": info.get("operatingMargins"),
              "revenue_growth_yoy": info.get("revenueGrowth"), "debt_to_equity": de / 100 if de is not None else None}
-    yahoo = without_not_applicable({k: v for k, v in yahoo.items() if v is not None}, bundle.not_applicable)
+    yahoo = without_not_applicable({k: v for k, v in yahoo.items() if v is not None}, bundle.not_applicable,
+                                (bundle.metric_profile or {}).get("hidden"))
     findings += compare(t, "fundamentals/yahoo", ours, yahoo, tol=0.05)
     return findings
 
@@ -464,9 +476,45 @@ def check_research(bundle) -> list[Finding]:
     return findings
 
 
+_HIDDEN_PAYLOAD_LABELS = {
+    "debt_to_equity": "D/E", "fcf_to_net_income": "FCF to net income", "current_ratio": "Current ratio",
+    "interest_coverage": "Interest coverage", "operating_margin": "Operating margin", "gross_margin": "Gross margin",
+    "ev_ebitda": "EV/EBITDA", "ps_ratio": "P/S", "roe": "ROE", "payout_ratio": "Payout",
+}
+
+
+def check_fundamental_inputs(bundle) -> list[Finding]:
+    """What the Fundamental agent is actually handed (no network): earnings surprises newest first, interest cover not
+    negative for a profitable company, and the payload free of every metric the stock's profile hides and of any
+    "not applicable" or None marker. Each was a real defect: Canadian names showed their two OLDEST surprise quarters,
+    COST, V and BLK had interest cover of -88, -158 and -18, and TD.TO was written up for a D/E and an FCF/NI that do not
+    describe a bank."""
+    from agents.pass1_fundamental_analyst import build_user_message
+
+    t = bundle.stock.ticker
+    findings = []
+    periods = [s.get("period_end") for s in (bundle.growth_metrics.get("earnings_surprises") or [])]
+    findings.append(Finding(t, "fundamental_inputs", "surprises_newest_first", "ok" if periods == sorted(periods, reverse=True) else "mismatch",
+                            periods[:1], sorted(periods, reverse=True)[:1], "the first row shown must be the newest"))
+    coverage = bundle.balance_sheet_metrics.get("interest_coverage")
+    net_margin = bundle.profitability_metrics.get("net_margin")
+    findings.append(Finding(t, "fundamental_inputs", "interest_coverage_sign",
+                            "mismatch" if coverage is not None and coverage < 0 and (net_margin or 0) > 0 else "ok", coverage, None,
+                            "negative cover for a profitable company means the interest expense sign was not normalised"))
+    profile = bundle.metric_profile or {}
+    payload = build_user_message(bundle)[0].split("EARNINGS SURPRISE")[0]
+    leaked = [label for key, label in _HIDDEN_PAYLOAD_LABELS.items() if key in profile.get("hidden", []) and label in payload]
+    marker = [m for m in ("not applicable", "None", "N/A") if m in payload]
+    findings.append(Finding(t, "fundamental_inputs", "hidden_metrics_absent", "mismatch" if leaked else "ok", leaked or None, None,
+                            f"group {profile.get('group')}"))
+    findings.append(Finding(t, "fundamental_inputs", "no_missing_markers", "gap" if marker else "ok", marker or None, None,
+                            "an N/A that remains is a genuine gap in a metric the group is judged on"))
+    return findings
+
+
 def check_gaps(bundle) -> list[Finding]:
     """Pass 2 fields that come through empty (not marked not_applicable, not expected empty)."""
     from services.orchestrator import _build_pass2_view_bundles
 
     return [Finding(bundle.stock.ticker, "gaps", f"{agent}.{field}", "gap", None, None, "empty in what Pass 2 receives")
-            for agent, field in empty_pass2_fields(_build_pass2_view_bundles(bundle))]
+            for agent, field in empty_pass2_fields(_build_pass2_view_bundles(bundle), bundle.metric_profile)]

@@ -80,6 +80,7 @@ from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import (
     RenderedField,
+    as_of_date,
     compute_data_quality_assessment,
     currency_note,
     render_data_coverage_line,
@@ -89,7 +90,7 @@ from agents.utils import (
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
 from agents.validators.pass1 import validate_fundamental_analyst
 from data.industry_benchmark import is_canadian, pe_vs_industry
-from data.precompute.fundamentals import _PEER_METRIC_VALID_RANGE
+from data.precompute.fundamentals import _PEER_METRIC_VALID_RANGE, earnings_surprise_pattern
 from data.schemas.data_bundle import DataBundle
 
 # metric name -> (DataBundle attribute, dict key) for the 6 of
@@ -152,8 +153,11 @@ _COVERAGE_GAP_SENTENCES = {
 }
 
 
-def _data_coverage_line(field_presence: dict[str, bool]) -> str:
-    return render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
+def _data_coverage_line(field_presence: dict[str, bool], limits: str = "") -> str:
+    line = render_data_coverage_line(field_presence, _COVERAGE_GAP_SENTENCES)
+    if not limits:
+        return line
+    return f"{limits}." if line == "standard." else f"{line.rstrip('.')}; {limits}."
 
 
 def _missing_fields_presence(bundle: DataBundle) -> dict[str, bool]:
@@ -166,7 +170,10 @@ def _anomalies(bundle: DataBundle) -> list[str]:
     why this is a separate, additive check rather than a change to
     `_valid_peer_value()` itself."""
     flags = []
+    hidden = set((bundle.metric_profile or {}).get("hidden", []))
     for metric, (bucket_name, field) in _PRIMARY_PLAUSIBILITY_FIELDS.items():
+        if field in hidden:
+            continue
         value = getattr(bundle, bucket_name).get(field)
         if value is None:
             continue
@@ -232,84 +239,162 @@ def _industry_pe_text(bundle: DataBundle) -> RenderedField:
     return RenderedField(text=text, present=True)
 
 
+def _r2(v) -> str:
+    return "N/A" if v is None else f"{v:.2f}"
+
+
+def _pct(v) -> str:
+    return "N/A" if v is None else f"{v * 100:.1f}%"
+
+
+def _money(v, currency: str | None = None) -> str:
+    """373310658259 -> 373.31B USD; 12907000000 -> 12.91B."""
+    if v is None:
+        return "N/A"
+    for limit, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(v) >= limit:
+            return f"{v / limit:.2f}{suffix}" + (f" {currency}" if currency else "")
+    return f"{v:.0f}" + (f" {currency}" if currency else "")
+
+
 def _earnings_surprises_text(bundle: DataBundle) -> RenderedField:
     surprises = bundle.growth_metrics.get("earnings_surprises") or []
     if not surprises:
         return RenderedField(text="N/A — no earnings surprise history available.", present=False)
     lines = []
-    for s in surprises[:2]:  # newest first, per get_earnings_surprises' own contract
-        eps_actual = s.get("eps_actual")
-        eps_est = s.get("eps_estimated")
-        surprise_pct = s.get("eps_surprise_pct")
-        surprise_str = f"{surprise_pct:.2f}%" if surprise_pct is not None else "N/A"
-        lines.append(
-            f"  {s.get('period_end', '?')}: EPS actual {eps_actual if eps_actual is not None else 'N/A'} "
-            f"vs estimate {eps_est if eps_est is not None else 'N/A'} ({surprise_str} surprise)"
-        )
+    for s in surprises[:4]:  # newest first for both markets (compute_growth_metrics sorts them)
+        eps_actual, eps_est, surprise_pct = s.get("eps_actual"), s.get("eps_estimated"), s.get("eps_surprise_pct")
+        surprise_str = f"{surprise_pct:+.1f}%" if surprise_pct is not None else "N/A"
+        lines.append(f"  {s.get('period_end', '?')}: EPS actual {_r2(eps_actual)} vs estimate {_r2(eps_est)} ({surprise_str})")
     return RenderedField(text="\n".join(lines), present=True)
 
 
+def _profile(bundle: DataBundle) -> dict:
+    return bundle.metric_profile or {"group": "standard", "hidden": [], "lens": "", "limits": ""}
+
+
 def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
+    """The payload follows the design doc's format (ratios to 2 dp, percentages to 1 dp, magnitudes abbreviated) and is
+    built from the stock's metric profile (data/precompute/fundamentals.py::metric_group): a metric the profile hides is
+    left out entirely, not marked "N/A" or "not applicable" (the agent wrote "operating margin not applicable" up as a
+    risk for TD.TO), and a metric that should be there but is empty still reads N/A."""
     ctx = bundle.context
     company_info = bundle.company_info
-    val = bundle.valuation_metrics
-    growth = bundle.growth_metrics
-    prof = bundle.profitability_metrics
-    bal = bundle.balance_sheet_metrics
-    div = bundle.dividend_info
-    price = bundle.price_info
-    analyst = bundle.analyst_consensus
+    val, growth, prof = bundle.valuation_metrics, bundle.growth_metrics, bundle.profitability_metrics
+    bal, div, price, analyst = bundle.balance_sheet_metrics, bundle.dividend_info, bundle.price_info, bundle.analyst_consensus
+    profile = _profile(bundle)
+    group, hidden = profile["group"], set(profile["hidden"])
+    currency = bundle.stock.currency
     earnings_surprises = _earnings_surprises_text(bundle)
     industry_pe = _industry_pe_text(bundle)
-    # Metrics that do not exist for this kind of company (banks have no operating margin, REIT earnings multiples
-    # mislead) read "not applicable", not as a data gap.
+    # REIT earnings multiples that came out empty (existing handling, not tuned): "not applicable", not a data gap.
     na = bundle.not_applicable or {}
     na_fields = set(na.get("fields", []))
     na_label = f"not applicable ({na.get('reason')})"
 
-    def nv(key, value, suffix="", pct=False):
-        return na_label if value is None and key in na_fields else _fmt(value, suffix, pct)
+    def shown(label: str, key: str, value, fmt) -> str | None:
+        """'Label: value' unless the profile hides the metric; an empty REIT-style metric reads 'not applicable'."""
+        if key in hidden:
+            return None
+        if value is None and key in na_fields:
+            return f"{label}: {na_label}"
+        return f"{label}: {fmt(value)}"
 
-    fx_note = currency_note(bundle.currency_mismatch)
+    def line(*parts: str | None) -> str | None:
+        kept = [p for p in parts if p]
+        return "  " + " | ".join(kept) if kept else None
 
-    text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
-Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{fx_note}
+    header = (
+        f"{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | "
+        f"{company_info.get('industry') or 'industry unknown'} | {bundle.stock.exchange} | {currency}\n"
+        f"Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {as_of_date(bundle)}"
+        f"{currency_note(bundle.currency_mismatch)}"
+    )
+    eps_growth = growth.get("eps_growth_yoy")
+    eps_note = " (over 100%: base-year distortion likely, not used for PEG)" if eps_growth is not None and eps_growth > 1.0 else ""
 
-VALUATION (VAL):
-  P/E: {nv('pe_ratio', val.get('pe_ratio'))}
-  {industry_pe.text}
-  Forward P/E: {_fmt(val.get('forward_pe'))} | PEG: {nv('peg_ratio', val.get('peg_ratio'))}
-  Current price: {price.get('current_price')} {bundle.stock.currency} | Market cap: {_fmt(price.get('market_cap'))}
-  52w range: {price.get('low_52w')} - {price.get('high_52w')}
+    val_lines = [
+        # Forward P/E and PEG are derived and often undefined (no forward EPS; growth over 100% or near zero), so they are
+        # left out when empty instead of reading "PEG: N/A", which the agent turned into a "PEG not available" caveat on
+        # every TD.TO run.
+        line(shown("P/E", "pe_ratio", val.get("pe_ratio"), _r2),
+             shown("Forward P/E", "forward_pe", val.get("forward_pe"), _r2) if val.get("forward_pe") is not None else None,
+             shown("PEG", "peg_ratio", val.get("peg_ratio"), _r2) if val.get("peg_ratio") is not None else None,
+             shown("P/B", "pb_ratio", val.get("pb_ratio"), _r2),
+             shown("P/S", "ps_ratio", val.get("ps_ratio"), _r2), shown("EV/EBITDA", "ev_ebitda", val.get("ev_ebitda"), _r2)),
+        None if "pe_ratio" in hidden else f"  {industry_pe.text}",
+        f"  Price: {_r2(price.get('current_price'))} {currency} | Market cap: {_money(price.get('market_cap'), currency)} | "
+        f"52w range: {_r2(price.get('low_52w'))} - {_r2(price.get('high_52w'))}",
+    ]
+    growth_lines = [
+        line(f"Revenue growth YoY: {_pct(growth.get('revenue_growth_yoy'))} ({growth.get('revenue_growth_yoy_basis') or 'period unknown'})",
+             f"Last fiscal year: {_pct(growth.get('revenue_growth_annual'))}", f"3yr CAGR: {_pct(growth.get('revenue_growth_3yr_cagr'))}"),
+        f"  EPS growth (last fiscal year): {_pct(eps_growth)}{eps_note}",
+    ]
+    trend = prof.get("margin_trend")
+    prof_lines = [
+        line(shown("Gross margin", "gross_margin", prof.get("gross_margin"), _pct),
+             shown("Operating margin", "operating_margin", prof.get("operating_margin"), _pct),
+             shown("Net margin", "net_margin", prof.get("net_margin"), _pct),
+             f"Net margin trend (YoY): {trend or 'N/A'}"),
+        line(shown("ROE", "roe", prof.get("roe"), _pct), shown("ROA", "roa", prof.get("roa"), _pct) if "roa" in prof else None),
+        line(shown("FCF to net income", "fcf_to_net_income", prof.get("fcf_to_net_income"), _r2)),
+    ]
+    bal_lines = [
+        line(shown("D/E (financial debt, excluding leases)", "debt_to_equity", bal.get("debt_to_equity"), _r2),
+             shown("Current ratio", "current_ratio", bal.get("current_ratio"), _r2),
+             shown("Interest coverage", "interest_coverage", bal.get("interest_coverage"), _r2)),
+        line(f"Equity to assets: {_pct(bal.get('equity_to_assets'))}" if "equity_to_assets" in bal else None,
+             f"Cash: {_money(bal.get('cash_position'), currency)}" if group != "financials" else None),
+    ]
+    if group == "pre_profit":
+        fcf, runway = bal.get("free_cash_flow"), bal.get("cash_runway_quarters")
+        burn = (f"Free cash flow (TTM): {_money(fcf, currency)}" if fcf is not None else "Free cash flow (TTM): N/A")
+        bal_lines.append(line(burn, f"Cash runway: {runway:.1f} quarters at this burn" if runway is not None else
+                              ("self-funding (free cash flow is positive)" if fcf is not None and fcf >= 0 else None)))
+    if div.get("dividend_regularity") == "none":
+        div_lines = ["  No dividend paid."]
+    else:
+        div_lines = [
+            line(shown("Yield", "dividend_yield", div.get("dividend_yield"), _pct), shown("Payout", "payout_ratio", div.get("payout_ratio"), _pct)),
+            f"  5yr dividend growth: {_pct(div.get('dividend_growth_5yr'))} | Regularity: {div.get('dividend_regularity', 'N/A')}",
+        ]
 
-GROWTH (GROWTH):
-  Revenue growth YoY: {_fmt(growth.get('revenue_growth_yoy'), '%', pct=True)} ({growth.get('revenue_growth_yoy_basis') or 'period unknown'}) | Last fiscal year: {_fmt(growth.get('revenue_growth_annual'), '%', pct=True)} | 3yr CAGR: {_fmt(growth.get('revenue_growth_3yr_cagr'), '%', pct=True)}
-  EPS growth YoY: {_fmt(growth.get('eps_growth_yoy'), '%', pct=True)}
+    def block(title: str, lines: list[str | None]) -> str:
+        return title + "\n" + "\n".join(x for x in lines if x)
 
-PROFITABILITY (PROF):
-  Gross margin: {nv('gross_margin', prof.get('gross_margin'), '%', True)} | Operating margin: {nv('operating_margin', prof.get('operating_margin'), '%', True)} | Net margin: {_fmt(prof.get('net_margin'), '%', pct=True)}
-  ROE: {_fmt(prof.get('roe'), '%', pct=True)}
-  FCF to net income: {_fmt(prof.get('fcf_to_net_income'))}
-
-BALANCE SHEET (BAL):
-  D/E (financial debt, excluding leases): {_fmt(bal.get('debt_to_equity'))} | Current ratio: {nv('current_ratio', bal.get('current_ratio'))}
-  Interest coverage: {nv('interest_coverage', bal.get('interest_coverage'))} | Cash: {_fmt(bal.get('cash_position'))}
-
-DIVIDEND (DIV):
-  Yield: {_fmt(div.get('dividend_yield'), '%', pct=True)} | Payout: {nv('payout_ratio', div.get('payout_ratio'), '%', True)}
-  5yr dividend growth: {_fmt(div.get('dividend_growth_5yr'), '%', pct=True)} | Regularity: {div.get('dividend_regularity', 'N/A')}
-
-ANALYST CONSENSUS (ANALYST):
-  Coverage: {_fmt(analyst.get('num_analysts'))} analysts | Buy: {_fmt(analyst.get('buy_count'))} | Hold: {_fmt(analyst.get('hold_count'))} | Sell: {_fmt(analyst.get('sell_count'))}
-  Consensus: {_fmt(analyst.get('consensus_rating'))} | Avg target: {_fmt(analyst.get('target_mean'))} {bundle.stock.currency}
-
-EARNINGS SURPRISE HISTORY (for your own guidance-vs-consensus judgment):
-{earnings_surprises.text}"""
+    sections = [header]
+    if profile.get("lens"):
+        sections.append(f"LENS: {profile['lens']}")
+    sections += [
+        block("VALUATION (VAL):", val_lines),
+        block("GROWTH (GROWTH):", growth_lines),
+        block("PROFITABILITY (PROF):", prof_lines),
+        block("BALANCE SHEET (BAL):", bal_lines) if any(bal_lines) else "",
+        block("DIVIDEND (DIV):", div_lines),
+        block("ANALYST CONSENSUS (ANALYST):", [
+            f"  Coverage: {_fmt(analyst.get('num_analysts'))} analysts | Buy: {_fmt(analyst.get('buy_count'))} | "
+            f"Hold: {_fmt(analyst.get('hold_count'))} | Sell: {_fmt(analyst.get('sell_count'))}",
+            f"  Consensus: {_fmt(analyst.get('consensus_rating'))} | Avg target: {_r2(analyst.get('target_mean'))} {currency}"]),
+        block("EARNINGS SURPRISE HISTORY (newest first):", [earnings_surprises.text]),
+    ]
+    text = "\n\n".join(x for x in sections if x)
 
     field_presence = _missing_fields_presence(bundle)
     field_presence["earnings_surprises"] = earnings_surprises.present
     field_presence["industry_benchmark"] = industry_pe.present
     return text, field_presence
+
+
+def merge_decided_fields(output: dict, bundle: DataBundle) -> dict:
+    """Fields code decides, merged after the model returns (the pattern Technical and Macro use): the earnings surprise
+    pattern as `guidance_vs_consensus`. Stored output keeps the same keys, so the Pass 2 view reads the same place."""
+    if not isinstance(output, dict):
+        return output
+    itf = output.get("interpretive_fields")
+    itf = dict(itf) if isinstance(itf, dict) else {}
+    itf["guidance_vs_consensus"] = earnings_surprise_pattern(bundle.growth_metrics.get("earnings_surprises"))
+    return {**output, "interpretive_fields": itf}
 
 
 class FundamentalAnalystRunner(BaseRunner):
@@ -340,14 +425,11 @@ class FundamentalAnalystRunner(BaseRunner):
                 "company_name": bundle.company_info.get("name"),
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
-                "timeline_instruction": f"Timeline: {ctx.timeline}.",
-                "data_coverage_line": _data_coverage_line(field_presence),
+                "data_coverage_line": _data_coverage_line(field_presence, _profile(bundle).get("limits", "")),
                 "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
-                "memory_brief": "",
-                "sector_specific_valuation_instruction": "",
             },
         )
-        return await self.call_with_validation(
+        result, errors = await self.call_with_validation(
             system_prompt,
             user_msg,
             partial(
@@ -359,3 +441,4 @@ class FundamentalAnalystRunner(BaseRunner):
             max_tokens=4000,
             temperature=0.3,
         )
+        return merge_decided_fields(result, bundle), errors

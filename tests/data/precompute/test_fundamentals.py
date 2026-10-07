@@ -1,6 +1,7 @@
 import pytest
 
 from data.precompute.fundamentals import (
+    metric_group,
     _peg,
     _ttm_metric,
     compute_all,
@@ -149,7 +150,7 @@ def test_compute_growth_metrics_earnings_surprises_passed_through():
 
     result = compute_growth_metrics(_fin(), earnings_surprises=surprises)
 
-    assert result["earnings_surprises"] is surprises
+    assert result["earnings_surprises"] == surprises
 
 
 def test_compute_growth_metrics_empty_earnings_surprises_stays_empty_list_not_none():
@@ -273,7 +274,7 @@ def test_compute_balance_sheet_metrics_happy_path():
 
 def test_compute_balance_sheet_metrics_missing_interest_expense_omits_only_coverage():
     quarters = [_quarter(1000.0, 150.0, 1.5, 200.0, interest_expense=None)]
-    result = compute_balance_sheet_metrics(_fin(quarters=quarters))
+    result = compute_balance_sheet_metrics(_fin(quarters=quarters, annual=[]))
 
     assert result["interest_coverage"] is None
     assert result["debt_to_equity"] == pytest.approx(0.5)  # unaffected
@@ -572,6 +573,7 @@ def test_compute_all_happy_path_returns_full_shape():
         "missing_fields",
         "currency_mismatch",
         "not_applicable",
+        "metric_profile",
         "latest_financials_period_end",
     }
     assert result["quarters_available"] == 5
@@ -736,20 +738,6 @@ def test_interest_coverage_prefers_the_latest_quarter_when_it_has_one():
     assert compute_balance_sheet_metrics(fin)["interest_coverage"] == pytest.approx(20.0)
 
 
-def test_a_bank_has_its_nonexistent_metrics_marked_not_applicable_not_missing():
-    result = compute_all(_fin(), _price_info(), [], industry="Banking")
-    # _fin() has operating_income so operating_margin exists; remove it to look like a bank
-    bank_fin = _fin()
-    for entry in [*bank_fin.quarters, *bank_fin.annual]:
-        entry["operating_income"] = None
-        entry["cost_of_revenue"] = None
-    bank = compute_all(bank_fin, _price_info(), [], industry="Banks - Diversified")
-    assert bank["not_applicable"]["reason"] == "bank"
-    assert {"operating_margin", "gross_margin"} <= set(bank["not_applicable"]["fields"])
-    assert "profitability_metrics.operating_margin" not in bank["missing_fields"]
-    assert result["not_applicable"] is None or "operating_margin" not in result["not_applicable"]["fields"]
-
-
 def test_a_reit_has_its_earnings_multiples_marked_not_applicable_when_empty():
     no_earnings = _fin()
     for entry in [*no_earnings.quarters, *no_earnings.annual]:
@@ -763,3 +751,149 @@ def test_a_reit_has_its_earnings_multiples_marked_not_applicable_when_empty():
 
 def test_other_industries_have_no_not_applicable_list():
     assert compute_all(_fin(), _price_info(), [], industry="Software - Infrastructure")["not_applicable"] is None
+
+
+# --- the company-kind profile (ledger BB-106) ---
+
+
+@pytest.mark.parametrize("industry,pe,ni,group", [
+    # industry strings both providers return, from a 55 ticker probe (yfinance for Canada, SEC/FMP for the US)
+    ("Banking", 17.6, 5.0, "financials"), ("Banks - Diversified", 14.0, 5.0, "financials"),
+    ("Insurance", 16.2, 5.0, "financials"), ("Insurance - Life", 17.9, 5.0, "financials"),
+    ("Insurance - Diversified", 12.6, 5.0, "financials"),
+    ("Regulated Utilities", 22.0, 5.0, "capital_intensive"), ("Regulated Electric", 17.0, 5.0, "capital_intensive"),
+    ("Telecommunications", 4.1, 5.0, "capital_intensive"), ("Telecom Services", 8.0, 5.0, "capital_intensive"),
+    ("Oil & Gas Exploration and Production", 12.0, 5.0, "capital_intensive"),
+    ("Oil & Gas Integrated", 20.0, 5.0, "capital_intensive"), ("Oil & Gas Storage and Transportation", 22.7, 5.0, "capital_intensive"),
+    ("Software - Application", None, -100.0, "pre_profit"), ("Biotechnology", None, -500.0, "pre_profit"),
+    ("Software - Application", 109.0, 50.0, "standard"), ("Semiconductors", 30.0, 60.0, "standard"),
+    ("Insurance Brokers", 25.0, 5.0, "standard"), ("Oil & Gas Equipment & Services", 15.0, 5.0, "standard"),
+    ("Aerospace & Defense", None, -1000.0, "pre_profit"),
+    ("Asset Management", 25.0, 5.0, "standard"), ("Financial - Credit Services", 30.0, 5.0, "standard"),
+    ("Discount Stores", 47.0, 5.0, "standard"), (None, None, None, "standard"),
+    # REITs are not tuned: they stay "standard" even with a trailing loss (existing REIT handling applies)
+    ("REITs", None, -10.0, "standard"), ("REIT - Retail", 40.0, 5.0, "standard"),
+])
+def test_metric_group_from_the_industry_text_both_providers_use(industry, pe, ni, group):
+    assert metric_group(industry, pe, ni) == group
+
+
+def _own_quarters(net_income=150.0, ocf=180.0, capex=-40.0):
+    """Fresh rows: the module-level _QUARTERS dicts are shared and other tests mutate them."""
+    return [_quarter(1000.0 - 20 * i, net_income, 1.5, 200.0, operating_cash_flow=ocf, capital_expenditures=capex)
+            for i in range(5)]
+
+
+def _bank_fin():
+    return _fin(quarters=_own_quarters(), annual=[_quarter(3700.0, 500.0, 5.3, period_end="2025-12-31")] * 4,
+                balance_sheet={**_BALANCE_SHEET, "total_assets": 50000.0, "total_equity": 3000.0, "total_debt": 20000.0})
+
+
+def test_a_bank_hides_the_metrics_that_do_not_describe_it_and_gets_roa_and_equity_to_assets():
+    """TD.TO risks read "High leverage: D/E=3.58" and "earnings quality concerns: FCF to net income=0.31"."""
+    result = compute_all(_bank_fin(), _price_info(), _dividend_history(), industry="Banking")
+
+    profile = result["metric_profile"]
+    assert profile["group"] == "financials"
+    for field in ("debt_to_equity", "fcf_to_net_income", "current_ratio", "interest_coverage", "operating_margin"):
+        assert field in profile["hidden"]
+    assert "ROE" in profile["lens"] and profile["limits"]
+    assert result["profitability_metrics"]["roa"] == pytest.approx(600.0 / 50000.0)  # TTM net income (4 x 150) over total assets
+    assert result["balance_sheet_metrics"]["equity_to_assets"] == pytest.approx(3000.0 / 50000.0)
+    assert not any(f.endswith(("debt_to_equity", "fcf_to_net_income")) for f in result["missing_fields"])
+
+
+def test_the_new_ratios_exist_only_for_the_group_that_is_judged_on_them():
+    standard = compute_all(_fin(quarters=_own_quarters(), annual=[_quarter(3700.0, 500.0, 5.3, period_end="2025-12-31")] * 4),
+                           _price_info(), _dividend_history(), industry="Software - Application")
+
+    assert "roa" not in standard["profitability_metrics"] and "equity_to_assets" not in standard["balance_sheet_metrics"]
+    assert "cash_runway_quarters" not in standard["balance_sheet_metrics"]
+    assert standard["metric_profile"]["group"] == "standard" and standard["metric_profile"]["hidden"] == ["ev_ebitda", "free_cash_flow"]
+
+
+def test_a_pre_profit_company_gets_a_cash_runway_and_hides_pe_roe_and_payout():
+    losing = [_quarter(100.0, -50.0, -0.5, -40.0, operating_cash_flow=-30.0, capital_expenditures=-10.0) for _ in range(5)]
+    fin = _fin(quarters=losing, annual=[_quarter(400.0, -200.0, -2.0, period_end="2025-12-31")] * 4,
+               balance_sheet={**_BALANCE_SHEET, "cash_and_equivalents": 400.0})
+
+    result = compute_all(fin, _price_info(), _dividend_history(), industry="Software - Application")
+
+    assert result["metric_profile"]["group"] == "pre_profit"
+    assert "pe_ratio" in result["metric_profile"]["hidden"] and "roe" in result["metric_profile"]["hidden"]
+    # TTM free cash flow = 5 quarters' worth summed over 4: (-30 - 10) * 4 = -160; 400 of cash / (160 / 4) = 10 quarters
+    assert result["balance_sheet_metrics"]["cash_runway_quarters"] == pytest.approx(10.0)
+
+
+def test_a_company_with_positive_cash_flow_has_no_runway():
+    fin = _fin(quarters=[_quarter(100.0, -5.0, -0.1, 5.0, operating_cash_flow=30.0, capital_expenditures=-10.0)] * 5,
+               annual=[_quarter(400.0, -20.0, -0.4, period_end="2025-12-31")] * 4)
+    result = compute_all(fin, _price_info(), _dividend_history(), industry="Biotechnology")
+    assert result["metric_profile"]["group"] == "pre_profit"
+    assert result["balance_sheet_metrics"]["cash_runway_quarters"] is None
+
+
+def test_interest_coverage_uses_the_interest_expense_magnitude_whichever_sign_the_filer_tags():
+    """COST -32M, V -39M and BLK -134M gave profitable companies a coverage of -88, -158 and -18."""
+    for sign in (1, -1):
+        quarters = [_quarter(1000.0, 150.0, 1.5, 200.0, interest_expense=sign * 10.0)]
+        assert compute_balance_sheet_metrics(_fin(quarters=quarters))["interest_coverage"] == pytest.approx(20.0)
+
+
+def test_ebitda_and_coverage_fall_back_to_net_income_tax_and_interest_when_there_is_no_operating_income_line():
+    """XOM, COP and CVX have no OperatingIncomeLoss, so EV/EBITDA and interest cover were empty for all three."""
+    year = _quarter(8000.0, 600.0, 6.0, None, tax_expense=200.0, interest_expense=-100.0, depreciation_amortization=500.0,
+                    period_end="2025-12-31")
+    quarters = [_quarter(2000.0, 150.0, 1.5, None, tax_expense=50.0, interest_expense=25.0, depreciation_amortization=None)
+                for _ in range(5)]
+    fin = _fin(quarters=quarters, annual=[year, *_ANNUAL[1:]])
+
+    coverage = compute_balance_sheet_metrics(fin)["interest_coverage"]
+    ev_ebitda = compute_valuation_metrics(fin, _price_info(), compute_growth_metrics(fin))["ev_ebitda"]
+
+    # fiscal-year basis: EBIT = 600 + 200 + 100 = 900; coverage 900 / 100; EBITDA = 900 + 500 = 1400
+    assert coverage == pytest.approx(9.0)
+    assert ev_ebitda == pytest.approx((5000.0 + 1000.0 - 500.0) / 1400.0)
+
+
+def test_earnings_surprises_are_newest_first_whatever_order_the_provider_returns():
+    """yfinance (every Canadian name) is oldest first and the payload took the first two, so TD.TO showed its two OLDEST
+    quarters of four."""
+    oldest_first = [{"period_end": p, "eps_surprise_pct": 1.0} for p in ("2025-10-31", "2026-01-31", "2026-04-30", "2026-07-31")]
+
+    result = compute_growth_metrics(_fin(), oldest_first)
+
+    assert [s["period_end"] for s in result["earnings_surprises"]] == ["2026-07-31", "2026-04-30", "2026-01-31", "2025-10-31"]
+    assert compute_growth_metrics(_fin(), [])["earnings_surprises"] == []
+    assert compute_growth_metrics(_fin(), None)["earnings_surprises"] is None
+
+
+# --- guidance_vs_consensus decided from the earnings surprises ---
+
+
+def _surprises(*pcts):
+    return [{"period_end": f"2026-0{i + 1}-01", "eps_surprise_pct": p} for i, p in enumerate(pcts)]
+
+
+@pytest.mark.parametrize("pcts,expected", [
+    ((5.3, 2.7, 5.9, 4.0), "above"),        # KO: four beats
+    ((4.0, -3.9, 7.8, 5.9), "above"),       # JPM: three beats and one small miss
+    ((5.3, 0.8, 0.1, 3.4), "inline"),       # COST: beats too small to count
+    ((-0.6, -5.8, 8.5, 5.2), "inline"),     # SHOP.TO: mixed
+    ((-9.7, -19.8, 5.5, -20.2), "below"),   # T.TO: three misses
+    ((3162.4, 81.5, 2108.7, 94.6), "above"),  # INTC: absurd percentages from near-zero estimates count as beats, not as a size
+    ((8.0,), "not_available"),
+    ((), "not_available"),
+])
+def test_the_earnings_surprise_pattern(pcts, expected):
+    """The model wrote "above" 22, "not_available" 25, "inline" 4 and "below" 2 for the same all-beats input."""
+    from data.precompute.fundamentals import earnings_surprise_pattern
+
+    assert earnings_surprise_pattern(_surprises(*pcts)) == expected
+
+
+def test_the_surprise_pattern_with_no_history_is_not_available():
+    from data.precompute.fundamentals import earnings_surprise_pattern
+
+    assert earnings_surprise_pattern(None) == "not_available"
+    assert earnings_surprise_pattern([{"period_end": "2026-01-01", "eps_surprise_pct": None}] * 3) == "not_available"

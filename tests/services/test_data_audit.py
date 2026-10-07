@@ -154,3 +154,76 @@ def test_a_pure_canadian_name_is_known_to_have_no_filing_and_needs_the_profile_f
     assert findings["filing_digest.Business"].status == "known"
     assert findings["business_profile"].status == "ok"
 
+
+
+def _fundamental_bundle(**overrides):
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    defaults = dict(
+        stock=SimpleNamespace(ticker="TD.TO", currency="CAD", exchange="TSX"),
+        company_info={"name": "Toronto-Dominion Bank", "sector": "Finance", "industry": "Banking"},
+        context=SimpleNamespace(account_type="tfsa", timeline="medium_term"), data_vintage=datetime(2026, 10, 6, tzinfo=UTC),
+        price_info={"current_price": 168.3, "market_cap": 2.7e11, "currency": "CAD", "high_52w": 175.3, "low_52w": 109.5},
+        valuation_metrics={"pe_ratio": 17.6, "forward_pe": 15.0, "peg_ratio": None, "pb_ratio": 2.16, "ps_ratio": 4.2, "ev_ebitda": None},
+        growth_metrics={"revenue_growth_yoy": 0.08, "revenue_growth_yoy_basis": "q", "revenue_growth_annual": 0.09,
+                        "revenue_growth_3yr_cagr": 0.1, "eps_growth_yoy": 0.2,
+                        "earnings_surprises": [{"period_end": "2026-07-31", "eps_surprise_pct": 5.0}, {"period_end": "2026-04-30", "eps_surprise_pct": 4.0}]},
+        profitability_metrics={"gross_margin": None, "operating_margin": None, "net_margin": 0.25, "roe": 0.13, "roa": 0.008,
+                               "fcf_to_net_income": 0.31, "margin_trend": "expanding"},
+        balance_sheet_metrics={"debt_to_equity": 3.58, "current_ratio": None, "interest_coverage": None, "cash_position": 1e11,
+                               "equity_to_assets": 0.06},
+        dividend_info={"dividend_yield": 0.026, "payout_ratio": 0.48, "dividend_growth_5yr": 0.065, "dividend_regularity": "regular"},
+        analyst_consensus={"consensus_rating": "buy", "num_analysts": 10, "target_mean": 183.4, "buy_count": 6, "hold_count": 3, "sell_count": 1},
+        peer_metrics={"industry_benchmark": {"industry": "Banks", "market": "CA", "companies": 5, "median_pe": 17.0, "p25_pe": 16.8, "p75_pe": 17.6}},
+        missing_fields=[], currency_mismatch=None, not_applicable=None, latest_financials_period_end="2026-07-31",
+        metric_profile={"group": "financials", "lens": "Value on P/B against ROE, with P/E.", "limits": "",
+                        "hidden": ["debt_to_equity", "fcf_to_net_income", "operating_margin", "gross_margin", "current_ratio",
+                                   "interest_coverage", "ev_ebitda", "ps_ratio"]},
+    )
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+def test_the_fundamental_input_check_passes_a_clean_bank():
+    from services.data_audit import check_fundamental_inputs
+
+    findings = check_fundamental_inputs(_fundamental_bundle())
+
+    assert {f.status for f in findings} == {"ok"}
+
+
+def test_it_flags_oldest_first_surprises_a_negative_interest_cover_and_a_leaked_hidden_metric():
+    from services.data_audit import check_fundamental_inputs
+
+    bundle = _fundamental_bundle(
+        balance_sheet_metrics={"debt_to_equity": 3.58, "current_ratio": None, "interest_coverage": -88.0, "cash_position": 1e11, "equity_to_assets": 0.06},
+        metric_profile={"group": "standard", "lens": "", "limits": "", "hidden": []},
+    )
+    bundle.growth_metrics["earnings_surprises"].reverse()  # oldest first, as yfinance returns them
+
+    by_field = {f.field: f for f in check_fundamental_inputs(bundle)}
+
+    assert by_field["surprises_newest_first"].status == "mismatch"
+    assert by_field["interest_coverage_sign"].status == "mismatch"
+    assert by_field["hidden_metrics_absent"].status == "ok"  # standard hides nothing
+
+    leaky = _fundamental_bundle()
+    leaky.metric_profile = {**leaky.metric_profile, "hidden": [*leaky.metric_profile["hidden"], "roe"]}
+    assert {f.field: f for f in check_fundamental_inputs(leaky)}["hidden_metrics_absent"].status == "mismatch"
+
+
+def test_empty_pass2_fields_skip_what_the_metric_profile_hides_and_other_groups_extras():
+    views = {"FUND": {"debt_to_equity": None, "operating_margin": None, "roa": None, "cash_runway_quarters": None,
+                      "valuation_lens": None, "pe_ratio": None}}
+    bank = {"group": "financials", "hidden": ["debt_to_equity", "operating_margin"]}
+
+    # D/E and operating margin are hidden, the runway and lens belong elsewhere; the bank's own empty ROA and an empty
+    # P/E are still real gaps
+    assert empty_pass2_fields(views, bank) == [("FUND", "roa"), ("FUND", "pe_ratio")]
+
+
+def test_without_not_applicable_also_drops_the_profile_hidden_fields():
+    from services.data_audit import without_not_applicable
+
+    theirs = {"net_margin": 0.31, "debt_to_equity": 3.5}
+    assert without_not_applicable(theirs, None, ["debt_to_equity"]) == {"net_margin": 0.31}
