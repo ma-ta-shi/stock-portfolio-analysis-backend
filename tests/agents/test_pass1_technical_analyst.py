@@ -26,14 +26,16 @@ def _bundle(**overrides) -> SimpleNamespace:
             "macd_line": 1.2, "macd_signal": 0.9, "macd_histogram": 0.3,
             "macd_recent_cross": "bullish_cross", "divergence": "none",
             "volume_avg_20": 1_200_000, "volume_ratio_today": 1.1, "volume_today": 1_320_000,
-            "bb_position": "mean_reverting", "bb_width_pct": 4.2,
+            "sma_20": 103.0, "sma_50": 100.0, "sma_200": 94.0, "macd_histogram_3d_ago": 0.1,
+            "bb_lower": 99.0, "bb_middle": 103.0, "bb_upper": 107.0, "bb_percent_b": 75.0,
+            "bb_regime": "normal", "bb_width_pct": 4.2, "bb_width_percentile": 31.0,
             "atr_14": 2.3, "atr_60_avg": 2.1, "volatility_regime_derived": "normal",
         },
         support_resistance={
-            "nearest_support": 98.0, "pct_to_support": -6.7, "atr_to_support": 3.0,
-            "support_touch_count": 4,
-            "nearest_resistance": 112.0, "pct_to_resistance": 6.7, "atr_to_resistance": 3.0,
-            "resistance_touch_count": 2,
+            "nearest_support": 98.0, "pct_to_support": 6.7, "atr_to_support": 3.0,
+            "support_touch_count": 4, "support_basis": "swing",
+            "nearest_resistance": 112.0, "pct_to_resistance": -6.7, "atr_to_resistance": 3.0,
+            "resistance_touch_count": 2, "resistance_basis": "52w high + swing",
         },
         trend_structure={
             "swing_structure_20d": "HH", "trend_structure_weekly": "HH",
@@ -62,7 +64,7 @@ def test_renders_previously_stale_fields_that_harness_hardcoded_to_na():
     schema' and hardcoded them to 'N/A'; this port must use the real value."""
     msg, _ = build_user_message(_bundle())
     assert "Leadership: leading" in msg
-    assert "RSI zone (adjusted): neutral" in msg
+    assert "RSI zone (trend-adjusted): neutral" in msg
     assert "Weekly RSI zone: neutral" in msg
 
 
@@ -116,6 +118,51 @@ def test_renders_52w_position_fields():
     assert "% from 52w high: -12.5%" in msg
 
 
+def test_the_sma_levels_and_the_true_slope_label_are_shown():
+    """The payload said 'SMA20/50/200 slope' and printed two slopes; the SMA price levels were never shown."""
+    msg, _ = build_user_message(_bundle())
+    assert "SMA20/50/200: 103.0/100.0/94.0" in msg
+    assert "SMA50/200 slope: rising/rising" in msg and "SMA20/50/200 slope" not in msg
+
+
+def test_structural_levels_show_what_they_are_made_of():
+    msg, _ = build_user_message(_bundle())
+    assert "Nearest support: 98.0 (6.7%, 3.0 ATR, touches=4, swing)" in msg
+    assert "Nearest resistance: 112.0 (-6.7%, 3.0 ATR, touches=2, 52w high + swing)" in msg
+
+
+def test_a_side_with_no_level_says_so_instead_of_n_a():
+    bundle = _bundle(support_resistance={
+        "nearest_support": 98.0, "pct_to_support": 6.7, "atr_to_support": 3.0, "support_touch_count": 4,
+        "support_basis": "swing", "nearest_resistance": None})
+    msg, presence = build_user_message(bundle)
+    assert "Nearest resistance: none (no level on this side)" in msg
+    assert presence["support_resistance"] is True  # one side is enough; only no levels at all is a gap
+
+
+def test_the_bollinger_bands_and_where_price_sits_in_them_are_shown():
+    msg, _ = build_user_message(_bundle())
+    assert "Bollinger bands lower/middle/upper: 99.0/103.0/107.0 | Price at 75.0% of the band (0% = lower band, 100% = upper band)" in msg
+    assert "Band regime: normal" in msg and "Bollinger position" not in msg
+
+
+def test_the_pattern_block_appears_only_for_a_real_squeeze_release():
+    assert "PATTERN" not in build_user_message(_bundle())[0]
+    released = _bundle(pattern_metrics={"squeeze_release": True, "breakout_direction": "bullish"})
+    assert "Squeeze release in the last 5 sessions, direction: bullish" in build_user_message(released)[0]
+
+
+def test_the_market_regime_names_its_index():
+    canadian = _bundle(benchmark_ticker="^GSPTSE")
+    assert "MARKET REGIME (S&P/TSX Composite, REGIME): bull" in build_user_message(canadian)[0]
+    assert "(S&P 500, REGIME)" in build_user_message(_bundle(benchmark_ticker="^GSPC"))[0]
+
+
+def test_the_weekly_trend_is_labelled_with_its_definition():
+    msg, _ = build_user_message(_bundle())
+    assert "Weekly trend (price vs 40-week SMA): bullish" in msg
+
+
 def test_no_confluence_score_or_pattern_confirmed_fabricated():
     """Neither field has a real precompute source -- must never appear."""
     msg, _ = build_user_message(_bundle())
@@ -157,7 +204,7 @@ def test_field_presence_sector_relative_strength_false_without_sector_etf():
     assert presence["sector_relative_strength"] is False
 
 
-def test_field_presence_support_resistance_false_when_pivots_unresolved():
+def test_field_presence_support_resistance_false_when_no_levels_resolve():
     bundle = _bundle(support_resistance={})
     _, presence = build_user_message(bundle)
     assert presence["support_resistance"] is False
@@ -321,3 +368,46 @@ def test_stale_data_flags_price_past_threshold():
 
 def test_stale_data_flags_price_far_past_threshold():
     assert _stale_data(days_old=30) == ["price"]
+
+
+# ---------- code-decided interpretive fields, merged after the model returns ----------
+
+
+async def test_run_merges_the_code_decided_fields_after_the_model_returns(monkeypatch):
+    from agents.pass1_technical_analyst import TechnicalAnalystRunner
+
+    model_output = {
+        "assessment_summary": "s", "analysis_confidence": "medium", "caveats": [], "key_factors": [], "risks": [],
+        "narrative": "n", "interpretive_fields": {"primary_trend": "bullish", "trend_strength": "strong",
+                                                   "volume_confirmation": "confirming", "nearest_level_bias": "near_support",
+                                                   "confluence_score": 2},
+    }
+
+    async def fake_call(self, system_prompt, user_msg, validator, **kwargs):
+        return model_output, []
+
+    monkeypatch.setattr(TechnicalAnalystRunner, "call_with_validation", fake_call)
+    result, _ = await TechnicalAnalystRunner().run(_bundle(preflight_warnings=[], days_old=1))
+
+    itf = result["interpretive_fields"]
+    assert itf["primary_trend"] == "bullish" and itf["confluence_score"] == 2  # the model's judgement is kept
+    assert itf["momentum_zone"] == "neutral" and itf["momentum_divergence"] == "none"
+    assert itf["momentum_direction"] == "improving"  # histogram 0.3 against 0.1 three sessions ago, ATR 2.3: +0.087 ATR
+    assert itf["suggested_invalidation_level"] == 98.0 and itf["invalidation_atr_distance"] == 3.0
+    assert itf["nearest_level_bias"] == "midrange"  # 3.0 ATR to both sides in the fixture: neither is near, whatever the model wrote
+
+
+def test_the_current_price_is_shown_to_cents():
+    """SHOP.TO 2026-10-04: 'Current: 215.86000061035156 CAD'."""
+    msg, _ = build_user_message(_bundle(price_info={"current_price": 215.86000061035156, "currency": "CAD"}))
+    assert "Current: 215.86 CAD" in msg and "215.86000061" not in msg
+    assert "Current: N/A" in build_user_message(_bundle(price_info={"current_price": None, "currency": "CAD"}))[0]
+
+
+def test_the_trend_basis_says_when_there_are_under_200_sessions():
+    full = build_user_message(_bundle())[0]
+    assert "Primary trend (SMA stack order): bullish" in full
+    ti = {**_bundle().technical_indicators, "stack_order": None, "sma_200": None, "price_vs_sma200_pct": None}
+    short = build_user_message(_bundle(technical_indicators=ti))[0]
+    assert "Primary trend (20/50-day averages only, under 200 sessions of history):" in short
+    assert "N/A" not in short.split("Primary trend")[1].split("|")[0]

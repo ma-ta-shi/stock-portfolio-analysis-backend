@@ -137,9 +137,9 @@ Doc/contract reconciliation (disclosed, not silently resolved):
     touches={support_touch_count})` — so `_support_resistance()` now
     returns a flat shape with `pct_to_support`/`atr_to_support` as
     siblings, plus new `support_touch_count`/`resistance_touch_count`
-    fields (sessions in the trailing ~6 months where price came within
-    0.5 ATR of the level — a first-pass tolerance, not specified
-    anywhere, same disclosure as the zigzag deviation tuning above).
+    fields. (The touch count was later redefined with the levels themselves:
+    2026-10-04, support and resistance are structural levels, see
+    `_support_resistance`; the daily pivot points this note describes are gone.)
   - `rs_vs_sector_3mo`/`rs_leadership` lived in their own top-level
     `relative_performance` dict — but `DataBundle.relative_performance`
     was never actually read anywhere in the real orchestrator's
@@ -317,24 +317,21 @@ def _divergence(close: pd.Series, rsi: pd.Series, lookback: int = 20) -> str | N
 
 
 def _rsi_zone_adjusted(rsi14: float | None, stack_order: str | None) -> str | None:
+    """RSI zone with trend-adjusted thresholds: an uptrend (bullish SMA stack) is overbought above 80 and oversold
+    below 40; a downtrend (bearish stack) overbought above 60 and oversold below 20; a mixed or unknown stack gets the
+    standard 70/30. (Decided 2026-10-04: a mixed stack used to fall through to the downtrend thresholds, which this
+    note had flagged as undecided since 2026-08-30 and which moved the classification for RSI in the 62 to 79 band.)"""
     if rsi14 is None or pd.isna(rsi14):
         return None
-    # NOTE (2026-08-30): only stack_order == "bullish" gets the 80/40 thresholds —
-    # both "bearish" AND "mixed" fall through to 60/20. The Technical prompt's Design
-    # Decision #5 specifies "80/40 in uptrends and 60/20 in downtrends" and is silent
-    # on mixed, so mixed silently receives downtrend treatment. No effect at RSI ~57,
-    # but it changes the classification in the 62-79 band. Decide the intended
-    # behaviour before relying on this. Ticket 86ban0wde / 86bbuqd8m comment.
-    uptrend = stack_order == "bullish"
-    if uptrend:
-        if rsi14 > 80:
-            return "overbought"
-        if rsi14 < 40:
-            return "oversold"
-        return "neutral"
-    if rsi14 > 60:
+    if stack_order == "bullish":
+        high, low = 80, 40
+    elif stack_order == "bearish":
+        high, low = 60, 20
+    else:
+        high, low = 70, 30
+    if rsi14 > high:
         return "overbought"
-    if rsi14 < 20:
+    if rsi14 < low:
         return "oversold"
     return "neutral"
 
@@ -355,6 +352,10 @@ def _momentum(df: pd.DataFrame, stack_order: str | None) -> dict:
     line_last = _last_or_none(macd_line)
     signal_last = _last_or_none(macd_signal)
     hist_last = _last_or_none(macd_hist)
+    # The histogram 3 sessions ago, so momentum direction (improving, flat, deteriorating) can be decided in code.
+    hist_3d_ago = (
+        _last_or_none(macd_hist.iloc[:-3]) if macd_hist is not None and len(macd_hist) > 3 else None
+    )
 
     return {
         "rsi_14": round(rsi_last, 2) if rsi_last is not None else None,
@@ -362,6 +363,7 @@ def _momentum(df: pd.DataFrame, stack_order: str | None) -> dict:
         "macd_line": round(line_last, 4) if line_last is not None else None,
         "macd_signal": round(signal_last, 4) if signal_last is not None else None,
         "macd_histogram": round(hist_last, 4) if hist_last is not None else None,
+        "macd_histogram_3d_ago": round(hist_3d_ago, 4) if hist_3d_ago is not None else None,
         "macd_recent_cross": _macd_recent_cross(macd_line, macd_signal)
         if macd is not None
         else None,
@@ -389,6 +391,32 @@ def _volume(df: pd.DataFrame) -> dict:
     }
 
 
+def _price_moves(df: pd.DataFrame) -> dict:
+    """Recent price changes and whether volume leans with the up moves or the down ones.
+
+    The agent was asked whether volume "confirms price direction" and was given today's volume ratio but no price
+    change at all, so its volume read followed the ratio alone (48 of 51 runs): KO's heavy volume on a down day was
+    called "confirming" for a bullish case. `up_down_volume_ratio_20` is the average volume on up sessions over the
+    average on down sessions across the last 20 sessions (above 1: volume leans with rallies)."""
+    close = df["close"]
+    out: dict = {"price_change_1d_pct": None, "price_change_5d_pct": None, "price_change_20d_pct": None,
+                 "up_down_volume_ratio_20": None}
+
+    def _change(sessions: int) -> float | None:
+        if len(close) <= sessions or close.iloc[-1 - sessions] == 0:
+            return None
+        return round((close.iloc[-1] / close.iloc[-1 - sessions] - 1) * 100, 2)
+
+    out["price_change_1d_pct"], out["price_change_5d_pct"], out["price_change_20d_pct"] = _change(1), _change(5), _change(20)
+    if "volume" in df.columns and len(df) > 20:
+        recent = df.iloc[-20:]
+        change = close.diff().iloc[-20:]
+        up_vol, down_vol = recent["volume"][change > 0].mean(), recent["volume"][change < 0].mean()
+        if pd.notna(up_vol) and pd.notna(down_vol) and down_vol > 0:
+            out["up_down_volume_ratio_20"] = round(float(up_vol / down_vol), 2)
+    return out
+
+
 # ---------- Bollinger Bands ----------
 
 
@@ -400,7 +428,10 @@ def _bollinger(df: pd.DataFrame) -> dict:
             "bb_middle": None,
             "bb_lower": None,
             "bb_width_pct": None,
-            "bb_position": None,
+            "bb_percent_b": None,
+            "bb_regime": None,
+            "squeeze_released": False,
+            "squeeze_direction": None,
         }
 
     bb = _ta_result(df, df.ta.bbands(length=20, std=2))
@@ -410,7 +441,10 @@ def _bollinger(df: pd.DataFrame) -> dict:
             "bb_middle": None,
             "bb_lower": None,
             "bb_width_pct": None,
-            "bb_position": None,
+            "bb_percent_b": None,
+            "bb_regime": None,
+            "squeeze_released": False,
+            "squeeze_direction": None,
         }
     cols = list(bb.columns)
     upper = bb[[c for c in cols if c.startswith("BBU_")][0]]
@@ -435,6 +469,18 @@ def _bollinger(df: pd.DataFrame) -> dict:
         if sqz is not None and "SQZ_ON" in sqz.columns and pd.notna(sqz["SQZ_ON"].iloc[-1])
         else False
     )
+    # A squeeze RELEASE: the squeeze was on in any of the 5 sessions before today and is off today. The direction is
+    # the sign of the squeeze momentum series (pandas-ta's SQZ_* column). Before 2026-10-04 "squeeze_release" meant
+    # "price walking a band", which never fired in 51 real runs.
+    squeeze_released, squeeze_direction = False, None
+    if sqz is not None and "SQZ_ON" in sqz.columns and len(sqz) >= 7:
+        was_on = bool(sqz["SQZ_ON"].iloc[-6:-1].fillna(0).astype(bool).any())
+        if was_on and not sqz_on:
+            squeeze_released = True
+            mom_cols = [c for c in sqz.columns if c.startswith("SQZ_") and c not in ("SQZ_ON", "SQZ_OFF", "SQZ_NO")]
+            mom = sqz[mom_cols[0]].iloc[-1] if mom_cols else None
+            if mom is not None and pd.notna(mom) and mom != 0:
+                squeeze_direction = "bullish" if mom > 0 else "bearish"
 
     walking = False
     if len(close) >= 3:
@@ -444,11 +490,18 @@ def _bollinger(df: pd.DataFrame) -> dict:
         walking = bool((recent > recent_upper).all() or (recent < recent_lower).all())
 
     if width_percentile is not None and width_percentile < 20 and sqz_on:
-        position = "squeeze"
+        regime = "squeeze"
     elif walking:
-        position = "walking_band"
+        regime = "walking_band"
     else:
-        position = "mean_reverting"
+        regime = "normal"
+
+    # Where price sits inside the bands, as a percent of the band width (0 = lower band, 100 = upper band; outside the
+    # bands is below 0 or above 100). The old "bb_position" was the regime label above, not a position.
+    band = upper.iloc[-1] - lower.iloc[-1]
+    percent_b = (
+        round((close.iloc[-1] - lower.iloc[-1]) / band * 100, 1) if pd.notna(band) and band != 0 else None
+    )
 
     return {
         "bb_upper": round(upper.iloc[-1], 4) if pd.notna(upper.iloc[-1]) else None,
@@ -456,7 +509,10 @@ def _bollinger(df: pd.DataFrame) -> dict:
         "bb_lower": round(lower.iloc[-1], 4) if pd.notna(lower.iloc[-1]) else None,
         "bb_width_pct": round(today_width, 2) if pd.notna(today_width) else None,
         "bb_width_percentile": round(width_percentile, 1) if width_percentile is not None else None,
-        "bb_position": position,
+        "bb_percent_b": percent_b,
+        "bb_regime": regime,
+        "squeeze_released": squeeze_released,
+        "squeeze_direction": squeeze_direction,
     }
 
 
@@ -485,75 +541,109 @@ def _volatility(df: pd.DataFrame) -> dict:
 
 # ---------- support / resistance ----------
 
+# Structural levels (replaced the daily floor-trader pivots on 2026-10-04). The pivots were recomputed
+# from the last session every day, so the "nearest support" moved about 0.4 ATR a day, sat 0.3 to 0.7 ATR from
+# price in nearly every real run, and its "touch count" measured how long price lingered nearby rather than how
+# often a level held. Structural levels moved 0.01 ATR a day over 8 tickers x 20 sessions (4 Canadian), with
+# distances from 0.06 to 3 ATR. Parameters picked by comparing three settings on those 8 tickers
+# (5 bars, 1.0 ATR: stable and best spread; 5 bars, 0.5 ATR and 8 bars, 0.75 ATR: more flipping or lone points).
+_SR_LOOKBACK = 252  # about a year of sessions
+_SR_SWING_BARS = 5  # a swing high or low is the extreme of the 5 bars either side of it
+_SR_CLUSTER_ATR = 1.0  # candidate levels within this many ATR of each other are one level
 
-_TOUCH_TOLERANCE_ATR = 0.5
-_TOUCH_LOOKBACK = 126  # ~6 months of trading sessions
+
+def _swing_points(df: pd.DataFrame, bars: int = _SR_SWING_BARS) -> tuple[list[float], list[float]]:
+    """Confirmed swing highs and lows (fractals): the extreme of `bars` sessions either side. The most recent `bars`
+    sessions cannot be confirmed yet, so they are not swing points. Plain comparison, not pandas-ta's zigzag (which
+    crashes the process on zero-variance data, see _swing_structure)."""
+    highs, lows = df["high"].to_numpy(), df["low"].to_numpy()
+    swing_highs: list[float] = []
+    swing_lows: list[float] = []
+    for i in range(bars, len(df) - bars):
+        if highs[i] == highs[i - bars : i + bars + 1].max():
+            swing_highs.append(float(highs[i]))
+        if lows[i] == lows[i - bars : i + bars + 1].min():
+            swing_lows.append(float(lows[i]))
+    return swing_highs, swing_lows
 
 
-def _touch_count(
-    df: pd.DataFrame, level: float | None, column: str, atr14: float | None
-) -> int | None:
-    """Sessions in the trailing ~6 months where the relevant intraday
-    extreme (low for support, high for resistance) came within 0.5 ATR of
-    the level -- a first-pass tolerance/window choice, not specified
-    anywhere (same disclosure as every other undocumented threshold in
-    this module, e.g. the zigzag deviation)."""
-    if level is None or not atr14:
-        return None
-    window = df.iloc[-_TOUCH_LOOKBACK:] if len(df) > _TOUCH_LOOKBACK else df
-    tolerance = atr14 * _TOUCH_TOLERANCE_ATR
-    return int((window[column] - level).abs().le(tolerance).sum())
+def _structural_levels(df: pd.DataFrame, atr14: float | None) -> list[dict]:
+    """Levels over the last year: swing highs and lows, the 52-week high and low, and the 50 and 200 day SMAs, with
+    candidates within _SR_CLUSTER_ATR of each other merged. `touches` counts the swing points in a level (the SMAs and
+    the 52-week extremes are levels but not touches); `basis` says what the level is made of. Sorted by price."""
+    window = df.iloc[-_SR_LOOKBACK:]
+    swing_highs, swing_lows = _swing_points(window)
+    candidates = [(p, 1, "swing") for p in swing_highs + swing_lows]
+    candidates.append((float(window["high"].max()), 0, "52w high"))
+    candidates.append((float(window["low"].min()), 0, "52w low"))
+    for length in (50, 200):
+        if len(df) >= length:
+            candidates.append((float(df["close"].rolling(length).mean().iloc[-1]), 0, f"SMA{length}"))
+    candidates.sort(key=lambda c: c[0])
+
+    tolerance = (atr14 or 0.0) * _SR_CLUSTER_ATR
+    groups: list[list[tuple[float, int, str]]] = [[candidates[0]]]
+    for cand in candidates[1:]:
+        members = groups[-1]
+        if cand[0] - sum(m[0] for m in members) / len(members) <= tolerance:
+            members.append(cand)
+        else:
+            groups.append([cand])
+    return [
+        {
+            "price": round(sum(m[0] for m in g) / len(g), 4),
+            "touches": sum(m[1] for m in g),
+            "basis": " + ".join(sorted({m[2] for m in g}, key=lambda b: (b != "swing", b))),
+        }
+        for g in groups
+    ]
 
 
 def _support_resistance(df: pd.DataFrame, atr14: float | None) -> dict:
-    # Flat shape (nearest_support/pct_to_support/atr_to_support/
-    # support_touch_count as sibling keys, not a nested dict) matches the
-    # real Technical Analyst prompt's payload template literally
-    # ("Support={nearest_support} ({pct_to_support}, {atr_to_support} ATR,
-    # touches={support_touch_count})") -- confirmed against the live
-    # prompt text, not the ticket's own (less precise) field-list summary.
+    # Flat shape (nearest_support/pct_to_support/atr_to_support/support_touch_count as sibling keys, not a nested
+    # dict) matches the Technical Analyst payload template. `support_basis` / `resistance_basis` say what the level
+    # is (swing, SMA50, 52w high ...). Either side can be None: a stock at its 52-week high has no level above it.
     empty = {
-        "levels": {},
+        "levels": [],
         "nearest_support": None,
         "pct_to_support": None,
         "atr_to_support": None,
         "support_touch_count": None,
+        "support_basis": None,
         "nearest_resistance": None,
         "pct_to_resistance": None,
         "atr_to_resistance": None,
         "resistance_touch_count": None,
+        "resistance_basis": None,
     }
-    pivots = _ta_result(df, df.ta.pivots()) if len(df) >= 2 else None
-    if pivots is None:
+    if len(df) < 2:
         return empty
-    latest = pivots.iloc[-1]
-    price = df["close"].iloc[-1]
+    price = float(df["close"].iloc[-1])
+    levels = _structural_levels(df, atr14)
+    below = [lv for lv in levels if lv["price"] < price]
+    above = [lv for lv in levels if lv["price"] > price]
+    support = max(below, key=lambda lv: lv["price"]) if below else None
+    resistance = min(above, key=lambda lv: lv["price"]) if above else None
 
-    levels = {col.split("_")[-1]: latest[col] for col in pivots.columns if pd.notna(latest[col])}
-    supports = sorted((lvl for lvl in levels.values() if lvl < price), reverse=True)
-    resistances = sorted(lvl for lvl in levels.values() if lvl > price)
-    support = supports[0] if supports else None
-    resistance = resistances[0] if resistances else None
+    def _pct_to(level: dict | None) -> float | None:
+        return round((price - level["price"]) / price * 100, 2) if level else None
 
-    def _pct_to(level: float | None) -> float | None:
-        return round((price - level) / price * 100, 2) if level is not None else None
-
-    def _atr_to(level: float | None) -> float | None:
-        # abs(price - level) / atr14, not a percent round-trip (caught on
-        # review: distance_pct / 100 * price algebraically simplifies
-        # straight back to price - level, adding nothing).
-        return round(abs(price - level) / atr14, 2) if level is not None and atr14 else None
+    def _atr_to(level: dict | None) -> float | None:
+        # abs(price - level) / atr14 (caught on review: a percent round-trip simplifies straight back to this)
+        return round(abs(price - level["price"]) / atr14, 2) if level and atr14 else None
 
     return {
-        "levels": {k: round(v, 4) for k, v in levels.items()},
-        "nearest_support": round(support, 4) if support is not None else None,
+        "levels": levels,
+        "nearest_support": support["price"] if support else None,
         "pct_to_support": _pct_to(support),
         "atr_to_support": _atr_to(support),
-        "support_touch_count": _touch_count(df, support, "low", atr14),
-        "nearest_resistance": round(resistance, 4) if resistance is not None else None,
+        "support_touch_count": support["touches"] if support else None,
+        "support_basis": support["basis"] if support else None,
+        "nearest_resistance": resistance["price"] if resistance else None,
         "pct_to_resistance": _pct_to(resistance),
         "atr_to_resistance": _atr_to(resistance),
-        "resistance_touch_count": _touch_count(df, resistance, "high", atr14),
+        "resistance_touch_count": resistance["touches"] if resistance else None,
+        "resistance_basis": resistance["basis"] if resistance else None,
     }
 
 
@@ -631,38 +721,43 @@ def _resample_weekly(df: pd.DataFrame) -> pd.DataFrame:
     return df.resample("W").agg(agg).dropna(subset=["close"])
 
 
+_WEEKLY_SMA_WEEKS = 40  # about the 200-day average, on weekly bars; also the minimum history for a weekly trend
+
+
 def _multi_timeframe(df: pd.DataFrame) -> dict:
+    """Weekly trend: price against the 40-week SMA and its direction (bullish above a rising one, bearish below a
+    falling one, otherwise mixed), and the weekly RSI zone on the same trend. The weekly trend used to be a 20/50/200
+    weekly SMA stack, which needs about 200 weeks (four years) of history, so any stock listed for less had none
+    (RDDT); 40 weeks is the same horizon as the 200-day average and needs under a year."""
     weekly = _resample_weekly(df)
-    if len(weekly) < 20:
+    if len(weekly) < _WEEKLY_SMA_WEEKS:
         return {"weekly_trend": None, "weekly_rsi_zone": None}
-    weekly_ma = _moving_averages(weekly)
+    close = weekly["close"]
+    sma = close.rolling(_WEEKLY_SMA_WEEKS).mean()
+    price, sma_last = close.iloc[-1], sma.iloc[-1]
+    slope = _slope_label(sma, lookback=4)
+    if pd.isna(sma_last) or slope is None:
+        return {"weekly_trend": None, "weekly_rsi_zone": None}
+    if price > sma_last and slope == "rising":
+        trend = "bullish"
+    elif price < sma_last and slope == "falling":
+        trend = "bearish"
+    else:
+        trend = "mixed"
     weekly_rsi = _ta_result(weekly, weekly.ta.rsi(length=14))
-    rsi_last = _last_or_none(weekly_rsi)
-    return {
-        "weekly_trend": weekly_ma["stack_order"],
-        "weekly_rsi_zone": _rsi_zone_adjusted(rsi_last, weekly_ma["stack_order"]),
-    }
+    return {"weekly_trend": trend, "weekly_rsi_zone": _rsi_zone_adjusted(_last_or_none(weekly_rsi), trend)}
 
 
 # ---------- pattern metrics (MVP proxy, not full geometric recognition) ----------
 
 
-def _pattern_metrics(bb_position: str | None, swing_structure_20d: str | None) -> dict:
-    """Ship the ticket's MVP proxy — squeeze-release + zigzag-swing-direction
-    — not named pattern types with measured-move targets. No pandas-ta
-    coverage exists for multi-bar chart-pattern recognition (confirmed
-    during the ticket's own earlier reconciliation pass); building a
-    custom geometric detector is real, open-ended, failure-prone work
-    out of scope here."""
-    squeeze_release = bb_position == "walking_band"
-    breakout_direction = None
-    if swing_structure_20d in ("HH", "HL"):
-        breakout_direction = "bullish"
-    elif swing_structure_20d in ("LL", "LH"):
-        breakout_direction = "bearish"
+def _pattern_metrics(squeeze_released: bool, squeeze_direction: str | None) -> dict:
+    """The one pattern signal shipped: a squeeze release (the Bollinger bands were squeezed within the last 5
+    sessions and are not now) and the direction of the break. Not named chart patterns: no pandas-ta coverage
+    exists for multi-bar pattern recognition and a custom geometric detector is out of scope."""
     return {
-        "squeeze_release": squeeze_release,
-        "breakout_direction": breakout_direction if squeeze_release else None,
+        "squeeze_release": squeeze_released,
+        "breakout_direction": squeeze_direction if squeeze_released else None,
     }
 
 
@@ -818,10 +913,18 @@ def _price_position(df: pd.DataFrame) -> dict:
 # ---------- pre-flight anomalies ----------
 
 
+_PREFLIGHT_SESSIONS = 252  # the window the indicators and levels are built from (a year of sessions)
+
+
 def _preflight_warnings(df: pd.DataFrame, news_ids: list[dict] | None) -> list[str]:
+    """Data-quality anomalies in the price history the indicators actually use: the last year of sessions, not the
+    whole 5 years fetched. RDDT's 2024-10-30 earnings gap was flagged "with no corresponding news item" on every run
+    (8 of 51), although the news window is 30 days and the gap was a year old: a false anomaly that also forced the
+    agent's data quality down to "low". A gap is only checked against news when it falls inside the news window."""
     warnings: list[str] = []
     if df.empty:
         return warnings
+    df = df.iloc[-_PREFLIGHT_SESSIONS:]
 
     zero_volume_days = int((df["volume"] == 0).sum()) if "volume" in df.columns else 0
     if zero_volume_days:
@@ -841,10 +944,13 @@ def _preflight_warnings(df: pd.DataFrame, news_ids: list[dict] | None) -> list[s
                 news_dates = {
                     pd.Timestamp(item["date"]).date() for item in news_ids if item.get("date")
                 }
+            news_start = min(news_dates) if news_dates else None
             for gap_date in gap_days:
                 d = gap_date.date()
                 if news_ids and d in news_dates:
                     continue
+                if news_start is not None and d < news_start:
+                    continue  # older than the news window: there is nothing to match it against
                 qualifier = "" if news_ids is None else " with no corresponding news item"
                 warnings.append(f">25% gap on {d.isoformat()}{qualifier}")
 
@@ -887,7 +993,7 @@ def compute_all(
 
     ma = _moving_averages(df)
     momentum = _momentum(df, ma["stack_order"])
-    volume = _volume(df)
+    volume = {**_volume(df), **_price_moves(df)}
     bollinger = _bollinger(df)
     volatility = _volatility(df)
 
@@ -896,9 +1002,7 @@ def compute_all(
     support_resistance = _support_resistance(df, volatility["atr_14"])
     trend_structure = _trend_structure(df, sector_etf_price)
     multi_timeframe = _multi_timeframe(df)
-    pattern_metrics = _pattern_metrics(
-        bollinger["bb_position"], trend_structure["swing_structure_20d"]
-    )
+    pattern_metrics = _pattern_metrics(bollinger["squeeze_released"], bollinger["squeeze_direction"])
     market_context = _market_context(benchmark_price)
     liquidity_flags = _liquidity_flags(df)
     earnings_proximity = _earnings_proximity(earnings_calendar, as_of_date)

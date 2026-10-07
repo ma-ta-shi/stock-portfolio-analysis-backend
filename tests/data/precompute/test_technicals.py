@@ -183,13 +183,15 @@ class TestRsiZoneAdjusted:
         assert _rsi_zone_adjusted(65.0, "bearish") == "overbought"
         assert _rsi_zone_adjusted(15.0, "bearish") == "oversold"
 
-    def test_mixed_is_currently_treated_as_a_downtrend(self):
-        # The known gap: mixed falls through to the 60/20 band, identical to
-        # bearish. RSI 70 is "neutral" under uptrend rules but "overbought"
-        # here. If mixed is later given its own band, this fails on purpose.
-        assert _rsi_zone_adjusted(70.0, "mixed") == "overbought"
-        for rsi in (25.0, 55.0, 70.0):
-            assert _rsi_zone_adjusted(rsi, "mixed") == _rsi_zone_adjusted(rsi, "bearish")
+    def test_mixed_and_unknown_stacks_get_the_standard_70_30_band(self):
+        """Decided 2026-10-04 (it fell through to the downtrend 60/20 band before): RSI 65 is neutral in a mixed
+        market, where the downtrend band called it overbought."""
+        for stack in ("mixed", None):
+            assert _rsi_zone_adjusted(65.0, stack) == "neutral"
+            assert _rsi_zone_adjusted(70.5, stack) == "overbought"
+            assert _rsi_zone_adjusted(29.0, stack) == "oversold"
+            assert _rsi_zone_adjusted(25.0, stack) == "oversold" and _rsi_zone_adjusted(35.0, stack) == "neutral"
+        assert _rsi_zone_adjusted(65.0, "bearish") == "overbought"  # the downtrend band is unchanged
 
 
 # ---------- volume ----------
@@ -227,18 +229,21 @@ class TestBollinger:
         ind = result["technical_indicators"]
         assert ind["bb_upper"] is not None
         assert ind["bb_upper"] > ind["bb_lower"]
-        assert ind["bb_position"] in ("squeeze", "walking_band", "mean_reverting")
+        assert ind["bb_regime"] in ("squeeze", "walking_band", "normal")
+        assert ind["bb_percent_b"] is not None
+        assert isinstance(ind["squeeze_released"], bool)
 
     def test_squeeze_needs_more_than_bbands_minimum(self):
         """Regression test: confirmed live that ta.squeeze() still returns
         the identity-df sentinel at exactly 20 rows even though
         ta.bbands(length=20) doesn't — a stricter internal minimum than
-        bbands' own length. bb_position must not crash if squeeze isn't
+        bbands' own length. bb_regime must not crash if squeeze isn't
         available yet, even when the bands themselves are."""
         df = _ohlcv(20)
         result = compute_all(df, df, None, None, None, as_of=_AS_OF)
         ind = result["technical_indicators"]
-        assert ind["bb_position"] in (None, "mean_reverting", "walking_band")
+        assert ind["bb_regime"] in (None, "normal", "walking_band")
+        assert ind["squeeze_released"] is False
 
 
 # ---------- support / resistance ----------
@@ -248,8 +253,8 @@ def test_support_resistance_computed_with_minimal_data():
     df = _ohlcv(5)
     result = compute_all(df, df, None, None, None, as_of=_AS_OF)
     sr = result["support_resistance"]
-    assert "P" in sr["levels"]
-    # nearest support/resistance re-derived from real price comparison, not the pivot label
+    assert sr["levels"], "even 5 sessions give the 52-week high and low as levels"
+    # nearest support/resistance re-derived from real price comparison
     if sr["nearest_support"] is not None:
         assert sr["nearest_support"] < df["close"].iloc[-1] * 1.0001
 
@@ -272,6 +277,8 @@ def test_support_resistance_flat_shape_matches_prompt_template():
         "pct_to_resistance",
         "atr_to_resistance",
         "resistance_touch_count",
+        "support_basis",
+        "resistance_basis",
     ):
         assert key in sr
     if sr["nearest_support"] is not None:
@@ -284,6 +291,70 @@ def test_support_resistance_empty_when_no_data():
     df = pd.DataFrame()
     result = compute_all(df, _ohlcv(5), None, None, None, as_of=_AS_OF)
     assert result["support_resistance"] == {}
+
+
+def _bars(highs, lows, closes=None):
+    closes = closes if closes is not None else [(hi + lo) / 2 for hi, lo in zip(highs, lows)]
+    return pd.DataFrame({"open": closes, "high": highs, "low": lows, "close": closes, "volume": [1000] * len(closes)})
+
+
+def test_swing_points_are_the_extremes_of_five_bars_either_side():
+    from data.precompute.technicals import _swing_points
+
+    highs = [10, 11, 12, 13, 14, 20, 14, 13, 12, 11, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+    lows = [h - 2 for h in highs]
+    lows[10] = 3  # a dip at index 10, the lowest of the 11 bars around it
+    swing_highs, swing_lows = _swing_points(_bars(highs, lows))
+    assert swing_highs == [20.0]  # index 5 is the high of the 11 bars around it
+    assert swing_lows == [3.0]
+
+
+def test_the_last_five_sessions_cannot_be_swing_points():
+    from data.precompute.technicals import _swing_points
+
+    highs = [10.0] * 10 + [30.0]  # a new high on the last bar is not yet confirmed
+    swing_highs, _ = _swing_points(_bars(highs, [h - 1 for h in highs]))
+    assert 30.0 not in swing_highs
+
+
+def test_levels_within_one_atr_are_merged_and_touches_count_only_swing_points():
+    from data.precompute.technicals import _structural_levels
+
+    # two swing lows 0.4 apart (inside 1.0 ATR) form one level with 2 touches; a distant swing high is its own level
+    lows = [105, 104, 103, 102, 101, 100.0, 101, 102, 103, 104, 105, 104, 103, 102, 101, 100.4, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110]
+    highs = [lo + 2 for lo in lows]
+    levels = _structural_levels(_bars(highs, lows), atr14=1.0)
+    lows_level = [lv for lv in levels if lv["price"] < 102]
+    assert len(lows_level) == 1 and lows_level[0]["touches"] == 2 and "swing" in lows_level[0]["basis"]
+    assert all("price" in lv and "touches" in lv and "basis" in lv for lv in levels)
+
+
+def test_a_stock_at_its_52_week_high_has_no_resistance_and_the_rest_still_resolves():
+    n = 120
+    closes = [100 + i * 0.5 for i in range(n)]
+    df = _bars(closes, [c - 1.0 for c in closes], closes)  # each close is that session's high: price is AT the 52-week high
+    sr = _support_resistance_for(df)
+    assert sr["nearest_resistance"] is None and sr["resistance_touch_count"] is None and sr["resistance_basis"] is None
+    assert sr["nearest_support"] is not None and sr["atr_to_support"] is not None
+
+
+def test_levels_do_not_move_with_a_flat_day_the_way_daily_pivots_did():
+    """The pivots moved about 0.4 ATR a day; structural levels over a year of history barely move with one more session."""
+    from data.precompute.technicals import _support_resistance
+
+    df = _ohlcv(300, trend_total=20, seed=11)
+    atr = float((df["high"] - df["low"]).tail(14).mean())
+    a = _support_resistance(df.iloc[:-1], atr)
+    b = _support_resistance(df, atr)
+    if a["nearest_support"] is not None and b["nearest_support"] is not None:
+        assert abs(a["nearest_support"] - b["nearest_support"]) < 0.5 * atr
+
+
+def _support_resistance_for(df):
+    from data.precompute.technicals import _support_resistance
+
+    atr = float((df["high"] - df["low"]).tail(14).mean())
+    return _support_resistance(df, atr)
 
 
 # ---------- trend structure (zigzag tuning) ----------
@@ -342,24 +413,28 @@ def test_multi_timeframe_none_on_too_little_weekly_data():
     assert result["multi_timeframe"] == {"weekly_trend": None, "weekly_rsi_zone": None}
 
 
-def test_multi_timeframe_rsi_zone_populates_before_weekly_trend_does():
-    """Real gap found reviewing this module: weekly_trend reuses
-    _moving_averages' stack_order, which needs sma_200 -- on WEEKLY bars
-    that's 200 weeks (~4 years) of daily history, far more than the ~2
-    years typical callers fetch. Confirmed live against real router-fetched
-    AAPL/RY.TO price history (2y each): weekly_rsi_zone populated on both,
-    weekly_trend was None on both. ~2.5 years of daily data (enough for
-    ~130 weekly bars, short of the 200 sma_200 needs but past the 14-bar
-    weekly RSI minimum) reproduces the same split here."""
+def test_weekly_trend_needs_40_weeks_not_200():
+    """RDDT 2026-10-03 had weekly_trend None (a 20/50/200 weekly stack needs about four years of history). Now price
+    against the 40-week SMA: about 2.5 years of daily data gives a trend; under 40 weeks gives none."""
     df = _ohlcv(650, trend_total=60, seed=11)
     result = compute_all(df, df, None, None, None, as_of=_AS_OF)
+    assert result["multi_timeframe"]["weekly_trend"] in ("bullish", "bearish", "mixed")
     assert result["multi_timeframe"]["weekly_rsi_zone"] is not None
-    assert result["multi_timeframe"]["weekly_trend"] is None
+    short = _ohlcv(150, trend_total=10, seed=3)  # about 30 weekly bars
+    result = compute_all(short, short, None, None, None, as_of=_AS_OF)
+    assert result["multi_timeframe"]["weekly_trend"] is None and result["multi_timeframe"]["weekly_rsi_zone"] is None
+
+
+def test_a_squeeze_release_is_a_released_squeeze_not_a_band_walk():
+    from data.precompute.technicals import _pattern_metrics
+
+    assert _pattern_metrics(True, "bullish") == {"squeeze_release": True, "breakout_direction": "bullish"}
+    assert _pattern_metrics(False, "bullish") == {"squeeze_release": False, "breakout_direction": None}
+    assert _pattern_metrics(True, None) == {"squeeze_release": True, "breakout_direction": None}
 
 
 def test_multi_timeframe_weekly_trend_populates_with_enough_history():
-    """~5 years of daily data gives >200 weekly bars, enough for weekly
-    sma_200 -- and therefore stack_order/weekly_trend -- to resolve."""
+    """~5 years of daily data: the weekly trend resolves."""
     df = _ohlcv(1300, trend_total=150, seed=12)
     result = compute_all(df, df, None, None, None, as_of=_AS_OF)
     assert result["multi_timeframe"]["weekly_trend"] in ("bullish", "bearish", "mixed")
@@ -571,3 +646,50 @@ def test_empty_raw_price_returns_fully_degraded_bundle():
     assert result["technical_indicators"] == {}
     assert result["is_current"] is False
     assert "no price history available" in result["preflight_warnings"]
+
+
+def test_a_gap_older_than_the_news_window_or_the_indicator_year_is_not_an_anomaly():
+    """RDDT 2026-10-03: a 2024-10-30 earnings gap was flagged 'with no corresponding news item' on 8 of 51 runs."""
+    df = _ohlcv(400)
+    open_col = df.columns.get_loc("open")
+    close_col = df.columns.get_loc("close")
+    df.iloc[20, open_col] = df.iloc[19, close_col] * 1.5  # 380 sessions ago: outside the year the indicators use
+    result = compute_all(df, df, None, None, [{"id": "N1", "date": df.index[-3].date().isoformat()}], as_of=_AS_OF)
+    assert [w for w in result["preflight_warnings"] if "gap" in w] == []
+
+    df2 = _ohlcv(400)
+    df2.iloc[200, open_col] = df2.iloc[199, close_col] * 1.5  # inside the year, but before the news window starts
+    result = compute_all(df2, df2, None, None, [{"id": "N1", "date": df2.index[-3].date().isoformat()}], as_of=_AS_OF)
+    assert [w for w in result["preflight_warnings"] if "gap" in w] == []
+
+    df3 = _ohlcv(400)
+    df3.iloc[395, open_col] = df3.iloc[394, close_col] * 1.5  # inside the news window and unmatched: still flagged
+    result = compute_all(df3, df3, None, None, [{"id": "N1", "date": df3.index[-8].date().isoformat()}], as_of=_AS_OF)
+    assert len([w for w in result["preflight_warnings"] if "gap" in w]) == 1
+
+
+def test_price_moves_and_the_up_down_volume_ratio():
+    """KO 2026-10-03: heavy volume on a down day was called "confirming" because the agent saw the volume ratio
+    and no price change at all."""
+    from data.precompute.technicals import _price_moves
+
+    closes = [100.0 + i for i in range(25)]  # up every day
+    volume = [1000] * 25
+    df = pd.DataFrame({"open": closes, "high": closes, "low": closes, "close": closes, "volume": volume})
+    moves = _price_moves(df)
+    assert moves["price_change_1d_pct"] == round((124 / 123 - 1) * 100, 2)
+    assert moves["price_change_5d_pct"] == round((124 / 119 - 1) * 100, 2)
+    assert moves["up_down_volume_ratio_20"] is None  # no down session in the window: nothing to divide by
+
+    closes2 = [100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100, 101, 100.5]
+    vols = [2000 if c2 > c1 else 1000 for c1, c2 in zip([99] + closes2[:-1], closes2)]
+    df2 = pd.DataFrame({"open": closes2, "high": closes2, "low": closes2, "close": closes2, "volume": vols})
+    assert _price_moves(df2)["up_down_volume_ratio_20"] == 2.0  # volume leans with the up sessions
+
+
+def test_price_moves_are_none_without_enough_history():
+    from data.precompute.technicals import _price_moves
+
+    df = pd.DataFrame({"open": [1.0, 2.0], "high": [1.0, 2.0], "low": [1.0, 2.0], "close": [1.0, 2.0], "volume": [10, 10]})
+    moves = _price_moves(df)
+    assert moves["price_change_1d_pct"] == 100.0 and moves["price_change_5d_pct"] is None and moves["up_down_volume_ratio_20"] is None

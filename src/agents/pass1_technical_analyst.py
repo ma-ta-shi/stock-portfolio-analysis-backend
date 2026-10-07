@@ -75,16 +75,20 @@ from agents.validators.pass1 import (
     validate_technical_analyst,
     validate_thin_volume_caveat,
 )
+from data.precompute.technical_signals import decided_fields, primary_trend
 from data.schemas.data_bundle import DataBundle
 
 _STALE_PRICE_DAYS = 5
+
+# The broad index each market's regime is read from (the benchmark ticker the pipeline used).
+_INDEX_NAMES = {"^GSPC": "S&P 500", "^GSPTSE": "S&P/TSX Composite"}
 
 # Only 4 fields, all worth a coverage-line mention directly -- unlike
 # Fundamental Analyst's 15-key missing_fields map, no coarse/granular split
 # needed here.
 _COVERAGE_GAP_SENTENCES = {
     "earnings_proximity": "no earnings calendar data available",
-    "weekly_timeframe": "no weekly timeframe data available (insufficient price history)",
+    "weekly_timeframe": "no weekly trend available (under 40 weeks of price history)",
     "sector_relative_strength": "no sector relative strength data available",
     "support_resistance": "no support/resistance levels could be resolved",
 }
@@ -98,6 +102,11 @@ def _stale_data(days_old: int) -> list[str]:
     """86bbummwp Tier 2 -- see the module docstring for why this uses
     `days_old` and not `is_current`."""
     return ["price"] if days_old > _STALE_PRICE_DAYS else []
+
+
+def _price(v) -> str:
+    """The current price to cents (the quote came through as 215.86000061035156)."""
+    return "N/A" if v is None else f"{v:.2f}"
 
 
 def _fmt(v, suffix: str = ""):
@@ -193,13 +202,31 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     if avg_dollar_vol is not None and avg_dollar_vol < 1_000_000:
         volume_flag = f"\n⚠️ THIN VOLUME: avg_dollar_volume_20=${avg_dollar_vol:,.0f} (<$1M) — soft thin-volume caveat required."
 
+    def _level(side: str) -> str:
+        price = sr.get(f"nearest_{side}")
+        if price is None:
+            return "none (no level on this side)"
+        return (
+            f"{price} ({_fmt(sr.get(f'pct_to_{side}'), '%')}, {_fmt(sr.get(f'atr_to_{side}'))} ATR, "
+            f"touches={_fmt(sr.get(f'{side}_touch_count'))}, {_fmt(sr.get(f'{side}_basis'))})"
+        )
+
+    squeeze_line = ""
+    if pm.get("squeeze_release"):
+        squeeze_line = (
+            f"\n\nPATTERN (PAT):\n  Squeeze release in the last 5 sessions, direction: {_fmt(pm.get('breakout_direction'))}"
+        )
+    index_name = _INDEX_NAMES.get(getattr(bundle, "benchmark_ticker", None), "broad index")
+    # Under 200 sessions there is no 200-day average, so the trend comes from the 20 and 50 day averages and says so.
+    trend_basis = "SMA stack order" if ti.get("stack_order") else "20/50-day averages only, under 200 sessions of history"
+
     text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
 Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{earnings_flag}{volume_flag}
 
 EARNINGS PROXIMITY: {_fmt(earnings_days, ' days')}
 
 PRICE DATA:
-  Current: {bundle.price_info.get('current_price')} {bundle.stock.currency}
+  Current: {_price(bundle.price_info.get('current_price'))} {bundle.stock.currency}
   52w High: {_fmt(pp.get('high_52w'))} | 52w Low: {_fmt(pp.get('low_52w'))}
   % from 52w high: {_fmt(pp.get('pct_from_52w_high'), '%')} | % from 52w low: {_fmt(pp.get('pct_from_52w_low'), '%')}
   Beta: {_fmt(bundle.risk_metrics.get('beta'))}
@@ -208,45 +235,40 @@ VOLUME (VOL):
   Avg daily volume (20d): {_fmt(ti.get('volume_avg_20'))} shares
   Avg dollar volume (20d): {avg_dollar_vol_str}
   Volume today: {_fmt(ti.get('volume_today'))} | Volume ratio vs 20d avg: {_fmt(ti.get('volume_ratio_today'))}
+  Price change: 1d {_fmt(ti.get('price_change_1d_pct'), '%')} | 5d {_fmt(ti.get('price_change_5d_pct'), '%')} | 20d {_fmt(ti.get('price_change_20d_pct'), '%')}
+  Up-day volume / down-day volume (20d): {_fmt(ti.get('up_down_volume_ratio_20'))}
 
 TREND (TREND):
-  Stack order: {_fmt(ti.get('stack_order'))} | SMA20/50/200 slope: {_fmt(ti.get('sma_50_slope'))}/{_fmt(ti.get('sma_200_slope'))}
+  Primary trend ({trend_basis}): {_fmt(primary_trend(ti))} | SMA20/50/200: {_fmt(ti.get('sma_20'))}/{_fmt(ti.get('sma_50'))}/{_fmt(ti.get('sma_200'))}
+  SMA50/200 slope: {_fmt(ti.get('sma_50_slope'))}/{_fmt(ti.get('sma_200_slope'))}
   Price vs SMA20/50/200: {_fmt(ti.get('price_vs_sma20_pct'), '%')}/{_fmt(ti.get('price_vs_sma50_pct'), '%')}/{_fmt(ti.get('price_vs_sma200_pct'), '%')}
-  Swing structure (20d): {_fmt(ts.get('swing_structure_20d'))} | Weekly: {_fmt(ts.get('trend_structure_weekly'))}
+  Swing structure (20d): {_fmt(ts.get('swing_structure_20d'))} | Weekly swing structure: {_fmt(ts.get('trend_structure_weekly'))}
+  Weekly trend (price vs 40-week SMA): {_fmt(mtf.get('weekly_trend'))}
   RS vs sector (3mo): {_fmt(ts.get('rs_vs_sector_3mo'), '%')} | Leadership: {_fmt(ts.get('rs_leadership'))}
-  Weekly trend: {_fmt(mtf.get('weekly_trend'))}
 
 MOMENTUM (MOMO):
-  RSI(14): {_fmt(ti.get('rsi_14'))} | RSI zone (adjusted): {_fmt(ti.get('rsi_zone_adjusted'))}
-  MACD line/signal/histogram: {_fmt(ti.get('macd_line'))}/{_fmt(ti.get('macd_signal'))}/{_fmt(ti.get('macd_histogram'))}
+  RSI(14): {_fmt(ti.get('rsi_14'))} | RSI zone (trend-adjusted): {_fmt(ti.get('rsi_zone_adjusted'))} | Weekly RSI zone: {_fmt(mtf.get('weekly_rsi_zone'))}
+  MACD line/signal/histogram: {_fmt(ti.get('macd_line'))}/{_fmt(ti.get('macd_signal'))}/{_fmt(ti.get('macd_histogram'))} (histogram 3 sessions ago: {_fmt(ti.get('macd_histogram_3d_ago'))})
   MACD recent cross: {_fmt(ti.get('macd_recent_cross'))} | Divergence: {_fmt(ti.get('divergence'))}
-  Weekly RSI zone: {_fmt(mtf.get('weekly_rsi_zone'))}
 
-SUPPORT / RESISTANCE (SR):
-  Nearest support: {_fmt(sr.get('nearest_support'))} ({_fmt(sr.get('pct_to_support'), '%')}, {_fmt(sr.get('atr_to_support'))} ATR, touches={_fmt(sr.get('support_touch_count'))})
-  Nearest resistance: {_fmt(sr.get('nearest_resistance'))} ({_fmt(sr.get('pct_to_resistance'), '%')}, {_fmt(sr.get('atr_to_resistance'))} ATR, touches={_fmt(sr.get('resistance_touch_count'))})
+SUPPORT / RESISTANCE (SR), structural levels over the last year:
+  Nearest support: {_level('support')}
+  Nearest resistance: {_level('resistance')}
 
 VOLATILITY (VOLA):
-  ATR(14): {_fmt(ti.get('atr_14'))} | ATR(60d avg): {_fmt(ti.get('atr_60_avg'))}
-  Volatility regime: {_fmt(ti.get('volatility_regime_derived'))}
+  ATR(14): {_fmt(ti.get('atr_14'))} | ATR(60d avg): {_fmt(ti.get('atr_60_avg'))} | Regime: {_fmt(ti.get('volatility_regime_derived'))}
+  Bollinger bands lower/middle/upper: {_fmt(ti.get('bb_lower'))}/{_fmt(ti.get('bb_middle'))}/{_fmt(ti.get('bb_upper'))} | Price at {_fmt(ti.get('bb_percent_b'), '%')} of the band (0% = lower band, 100% = upper band)
+  Band width: {_fmt(ti.get('bb_width_pct'), '%')} ({_fmt(ti.get('bb_width_percentile'))}th percentile of 6 months) | Band regime: {_fmt(ti.get('bb_regime'))}{squeeze_line}
 
-PATTERN (PAT):
-  Bollinger position: {_fmt(ti.get('bb_position'))} | Width pct: {_fmt(ti.get('bb_width_pct'), '%')}
-  Squeeze release: {pm.get('squeeze_release', False)} | Breakout direction: {_fmt(pm.get('breakout_direction'))}
-
-MARKET REGIME:
-  {_fmt(bundle.market_context.get('market_regime'))}"""
+MARKET REGIME ({index_name}, REGIME): {_fmt(bundle.market_context.get('market_regime'))}"""
 
     field_presence = {
         "earnings_proximity": earnings_days is not None,
         "weekly_timeframe": mtf.get("weekly_trend") is not None,
         "sector_relative_strength": ts.get("rs_leadership") is not None,
-        # nearest_support/nearest_resistance always go missing together --
-        # _support_resistance() returns its whole empty dict as one unit
-        # when pivots can't resolve at all -- so checking one is a
-        # sufficient, accurate proxy for the pair, unlike Stock
-        # Researcher's dividend yield/payout ratio (genuinely independent).
-        "support_resistance": sr.get("nearest_support") is not None,
+        # Either side can be missing alone (a stock at its 52-week high has no resistance), so the flag
+        # is "no level at all", which only happens when there is no price history to build levels from.
+        "support_resistance": sr.get("nearest_support") is not None or sr.get("nearest_resistance") is not None,
     }
     return text, field_presence
 
@@ -256,8 +278,6 @@ class TechnicalAnalystRunner(BaseRunner):
         self.current_agent = "TECH"
         ctx = bundle.context
         sr = bundle.support_resistance
-        ts = bundle.trend_structure
-        mtf = bundle.multi_timeframe
         ti = bundle.technical_indicators
         ep = bundle.earnings_proximity
         liq = bundle.liquidity_flags
@@ -288,21 +308,13 @@ class TechnicalAnalystRunner(BaseRunner):
                 "company_name": bundle.company_info.get("name"),
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
-                "timeline_instruction": f"Timeline: {ctx.timeline}.",
                 "data_coverage_line": _data_coverage_line(field_presence),
                 "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
                 "memory_brief": "",
                 "earnings_proximity_days": str(ep.get("earnings_proximity_days", "N/A")),
-                "nearest_support": str(sr.get("nearest_support", "N/A")),
-                "nearest_resistance": str(sr.get("nearest_resistance", "N/A")),
-                "weekly_trend": str(mtf.get("weekly_trend", "N/A")),
-                "rs_leadership": str(ts.get("rs_leadership", "N/A")),
-                "rsi_zone_adjusted": str(ti.get("rsi_zone_adjusted", "N/A")),
-                "volatility_regime_derived": str(ti.get("volatility_regime_derived", "N/A")),
-                "weekly_rsi_zone": str(mtf.get("weekly_rsi_zone", "N/A")),
             },
         )
-        return await self.call_with_validation(
+        result, warnings = await self.call_with_validation(
             system_prompt,
             user_msg,
             partial(
@@ -316,3 +328,11 @@ class TechnicalAnalystRunner(BaseRunner):
             max_tokens=3500,
             temperature=0.3,
         )
+        # Fields the inputs decide are written by code, after the model returns (see technical_signals.py): the
+        # model is not asked for them, and a stored output carries them like any other interpretive field.
+        if isinstance(result, dict):
+            itf = result.get("interpretive_fields")
+            itf = itf if isinstance(itf, dict) else {}
+            itf.update(decided_fields(itf, ti, sr))
+            result["interpretive_fields"] = itf
+        return result, warnings
