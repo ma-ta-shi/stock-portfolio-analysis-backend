@@ -132,6 +132,22 @@ def _fcf(fin: NormalizedFinancials) -> float | None:
     return ocf - abs(capex)
 
 
+def _ebit_and_da(fin: NormalizedFinancials) -> tuple[float | None, float | None]:
+    """Operating income and D&A for EBITDA: trailing twelve months where the filer reports an operating income line,
+    else the last fiscal year's net income + income tax + interest expense. Oil majors (XOM, COP, CVX) have no
+    OperatingIncomeLoss, so EV/EBITDA and interest cover were empty for all three; the fallback is a single fiscal-year
+    basis (D&A from the same year) so the two figures never mix periods."""
+    operating_income = _ttm_metric(fin, "operating_income")
+    if operating_income is not None:
+        return operating_income, _ttm_metric(fin, "depreciation_amortization")
+    year = fin.annual[0] if fin.annual else None
+    if year is not None:
+        net_income, tax, interest = year.get("net_income"), year.get("tax_expense"), year.get("interest_expense")
+        if net_income is not None and tax is not None and interest is not None:
+            return net_income + tax + abs(interest), year.get("depreciation_amortization")
+    return None, _ttm_metric(fin, "depreciation_amortization")
+
+
 def _ev_ebitda(fin: NormalizedFinancials, price_info: NormalizedQuote) -> float | None:
     """Always computed when data allows, not conditionally skipped for
     non-capital-intensive sectors — the live prompt's own CAPITAL_INTENSIVE
@@ -140,8 +156,7 @@ def _ev_ebitda(fin: NormalizedFinancials, price_info: NormalizedQuote) -> float 
 
     EBITDA is a trailing-twelve-month figure (86bbxuj9e — was one quarter,
     which made EV/EBITDA ~4x too high on both paths)."""
-    operating_income = _ttm_metric(fin, "operating_income")
-    depreciation = _ttm_metric(fin, "depreciation_amortization")
+    operating_income, depreciation = _ebit_and_da(fin)
     if operating_income is None or depreciation is None:
         return None
     ebitda = operating_income + depreciation
@@ -311,6 +326,10 @@ def compute_growth_metrics(
         if prev_eps and annual[0].get("eps") is not None:
             eps_growth_yoy = (annual[0]["eps"] - prev_eps) / prev_eps
     revenue_growth_yoy, revenue_growth_yoy_basis = _latest_revenue_yoy(fin)
+    if earnings_surprises:
+        # Newest first for both markets: FMP (US) returns newest first but yfinance (Canada) returns oldest first, and the
+        # payload takes the first rows, so every Canadian name showed its two OLDEST of four quarters.
+        earnings_surprises = sorted(earnings_surprises, key=lambda s: s.get("period_end") or "", reverse=True)
     return {
         "revenue_growth_yoy": revenue_growth_yoy,
         "revenue_growth_yoy_basis": revenue_growth_yoy_basis,
@@ -402,11 +421,16 @@ def compute_balance_sheet_metrics(fin: NormalizedFinancials) -> dict:
 
     # Operating income over interest expense for the latest quarter, else for the last fiscal year when the quarterly
     # filing carries no interest line (a 10-Q often omits it: MSFT's did, its annual report has 3.05B against 155B).
+    # Interest expense is taken as a magnitude: US 10-Q filers tag it with either sign (COST -32M, V -39M, BLK -134M but
+    # XOM +227M), which gave profitable companies a coverage of -88, -158 and -18. A period with no operating income line
+    # uses net income + tax + interest (the same fallback as EBITDA).
     interest_coverage = None
     for period in [*fin.quarters[:1], *fin.annual[:1]]:
         operating_income, interest_expense = period.get("operating_income"), period.get("interest_expense")
+        if operating_income is None and None not in (period.get("net_income"), period.get("tax_expense"), interest_expense):
+            operating_income = period["net_income"] + period["tax_expense"] + abs(interest_expense)
         if operating_income is not None and interest_expense:
-            interest_coverage = operating_income / interest_expense
+            interest_coverage = operating_income / abs(interest_expense)
             break
 
     return {
@@ -559,24 +583,64 @@ def compute_dividend_info(
     }
 
 
-# Metrics that do not exist for a kind of company, so an empty value is not a data gap. Banks have no gross or operating
-# margin, current ratio or EBITDA and no interest coverage (interest is their cost of goods); REIT earnings are
-# depreciation-distorted (the figure that matters, FFO, is unavailable), so earnings multiples and payout read as gaps.
+# REIT earnings are depreciation-distorted (the figure that matters, FFO, is unavailable), so an empty earnings multiple or
+# payout is not a data gap. Banks, insurers, utilities and pre-profit companies are handled by the metric profile below
+# (_GROUP_HIDDEN), which replaced this table's bank entry.
 _NOT_APPLICABLE = {
-    "bank": ("operating_margin", "gross_margin", "current_ratio", "interest_coverage", "ev_ebitda"),
     "REIT": ("pe_ratio", "peg_ratio", "payout_ratio"),
 }
 
 
 def _company_kind(industry: str | None) -> str | None:
-    """"bank" or "REIT" from the industry string either provider uses ("Banking" / "Banks - Diversified",
-    "REITs" / "REIT - Residential"), else None."""
+    """"REIT" from the industry string either provider uses ("REITs" / "REIT - Residential"), else None."""
     text = (industry or "").lower()
-    if "bank" in text:
-        return "bank"
     if "reit" in text:
         return "REIT"
     return None
+
+
+# One decision per stock about WHAT TO JUDGE IT ON (2026-10, ledger BB-106). Four groups; anything not recognised is
+# "standard". A hidden metric is not shown to the Fundamental agent or the Pass 2 view and is not counted as missing,
+# so a bank is not marked down for a D/E or FCF/NI that does not describe a bank, and nothing downstream reads "N/A" as
+# a risk. REITs stay in "standard" with the existing REIT handling (FFO valuation is not built).
+_CAPITAL_INTENSIVE_WORDS = ("utilit", "telecom", "oil & gas", "oil and gas", "regulated", "midstream", "pipeline", "independent power")
+_GROUP_HIDDEN = {
+    "financials": ("operating_margin", "gross_margin", "current_ratio", "interest_coverage", "debt_to_equity",
+                   "fcf_to_net_income", "free_cash_flow", "ev_ebitda", "ps_ratio"),
+    "capital_intensive": ("gross_margin", "current_ratio", "fcf_to_net_income", "free_cash_flow"),
+    "pre_profit": ("pe_ratio", "forward_pe", "peg_ratio", "roe", "payout_ratio", "interest_coverage", "ev_ebitda",
+                   "fcf_to_net_income"),
+    # EV/EBITDA is only for capital-intensive companies (the design doc's conditional); the FCF value only for pre-profit.
+    "standard": ("ev_ebitda", "free_cash_flow"),
+}
+_GROUP_LENS = {
+    "financials": "Value on P/B against ROE, with P/E. Judge strength on ROE, ROA and equity to assets, not on debt, margins "
+                  "or cash flow, which do not describe a bank or insurer.",
+    "capital_intensive": "Weigh EV/EBITDA and leverage (D/E, interest cover) with payout and yield. Heavy capital spending makes "
+                         "low free cash flow and a low current ratio normal here, so they are not concerns.",
+    "pre_profit": "Not profitable: weigh P/S, gross margin and revenue growth against cash burn and runway. P/E, ROE and "
+                  "payout do not apply.",
+    "standard": "",
+}
+_GROUP_LIMITS = {
+    "financials": "credit quality, capital ratios and efficiency are not available for banks and insurers",
+    "capital_intensive": "the payout shown is on reported earnings; distributable cash flow, the usual coverage measure here, is not available",
+}
+
+
+def metric_group(industry: str | None, pe_ratio: float | None, ttm_net_income: float | None) -> str:
+    """"financials" (banks and insurers), "capital_intensive" (utilities, telecom, oil and gas, pipelines), "pre_profit"
+    (no P/E and a trailing loss) or "standard". From the industry text either provider uses."""
+    text = (industry or "").lower()
+    if "bank" in text or ("insurance" in text and "broker" not in text):
+        return "financials"  # brokers (AJG, MMC) are fee businesses with real debt and cash flow, not balance-sheet insurers
+    if _company_kind(industry) == "REIT":
+        return "standard"
+    if any(word in text for word in _CAPITAL_INTENSIVE_WORDS) and "equipment" not in text:  # oil services (SLB, HAL) are not
+        return "capital_intensive"
+    if (pe_ratio is None or pe_ratio <= 0) and ttm_net_income is not None and ttm_net_income <= 0:
+        return "pre_profit"
+    return "standard"
 
 
 def _not_applicable(industry: str | None, **buckets: dict) -> dict | None:
@@ -593,6 +657,45 @@ def _not_applicable(industry: str | None, **buckets: dict) -> dict | None:
                     empty.append(field)
                 break
     return {"reason": kind, "fields": empty} if empty else None
+
+
+_SURPRISE_MARGIN_PCT = 2.0  # a beat or a miss counts only past +/-2%
+
+
+def earnings_surprise_pattern(surprises: list[dict] | None) -> str:
+    """"above", "inline", "below" or "not_available" from the last four reported quarters' EPS against the consensus
+    estimate. This is what the Fundamental output's `guidance_vs_consensus` field has always actually been (there is no
+    guidance source), and the model wrote it inconsistently: for the same all-beats input, "above" 22 times, "not_available"
+    25, "inline" 4, "below" 2. Counts, not the average surprise, because a near-zero estimate gives absurd percentages
+    (INTC 3162%, BA -214%). Beats are the norm (most large companies beat), so "above" means a beat past 2% in all but at
+    most one of the quarters; two or more misses past 2% is "below"; anything else is "inline"."""
+    values = [s.get("eps_surprise_pct") for s in (surprises or [])[:4] if s.get("eps_surprise_pct") is not None]
+    if len(values) < 2:
+        return "not_available"
+    beats = sum(1 for v in values if v > _SURPRISE_MARGIN_PCT)
+    misses = sum(1 for v in values if v < -_SURPRISE_MARGIN_PCT)
+    if misses >= 2:
+        return "below"
+    if beats >= len(values) - 1 and beats >= 2:
+        return "above"
+    return "inline"
+
+
+def _add_group_metrics(group: str, fin: NormalizedFinancials, profitability: dict, balance_sheet: dict) -> None:
+    """The few ratios a group is judged on that are not computed for everyone, added only for that group (so they are
+    never a "missing" field elsewhere): financials get ROA and equity to assets, pre-profit companies get the cash runway."""
+    bs = fin.balance_sheet
+    if group == "financials":
+        assets, equity = bs.get("total_assets"), bs.get("total_equity")
+        net_income = _ttm_metric(fin, "net_income")
+        profitability["roa"] = net_income / assets if net_income is not None and assets else None
+        balance_sheet["equity_to_assets"] = equity / assets if equity is not None and assets else None
+    elif group == "pre_profit":
+        fcf, cash = balance_sheet.get("free_cash_flow"), balance_sheet.get("cash_position")
+        # Quarters of cash left at the trailing burn; None when cash flow is positive (self-funding) or unknown.
+        balance_sheet["cash_runway_quarters"] = (
+            cash / (abs(fcf) / 4) if fcf is not None and fcf < 0 and cash is not None else None
+        )
 
 
 def compute_all(
@@ -635,7 +738,15 @@ def compute_all(
     not_applicable = _not_applicable(
         industry, valuation=valuation, profitability=profitability, balance_sheet=balance_sheet, dividend=dividend
     )
-    skip = set(not_applicable["fields"]) if not_applicable else set()
+    group = metric_group(industry, valuation.get("pe_ratio"), _ttm_metric(fin, "net_income"))
+    _add_group_metrics(group, fin, profitability, balance_sheet)
+    metric_profile = {
+        "group": group,
+        "hidden": list(_GROUP_HIDDEN[group]),
+        "lens": _GROUP_LENS[group],
+        "limits": _GROUP_LIMITS.get(group, ""),
+    }
+    skip = (set(not_applicable["fields"]) if not_applicable else set()) | set(_GROUP_HIDDEN[group])
 
     missing_fields = [
         f"{bucket_name}.{key}"
@@ -659,6 +770,7 @@ def compute_all(
         "missing_fields": missing_fields,
         "currency_mismatch": currency_mismatch,
         "not_applicable": not_applicable,
+        "metric_profile": metric_profile,
         # 86bbummwp Tier 2 -- already fetched on every quarter (NormalizedFinancials'
         # own docstring), never forwarded past this function before now. Fundamental
         # Analyst's only real freshness signal for stale_data.

@@ -114,8 +114,11 @@ class DataBundle(ContractModel):
     # means no rate or an unsupported pair and the multiples were dropped. A quality flag, not a presence flag -- deliberately NOT folded
     # into input_field_coverage's {field: bool} map, which only answers "was this
     # present," not "is this present value trustworthy."
-    not_applicable: dict | None = None  # {reason: "bank"|"REIT", fields: [...]}: metrics that do not exist
+    not_applicable: dict | None = None  # {reason: "REIT", fields: [...]}: metrics that do not exist
     # for this kind of company and came out empty, so the payloads say "not applicable" instead of a data gap.
+    metric_profile: dict | None = None  # {group: "financials"|"capital_intensive"|"pre_profit"|"standard", hidden: [...],
+    # lens: str, limits: str}: what this stock is judged on (fundamentals.py::metric_group). The Fundamental payload and
+    # Pass 2 view leave the hidden metrics out entirely instead of marking them N/A.
     latest_financials_period_end: str | None  # ISO "YYYY-MM-DD", the newest quarter's
     # own period_end (fundamentals.py::compute_all()'s own new return key, 86bbummwp
     # Tier 2) -- was fetched (NormalizedFinancials.quarters[0]["period_end"]) but never

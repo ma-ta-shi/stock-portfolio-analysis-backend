@@ -46,6 +46,10 @@ _INCOME_CONCEPTS = {
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
         "RevenueFromContractWithCustomerIncludingAssessedTax",
+        # Banks (JPM tags total net revenue this way, with no "Revenues" line) and regulated utilities (DUK): both had no
+        # revenue, so no net margin, margin trend or P/S.
+        "RevenuesNetOfInterestExpense",
+        "RegulatedAndUnregulatedOperatingRevenue",
     ],
     "cost_of_revenue": ["CostOfGoodsAndServicesSold", "CostOfRevenue"],
     "operating_income": ["OperatingIncomeLoss"],
@@ -64,6 +68,7 @@ _INCOME_CONCEPTS = {
         "InterestExpense",
         "InterestExpenseNonoperating",
         "InterestAndDebtExpense",
+        "InterestExpenseDebt",  # CVX
     ],
 }
 _CASHFLOW_CONCEPTS = {

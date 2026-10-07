@@ -457,6 +457,7 @@ class DataPipeline:
                 missing_fields=fundamentals_result["missing_fields"],
                 currency_mismatch=fundamentals_result["currency_mismatch"],
                 not_applicable=fundamentals_result["not_applicable"],
+                metric_profile=fundamentals_result.get("metric_profile"),
                 latest_financials_period_end=fundamentals_result["latest_financials_period_end"],
                 technical_indicators=technicals_result["technical_indicators"],
                 support_resistance=technicals_result["support_resistance"],
