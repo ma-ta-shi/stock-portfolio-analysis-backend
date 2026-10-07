@@ -1007,6 +1007,18 @@ def test_deanonymize_text_fields_reverses_multiple_peers_in_nested_structured_da
     )
 
 
+def test_deanonymize_text_fields_replaces_the_bare_peer_tokens_the_model_is_told_to_write():
+    """The Researcher prompt says to cite `PEER_{num}`; only `PEER_n_COMPANY` used to be reversed, so Pass 2 read PEER_1."""
+    response = {"narrative": "Scale beats PEER_2 (PEER_1, PEER_2); PEER_1_COMPANY is smaller; PEER_3 and PEER_10 are unknown.",
+                "structured_data": {"peer_comparison_summary": "Larger than PEER_1."}}
+
+    result = deanonymize_text_fields(response, "Royal Bank of Canada", "RY", {"PEER_1": "Toronto-Dominion", "PEER_2": "Bank of Montreal"})
+
+    assert result["narrative"] == ("Scale beats Bank of Montreal (Toronto-Dominion, Bank of Montreal); Toronto-Dominion is smaller; "
+                                   "PEER_3 and PEER_10 are unknown.")
+    assert result["structured_data"]["peer_comparison_summary"] == "Larger than Toronto-Dominion."
+
+
 def test_deanonymize_text_fields_is_a_no_op_on_headline_shaped_text():
     """86bawptxr's own explicit requirement, kept as a defensive test even
     though the real merge order already prevents this case in practice

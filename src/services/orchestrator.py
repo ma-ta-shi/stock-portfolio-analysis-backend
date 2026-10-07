@@ -107,7 +107,8 @@ _PROMPT_VERSIONS = {
 # drowning the real signal in structural noise. Verified directly against
 # each agent's own validator source, not guessed:
 # - key_factors: never referenced anywhere in validators/cio.py or
-#   validators/shadow_cio.py -- only the synthesis-pass agents lack it.
+#   validators/shadow_cio.py -- only the synthesis-pass agents lack it. The five Pass 1 agents stopped writing it on 2026-10-07
+#   (nothing read it and it cost about a fifth of their output; their narrative now carries the evidence, ledger BB-107).
 # - risks: never referenced anywhere outside validators/pass1.py -- the
 #   four Pass 2 advocates and all three synthesis-pass agents structurally
 #   never produce it, confirmed by direct grep.
@@ -116,7 +117,7 @@ _PROMPT_VERSIONS = {
 #   validator never checks narrative/synthesis_narrative at all -- both
 #   structural, unlike bull/bear/tax/risk_stage_a and cio_stage_b, which
 #   all have real, validated narrative fields.
-_NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio"}
+_NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio", "RSRCH", "FUND", "TECH", "SENT", "MACRO"}
 _NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b", "shadow_cio"}
 _NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
 
@@ -177,6 +178,19 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
             "equity_to_assets": bal.get("equity_to_assets"),
             "cash_runway_quarters": bal.get("cash_runway_quarters"),
             "valuation_lens": (bundle.metric_profile or {}).get("lens") or None,
+            # Figures Bull and Bear were quoting from the Fundamental narrative because the view did not carry them
+            # (about a quarter of their figures came from a Pass 1 narrative alone, PEG, forward P/E, interest cover,
+            # current ratio and payout among them). A metric the profile hides is set to None below.
+            "forward_pe": fund.get("forward_pe"),
+            "peg_ratio": fund.get("peg_ratio"),
+            "ps_ratio": fund.get("ps_ratio"),
+            "ev_ebitda": fund.get("ev_ebitda"),
+            "gross_margin": prof.get("gross_margin"),
+            "interest_coverage": bal.get("interest_coverage"),
+            "current_ratio": bal.get("current_ratio"),
+            "dividend_yield": bundle.dividend_info.get("dividend_yield"),
+            "payout_ratio": bundle.dividend_info.get("payout_ratio"),
+            "dividend_growth_5yr": bundle.dividend_info.get("dividend_growth_5yr"),
         },
         "SENT": {
             "insider_activity_90d": insider["text"],
@@ -195,6 +209,15 @@ def _build_pass2_view_bundles(bundle: DataBundle) -> dict[str, dict]:
             "nearest_support": _plain(sr.get("nearest_support")),
             "nearest_resistance": _plain(sr.get("nearest_resistance")),
             "volatility_regime_derived": ti.get("volatility_regime_derived"),
+            # The figures Bull and Bear quoted from the Technical narrative (RSI, distance to each average, volume against
+            # its average, ATR distance to the nearest levels; RSI and volume appear in 30 of 31 recent Pass 2 runs).
+            "rsi_14": _plain(ti.get("rsi_14")),
+            "price_vs_sma20_pct": _plain(ti.get("price_vs_sma20_pct")),
+            "price_vs_sma50_pct": _plain(ti.get("price_vs_sma50_pct")),
+            "price_vs_sma200_pct": _plain(ti.get("price_vs_sma200_pct")),
+            "volume_ratio_today": _plain(ti.get("volume_ratio_today")),
+            "support_atr_distance": _plain(sr.get("atr_to_support")),
+            "resistance_atr_distance": _plain(sr.get("atr_to_resistance")),
         },
         "MACRO": {
             # A Canadian stock's view carries the Bank of Canada and Canadian CPI trends (the Macro payload shows

@@ -24,10 +24,6 @@ def _base_pass1_output() -> dict:
         "assessment_summary": "A solid US large-cap technology company with strong fundamentals and growing AI exposure.",
         "analysis_confidence": "high",
         "caveats": ["Coverage limited to public filings and earnings calls."],
-        "key_factors": [
-            {"factor": "Revenue growth", "importance": "high", "sentiment": "positive", "evidence": "FILING:10-K: 14.2% YoY"},
-            {"factor": "FCF generation", "importance": "high", "sentiment": "positive", "evidence": "FILING:MD&A: FCF yield 4.8%"},
-        ],
         "risks": [
             {"risk": "Competitive pressure from hyperscalers", "severity": "medium", "evidence": "N1: AWS native products"}
         ],
@@ -212,17 +208,18 @@ class TestStockResearcher:
 
     def test_narrative_too_long_fails(self):
         out = _stock_researcher_output()
-        out["narrative"] = "A" * 1400  # over the 1300 ceiling
+        out["narrative"] = "A" * 1600  # over the 1500 ceiling
         passed, errors = validate_stock_researcher(out)
         assert not passed
         assert any("narrative" in e and "long" in e for e in errors)
 
-    def test_too_few_key_factors_fails(self):
+    def test_a_missing_or_empty_risks_list_fails_and_key_factors_are_not_required(self):
         out = _stock_researcher_output()
-        out["key_factors"] = out["key_factors"][:1]  # only 1 item
+        out.pop("key_factors", None)  # Pass 1 agents no longer write it (2026-10-07)
+        assert validate_stock_researcher(out)[0]
+        out["risks"] = []
         passed, errors = validate_stock_researcher(out)
-        assert not passed
-        assert any("key_factors" in e for e in errors)
+        assert not passed and any("risks" in e for e in errors)
 
     def test_invalid_moat_durability_fails(self):
         out = _stock_researcher_output()
@@ -572,6 +569,8 @@ class TestOvershootIsAcceptedUncutNotTrimmed:
         out = _technical_analyst_output()
         out["narrative"] = "A" * 1178
         assert not any("narrative" in e for e in validate_technical_analyst(out)[1])
-        out["narrative"] = "A" * 1301
+        out["narrative"] = "A" * 1500  # the ceiling is 1500 since the agents stopped writing key_factors (2026-10-07)
+        assert not any("narrative" in e for e in validate_technical_analyst(out)[1])
+        out["narrative"] = "A" * 1501
         assert any("narrative: too long" in e for e in validate_technical_analyst(out)[1])
 

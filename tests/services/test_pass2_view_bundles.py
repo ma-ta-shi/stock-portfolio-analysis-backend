@@ -14,7 +14,7 @@ def _bench(median=23.5, p25=12.9, p75=50.7, companies=82):
 
 def _bundle(benchmark=None, pe=28.5, canadian=False):
     return SimpleNamespace(canadian_data_flags=object() if canadian else None,
-        valuation_metrics={"pe_ratio": pe}, growth_metrics={}, profitability_metrics={}, balance_sheet_metrics={},
+        valuation_metrics={"pe_ratio": pe}, growth_metrics={}, profitability_metrics={}, balance_sheet_metrics={}, dividend_info={},
         peer_metrics={"industry_benchmark": benchmark},
         technical_indicators={}, support_resistance={}, macro_sources=MagicMock(),
         insider_activity={"transactions": []}, price_info={"market_cap": 1e12}, analyst_consensus={}, not_applicable=None, metric_profile=None,
@@ -205,3 +205,34 @@ def test_a_hidden_pe_takes_the_industry_pe_position_with_it():
     fund = _build_pass2_view_bundles(bundle)["FUND"]
 
     assert fund["pe_ratio"] is None and fund["industry_pe_median"] is None and fund["pe_vs_industry"] is None
+
+
+def test_the_fund_and_tech_slices_carry_the_figures_pass2_was_quoting_from_the_narratives():
+    """About a quarter of Bull's and Bear's figures came from a Pass 1 narrative alone (PEG, forward P/E, interest cover,
+    current ratio, payout; RSI, distance to the averages, ATR distance, volume ratio)."""
+    bundle = _bundle()
+    bundle.valuation_metrics.update({"forward_pe": 15.0, "peg_ratio": 0.6, "ps_ratio": 4.2, "ev_ebitda": 12.0})
+    bundle.profitability_metrics["gross_margin"] = 0.45
+    bundle.balance_sheet_metrics.update({"interest_coverage": 2.64, "current_ratio": 0.9})
+    bundle.dividend_info = {"dividend_yield": 0.058, "payout_ratio": 1.26, "dividend_growth_5yr": 0.03}
+    bundle.technical_indicators = {"rsi_14": 48.6, "price_vs_sma20_pct": -1.09, "price_vs_sma50_pct": -5.23,
+                                   "price_vs_sma200_pct": -8.42, "volume_ratio_today": 2.13}
+    bundle.support_resistance = {"nearest_support": 167.3, "atr_to_support": 0.4, "atr_to_resistance": 1.9}
+
+    views = _build_pass2_view_bundles(bundle)
+
+    assert views["FUND"]["forward_pe"] == 15.0 and views["FUND"]["payout_ratio"] == 1.26 and views["FUND"]["interest_coverage"] == 2.64
+    assert views["TECH"]["rsi_14"] == 48.6 and views["TECH"]["price_vs_sma200_pct"] == -8.42
+    assert views["TECH"]["support_atr_distance"] == 0.4 and views["TECH"]["resistance_atr_distance"] == 1.9
+
+
+def test_a_bank_does_not_get_the_figures_its_profile_hides_in_the_new_fund_fields():
+    bundle = _bundle()
+    bundle.balance_sheet_metrics.update({"interest_coverage": 2.64, "current_ratio": 0.9})
+    bundle.profitability_metrics["gross_margin"] = 0.45
+    bundle.metric_profile = {"group": "financials", "lens": "", "limits": "",
+                             "hidden": ["interest_coverage", "current_ratio", "gross_margin", "ev_ebitda", "ps_ratio"]}
+
+    fund = _build_pass2_view_bundles(bundle)["FUND"]
+
+    assert fund["interest_coverage"] is None and fund["current_ratio"] is None and fund["gross_margin"] is None

@@ -11,9 +11,10 @@ def test_it_no_longer_mentions_peers_or_social_sentiment():
 
 
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
-    """42 of 48 first attempts wrote 4 or 5 key_factors because only the validator knew the cap was 3."""
-    assert "key_factors 1-3 items" in PROMPT and "risks 0-2" in PROMPT and "at most 80 words" in PROMPT
-    assert "600-1080 characters" in PROMPT
+    """Most first attempts wrote more list items than the cap because only the validator knew it."""
+    assert "risks 0-2" in PROMPT and "at most 80 words" in PROMPT
+    assert "600-1500 characters" in PROMPT
+    assert "key_factors" not in PROMPT  # removed 2026-10-07 (ledger BB-107)
 
 
 def test_the_model_is_not_asked_for_fields_code_now_decides():

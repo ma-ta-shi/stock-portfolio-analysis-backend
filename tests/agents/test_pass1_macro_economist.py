@@ -450,10 +450,6 @@ def _valid_macro_output(**overrides) -> dict:
         "assessment_summary": "A mixed macro picture with rate headwinds offset by AI tailwinds.",
         "analysis_confidence": "high",
         "caveats": ["Rate and inflation data reflect the most recent available release."],
-        "key_factors": [
-            {"factor": "Rate environment", "importance": "high", "sentiment": "negative", "evidence": "RATE: 5.25%"},
-            {"factor": "Sector tailwind", "importance": "high", "sentiment": "positive", "evidence": "AI infrastructure spend"},
-        ],
         "risks": [
             {"risk": "Macro slowdown", "severity": "medium", "evidence": "GDP: 2.4% growth cooling"},
         ],

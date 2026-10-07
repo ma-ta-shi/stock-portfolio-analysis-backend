@@ -53,7 +53,7 @@ def test_the_builder_shows_rounded_figures():
         "FUND": {
             "assessment_summary": "s", "analysis_confidence": "high", "caveats": [],
             "pass2_view": {"fcf_to_net_income": 0.9986728136350936, "roe": 0.396, "detail": {"x": 0.3333333333333}},
-            "narrative_truncated": "n",
+            "narrative": "n",
         }
     }
     msg = build_pass2_user_message(bundle, compressed, agent_ids=("FUND",), account_neutral=True)
@@ -72,16 +72,15 @@ def test_numpy_floats_are_handled_like_plain_floats():
     assert _rounded({"a": [np.float64(1234.56789)]}) == {"a": [1234.6]}
 
 
-def test_pass2_reads_350_tokens_of_a_narrative_so_a_1300_character_one_is_whole():
-    """The Researcher and Fundamental narrative ceiling is 1300 characters; the old 300 token (1200 character) cut
-    would have removed the closing synthesis."""
-    from agents.compression import NARRATIVE_VIEW_TOKENS
-    from agents.utils import truncate_to_tokens
+def test_a_pass1_narrative_reaches_pass2_whole():
+    """The 350 token cut bound for 1 of 200 stored narratives and every Pass 1 validator caps the narrative at 1300
+    characters, so it is gone: a 1500 character narrative arrives unchanged."""
+    from agents.compression import compress_pass1_outputs
 
-    assert NARRATIVE_VIEW_TOKENS == 350
-    narrative = "x" * 1300
-    assert truncate_to_tokens(narrative, NARRATIVE_VIEW_TOKENS) == narrative
-    assert truncate_to_tokens("x" * 1500, NARRATIVE_VIEW_TOKENS).endswith("...")
+    narrative = "Sentence one. " * 107
+    out = compress_pass1_outputs({"RSRCH": {"narrative": narrative, "structured_data": {"thesis_archetype": "quality_compounder"}}})
+
+    assert out["RSRCH"]["narrative"] == narrative and len(narrative) > 1400
 
 
 def test_a_metric_the_fundamental_view_leaves_out_is_not_printed_as_none():
@@ -100,9 +99,59 @@ def test_a_metric_the_fundamental_view_leaves_out_is_not_printed_as_none():
     view = {"valuation_vs_sector": "fair", "pb_ratio": 2.16, "roe": 0.1275, "debt_to_equity": None, "fcf_to_net_income": None,
             "valuation_lens": "Value on P/B against ROE, with P/E."}
     compressed = {"FUND": {"assessment_summary": "s", "analysis_confidence": "high", "caveats": [], "pass2_view": view,
-                           "narrative_truncated": "n"}}
+                           "narrative": "n"}}
 
     msg = build_pass2_user_message(bundle, compressed, agent_ids=("FUND",), account_neutral=True)
 
     assert "pb_ratio: 2.16" in msg and "valuation_lens: Value on P/B against ROE, with P/E." in msg
     assert "debt_to_equity" not in msg and "fcf_to_net_income" not in msg and "None" not in msg
+
+
+def test_a_none_value_is_left_out_for_every_agent_not_printed():
+    """Macro's commodity_context and Sentiment's insider_materiality printed as "None" in every real Bull prompt."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from agents.compression import build_pass2_user_message
+
+    bundle = SimpleNamespace(
+        stock=SimpleNamespace(ticker="ENB.TO", currency="CAD", exchange="TSX"),
+        company_info={"name": "Enbridge", "sector": "Energy"},
+        context=SimpleNamespace(account_type="tfsa", timeline="medium_term"),
+        data_vintage=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    compressed = {
+        "MACRO": {"assessment_summary": "s", "analysis_confidence": "medium", "caveats": [], "narrative": "n",
+                  "pass2_view": {"overall_macro_environment": "favorable", "commodity_context": None}},
+        "SENT": {"assessment_summary": "s", "analysis_confidence": "medium", "caveats": [], "narrative": "n",
+                 "pass2_view": {"news_sentiment_overall": "neutral", "insider_materiality": None}},
+    }
+
+    msg = build_pass2_user_message(bundle, compressed, agent_ids=("MACRO", "SENT"), account_neutral=True)
+
+    assert "overall_macro_environment: favorable" in msg and "news_sentiment_overall: neutral" in msg
+    assert "commodity_context" not in msg and "insider_materiality" not in msg and "None" not in msg
+
+
+def test_a_pass1_agents_risks_reach_pass2_but_not_its_key_factors():
+    """Delivered after a replay: Bull, Bear and Risk used them (15 to 20% of their unique words against 2 to 5% by chance)."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from agents.compression import build_pass2_user_message, compress_pass1_outputs
+
+    bundle = SimpleNamespace(
+        stock=SimpleNamespace(ticker="TD.TO", currency="CAD", exchange="TSX"),
+        company_info={"name": "Toronto-Dominion Bank", "sector": "Finance"},
+        context=SimpleNamespace(account_type="tfsa", timeline="medium_term"),
+        data_vintage=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    output = {"assessment_summary": "s", "analysis_confidence": "high", "caveats": [], "narrative": "n",
+              "structured_data": {"thesis_archetype": "quality_compounder"},
+              "key_factors": [{"factor": "ROE", "evidence": "PROF: ROE 12.7%"}],
+              "risks": [{"risk": "US retail competition", "severity": "medium", "likelihood": "high", "evidence": "RSRCH: smaller than peers"}]}
+
+    msg = build_pass2_user_message(bundle, compress_pass1_outputs({"RSRCH": output}), agent_ids=("RSRCH",), account_neutral=True)
+
+    assert "risks: US retail competition (medium severity, high likelihood): RSRCH: smaller than peers" in msg
+    assert "key_factors" not in msg and "ROE 12.7%" not in msg

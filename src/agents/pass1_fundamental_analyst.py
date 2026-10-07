@@ -398,6 +398,8 @@ def merge_decided_fields(output: dict, bundle: DataBundle) -> dict:
 
 
 class FundamentalAnalystRunner(BaseRunner):
+    GROUND_MODE = "once"  # a figure in the narrative, summary or caveats not in this agent's data fails its first attempt only (agents/grounding.py)
+
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "FUND"
         ctx = bundle.context

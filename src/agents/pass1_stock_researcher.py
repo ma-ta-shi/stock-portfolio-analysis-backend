@@ -458,6 +458,8 @@ DIVIDEND / INCOME:
 
 
 class StockResearcherRunner(BaseRunner):
+    GROUND_MODE = "once"  # a figure in the narrative, summary or caveats not in this agent's data fails its first attempt only (agents/grounding.py)
+
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "RSRCH"
         ctx = bundle.context

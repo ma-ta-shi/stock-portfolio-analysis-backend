@@ -54,9 +54,9 @@ those, never a real per-run signal.
 from functools import partial
 
 from agents.base import BaseRunner
-from agents.compression import build_pass2_user_message, extract_confidence_levels, extract_data_quality_levels
+from agents.compression import _rounded, extract_confidence_levels, extract_data_quality_levels
 from agents.prompts import fill, load_template
-from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
+from agents.utils import as_of_date, build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.common import (
     GROUNDEDNESS_HIGH_THRESHOLD,
     validate_confidence_requires_caveat_when_flagged,
@@ -80,7 +80,12 @@ from data.schemas.data_bundle import DataBundle
 # 45%, account-fit agreement with the anchors 71% vs 68%, passthrough 98% vs 99%); at that sample size
 # a difference of a few points is noise, and the oracle does not measure everything TECH/SENT/MACRO
 # might add. Revisit if Tax output quality questions come up.
-TAX_PASS1_AGENTS = ("RSRCH", "FUND")
+TAX_PASS1_AGENTS = ("RSRCH", "FUND")  # whose confidence and quality it is warned about; only FUND's dividend inputs are sent (below)
+
+# The only Pass 1 content the user message carries (Tax cited the two views 0.1 times a run, 2026-10-07 review): FUND's dividend
+# inputs. Yield is not among them (the tax block has its own DIVID yield, and a second source can disagree); confidence, quality and
+# the archetype are in the system prompt.
+_DIVIDEND_INPUTS = ("dividend_sustainability", "payout_ratio", "dividend_growth_5yr")
 
 
 def _only_tax_agents(levels: dict[str, str]) -> dict[str, str]:
@@ -276,6 +281,21 @@ def get_system_prompt(
     )
 
 
+def _pass1_dividend_inputs(bundle: DataBundle, compressed_pass1: dict, account_type: str) -> str:
+    """The header and FUND's dividend inputs, nothing else of Pass 1 (see _DIVIDEND_INPUTS)."""
+    header = (
+        f"{bundle.stock.ticker} ({bundle.company_info.get('name')}) | {bundle.company_info.get('sector')} | "
+        f"{bundle.stock.exchange} | {bundle.stock.currency}\n"
+        f"As of: {as_of_date(bundle)} | Timeline: {bundle.context.timeline} | Account: {account_type}\n"
+    )
+    fund = compressed_pass1.get("FUND")
+    view = (fund or {}).get("pass2_view") or {}
+    if not view:
+        return header + "\nPASS 1 — FUNDAMENTAL ANALYST (FUND): NOT AVAILABLE — reason: agent failed or data insufficient"
+    lines = [f"  {k}: {_rounded(view[k])}" for k in _DIVIDEND_INPUTS if view.get(k) is not None]
+    return header + "\nPASS 1 — FUNDAMENTAL ANALYST (FUND), dividend inputs only:\n" + "\n".join(lines)
+
+
 def build_user_message(
     bundle: DataBundle,
     compressed_pass1: dict,
@@ -284,17 +304,19 @@ def build_user_message(
     user_tax_profile: UserTaxProfileInput | None = None,
     tax_metrics_text: str | None = None,
 ) -> tuple[str, dict[str, bool]]:
-    """The user message is the Pass 1 summaries only. The pre-computed tax block, the Pass 1
+    """The user message is the header and FUND's dividend inputs only (the other Pass 1 content it used to carry was cited 0.1 times a run). The pre-computed tax block, the Pass 1
     reliability warnings and the analysed account are in the system prompt (get_system_prompt)
     and used to be appended here as well, so every call paid for each of them twice (~1k
     tokens). The second return value is the presence flags read off the block."""
-    base = build_pass2_user_message(bundle, compressed_pass1, account_type, TAX_PASS1_AGENTS)
+    base = _pass1_dividend_inputs(bundle, compressed_pass1, account_type)
     if tax_metrics_text is None:
         tax_metrics_text = _tax_metrics_block(bundle, account_type, account_state, user_tax_profile)
     return base, _tax_metrics_field_presence(tax_metrics_text, account_type)
 
 
 class TaxStrategistRunner(BaseRunner):
+    GROUND_MODE = "log"  # figures not in this agent's input are recorded in validator_errors, never a retry (agents/grounding.py)
+
     async def run(
         self,
         bundle: DataBundle,

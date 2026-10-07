@@ -714,6 +714,22 @@ def _deanonymize_value(value, replacements: dict[str, str]):
     return value
 
 
+_BARE_PEER = re.compile(r"PEER_(\d+)(?![\d_])")
+
+
+def _replace_bare_peer_tokens(value, peer_names: dict[str, str]):
+    """The prompt tells the model to cite peers as `PEER_{num}` (a bare token), while the forward pass anonymizes only
+    `PEER_n_COMPANY`, so the model's own `PEER_1` survived into the stored narrative and peer_comparison_summary and
+    reached Bull, Bear and Risk as an opaque token (all three newest real runs). A token with no known peer stays."""
+    if isinstance(value, str):
+        return _BARE_PEER.sub(lambda m: peer_names.get(f"PEER_{m.group(1)}") or m.group(0), value)
+    if isinstance(value, dict):
+        return {k: _replace_bare_peer_tokens(v, peer_names) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_replace_bare_peer_tokens(v, peer_names) for v in value]
+    return value
+
+
 def deanonymize_text_fields(
     llm_response: dict, company_name: str, ticker: str, peer_names: dict[str, str]
 ) -> dict:
@@ -759,7 +775,7 @@ def deanonymize_text_fields(
     replacements = {"COMPANY_X": company_name, "TICKER_X": ticker}
     for peer_id, peer_name in peer_names.items():
         replacements[f"{peer_id}_COMPANY"] = peer_name
-    return _deanonymize_value(llm_response, replacements)
+    return _replace_bare_peer_tokens(_deanonymize_value(llm_response, replacements), peer_names)
 
 
 def apply_dual_class_caveat(caveats: list[str], dual_class_flag: bool) -> list[str]:

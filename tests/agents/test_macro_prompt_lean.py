@@ -6,8 +6,9 @@ PROMPT = (Path(__file__).resolve().parents[2] / "prompts" / "macro_economist" / 
 
 
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
-    """23 of 57 real first attempts failed; 14 wrote 5 key_factors because only the validator knew the cap."""
-    assert "key_factors 2-4" in PROMPT and "risks 1-3" in PROMPT and "assessment_summary 80 words or fewer" in PROMPT
+    """23 of 57 real first attempts failed; most wrote more list items than the cap because only the validator knew it."""
+    assert "risks 1-3" in PROMPT and "assessment_summary 80 words or fewer" in PROMPT
+    assert "key_factors" not in PROMPT  # removed 2026-10-07 (ledger BB-107)
 
 
 def test_the_narrative_target_sits_above_the_480_floor():

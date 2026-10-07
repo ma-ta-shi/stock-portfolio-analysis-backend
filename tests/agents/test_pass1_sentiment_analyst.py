@@ -246,9 +246,6 @@ def _valid_sentiment_analyst_output(**overrides) -> dict:
         "assessment_summary": "Positive news flow with modest insider buying and stable analyst coverage.",
         "analysis_confidence": "high",
         "caveats": ["Coverage limited to public news and disclosed insider filings."],
-        "key_factors": [
-            {"factor": "Positive news flow", "importance": "high", "sentiment": "positive", "evidence": "N1: product launch"},
-        ],
         "risks": [],
         "narrative": (
             "News flow for COMPANY_X has been broadly positive over the review window, anchored by "

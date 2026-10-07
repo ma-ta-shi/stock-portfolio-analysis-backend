@@ -345,7 +345,7 @@ COMMODITIES (COMMOD):
 SECTOR CONTEXT:
   Company sector: {company_info.get('sector')}
 
-REMINDER: narrative 640-720 characters; key_factors 2-4; risks 1-3."""
+REMINDER: narrative 640-720 characters; risks 1-3."""
 
     field_presence = {
         "rate": m.policy_rate_age_days is not None,
@@ -394,6 +394,8 @@ def _validate_with_caveats(
 
 
 class MacroEconomistRunner(BaseRunner):
+    GROUND_MODE = "once"  # a figure in the narrative, summary or caveats not in this agent's data fails its first attempt only (agents/grounding.py)
+
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "MACRO"
         ctx = bundle.context

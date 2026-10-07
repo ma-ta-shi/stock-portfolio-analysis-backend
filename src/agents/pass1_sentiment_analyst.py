@@ -359,6 +359,8 @@ SHORT INTEREST (SHORT):
 
 
 class SentimentAnalystRunner(BaseRunner):
+    GROUND_MODE = "once"  # a figure in the narrative, summary or caveats not in this agent's data fails its first attempt only (agents/grounding.py)
+
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "SENT"
         user_msg, field_presence = build_user_message(bundle)

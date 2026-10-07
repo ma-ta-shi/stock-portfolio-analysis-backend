@@ -8,9 +8,14 @@ PROMPT = (Path(__file__).resolve().parents[2] / "prompts" / "fundamental_analyst
 
 
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
-    """52 of 63 first attempts failed raw; 49 wrote more than four key_factors because only the validator knew the cap."""
-    for limit in ("key_factors 2-4", "risks 1-3", "assessment_summary 80 words or fewer", "narrative 760-960 characters"):
+    """52 of 63 first attempts failed raw; most wrote more list items than the cap because only the validator knew it."""
+    for limit in ("risks 1-3", "assessment_summary 80 words or fewer", "narrative 900-1,200 characters", "over 1500"):
         assert limit in PROMPT
+
+
+def test_key_factors_are_not_asked_for():
+    """Nothing read them and they cost about a fifth of the output; the narrative carries the evidence (ledger BB-107)."""
+    assert "key_factors" not in PROMPT and "at least one is required" in PROMPT
 
 
 def test_no_false_promise_about_the_trimmer_and_no_narrative_wall():
@@ -21,8 +26,8 @@ def test_the_model_is_not_asked_for_what_code_decides_or_nobody_reads():
     assert "guidance_vs_consensus" not in PROMPT and "peer_comparison_summary" not in PROMPT
 
 
-def test_the_three_judged_fields_and_sentiment_are_defined():
-    for text in ("healthy = profitable", "strong = well covered", "effect of this factor on the investment case"):
+def test_the_three_judged_fields_are_defined():
+    for text in ("healthy = profitable", "strong = well covered"):
         assert text in PROMPT
 
 

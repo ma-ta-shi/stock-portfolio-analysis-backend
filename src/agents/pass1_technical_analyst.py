@@ -275,6 +275,8 @@ MARKET REGIME ({index_name}, REGIME): {_fmt(bundle.market_context.get('market_re
 
 
 class TechnicalAnalystRunner(BaseRunner):
+    GROUND_MODE = "once"  # a figure in the narrative, summary or caveats not in this agent's data fails its first attempt only (agents/grounding.py)
+
     async def run(self, bundle: DataBundle) -> tuple[dict, list[str]]:
         self.current_agent = "TECH"
         ctx = bundle.context

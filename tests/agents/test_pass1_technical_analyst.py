@@ -240,10 +240,6 @@ def _valid_technical_output(**overrides) -> dict:
         "assessment_summary": "A solid technical setup with bullish momentum.",
         "analysis_confidence": "high",
         "caveats": ["Coverage limited to daily price action."],
-        "key_factors": [
-            {"factor": "Trend", "importance": "high", "sentiment": "positive", "evidence": "SMA stack bullish"},
-            {"factor": "Momentum", "importance": "medium", "sentiment": "positive", "evidence": "RSI 62"},
-        ],
         "risks": [
             {"risk": "Approaching resistance", "severity": "medium", "evidence": "ATR 3.0 to resistance"},
         ],
@@ -377,7 +373,7 @@ async def test_run_merges_the_code_decided_fields_after_the_model_returns(monkey
     from agents.pass1_technical_analyst import TechnicalAnalystRunner
 
     model_output = {
-        "assessment_summary": "s", "analysis_confidence": "medium", "caveats": [], "key_factors": [], "risks": [],
+        "assessment_summary": "s", "analysis_confidence": "medium", "caveats": [], "risks": [],
         "narrative": "n", "interpretive_fields": {"primary_trend": "bullish", "trend_strength": "strong",
                                                    "volume_confirmation": "confirming", "nearest_level_bias": "near_support",
                                                    "confluence_score": 2},
