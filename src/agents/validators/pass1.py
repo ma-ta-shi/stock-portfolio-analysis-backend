@@ -161,6 +161,9 @@ def _check_interpretive_fields(output: dict, errors: list, spec: dict) -> None:
 
 
 
+# Summary ceiling 96 words and narrative ceilings = the stated limit + 20%: the shared trimmer used to cut up to 20% over
+# (removing the closing sentence of the narrative), so an output that overshot by that much passed; it now passes uncut.
+# The prompts still state the lower limits (80 words; 1080 characters; Macro 720).
 def validate_stock_researcher(output: dict) -> tuple[bool, list[str]]:
     """Validate Stock Researcher output."""
     errors: list[str] = []
@@ -176,20 +179,20 @@ def validate_stock_researcher(output: dict) -> tuple[bool, list[str]]:
     # assessment_summary <=80 words
     summary = output.get("assessment_summary", "")
     wc = word_count(summary)
-    if wc > 80:
-        errors.append(f"assessment_summary: too long ({wc} words, max 80)")
+    if wc > 96:
+        errors.append(f"assessment_summary: too long ({wc} words, max 96)")
     if not summary.strip():
         errors.append("assessment_summary: must be non-empty")
 
-    # narrative: 120-180 words → 720-1080 chars
-    _check_narrative_chars(output, 720, 1080, errors)
+    # narrative: floor 600 (about 100 words), like Sentiment and Technical: of 16 replays the two too-short narratives were 651 and 679 chars, complete notes
+    _check_narrative_chars(output, 600, 1300, errors)
 
-    # caveats: 1-4 items
+    # caveats: 0-4 items. The old minimum of 1 was only ever met because the payload always listed a permanent
+    # "transcript not available" gap to mention; with that line gone a clean note has nothing to caveat, and padding
+    # one in is noise Pass 2 reads verbatim. Every other Pass 1 agent already allows none.
     caveats = output.get("caveats", [])
     if not isinstance(caveats, list):
         errors.append("caveats: must be a list")
-    elif len(caveats) < 1:
-        errors.append("caveats: need >=1 item")
     elif len(caveats) > 4:
         errors.append(f"caveats: need <=4 items, got {len(caveats)}")
 
@@ -294,8 +297,8 @@ def validate_fundamental_analyst(output: dict) -> tuple[bool, list[str]]:
 
     # assessment_summary <=80 words
     summary = output.get("assessment_summary", "")
-    if word_count(summary) > 80:
-        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 80)")
+    if word_count(summary) > 96:
+        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 96)")
 
     # This branch used to key on data_quality_assessment=="insufficient" -- that field is
     # gone (86bbummwp / D6: never LLM-produced, mechanically rolled up elsewhere). Repointed
@@ -319,8 +322,8 @@ def validate_fundamental_analyst(output: dict) -> tuple[bool, list[str]]:
         # a FUND output with 5 key_factors passed a 2-4 bound.
         return len(errors) == 0, errors
 
-    # narrative: 120-180 words → 720-1080 chars
-    _check_narrative_chars(output, 720, 1080, errors)
+    # narrative: floor 720; ceiling 1300 (the stated 1080 + 20%, see the note above validate_stock_researcher)
+    _check_narrative_chars(output, 720, 1300, errors)
 
     _check_key_factors(output.get("key_factors", []), errors)
     _check_risks(output.get("risks", []), errors)
@@ -349,11 +352,11 @@ def validate_technical_analyst(output: dict) -> tuple[bool, list[str]]:
         _require_field(output, field, errors)
 
     summary = output.get("assessment_summary", "")
-    if word_count(summary) > 80:
-        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 80)")
+    if word_count(summary) > 96:
+        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 96)")
 
     # Floor 600, as Sentiment's (2026-10-03): the shorter prompt made too-short narratives 641-692 characters in 3 of 18 replays.
-    _check_narrative_chars(output, 600, 1080, errors)
+    _check_narrative_chars(output, 600, 1300, errors)
     _check_key_factors(output.get("key_factors", []), errors)
     _check_risks(output.get("risks", []), errors)
 
@@ -377,12 +380,12 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
         _require_field(output, field, errors)
 
     summary = output.get("assessment_summary", "")
-    if word_count(summary) > 80:
-        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 80)")
+    if word_count(summary) > 96:
+        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 96)")
 
     # Floor 600 (about 100 words), not 720: of 24 replays after the prompt rewrite the model's too-short narratives were 562-694 characters;
     # Pass 2 reads the narrative as one of several fields, and 600 to 1,080 characters is a complete 4 to 7 sentence synthesis.
-    _check_narrative_chars(output, 600, 1080, errors)
+    _check_narrative_chars(output, 600, 1300, errors)
     # Sentiment's declared bounds: key_factors 1-3, risks 0-2 (thin-data path).
     _check_key_factors(output.get("key_factors", []), errors, lo=1, hi=3)
     _check_risks(output.get("risks", []), errors, lo=0, hi=2)
@@ -437,11 +440,11 @@ def validate_macro_economist(output: dict) -> tuple[bool, list[str]]:
         _require_field(output, field, errors)
 
     summary = output.get("assessment_summary", "")
-    if word_count(summary) > 80:
-        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 80)")
+    if word_count(summary) > 96:
+        errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 96)")
 
     # Macro narrative: 80-120 words → 480-720 chars (SHORTER than other agents)
-    _check_narrative_chars(output, 480, 720, errors)
+    _check_narrative_chars(output, 480, 864, errors)
 
     _check_key_factors(output.get("key_factors", []), errors)
     _check_risks(output.get("risks", []), errors)
@@ -513,6 +516,22 @@ def validate_thin_volume_caveat(output: dict, avg_dollar_volume: float) -> tuple
             f"TECH: avg_dollar_volume=${avg_dollar_volume:,.0f} < $1M but no thin volume / liquidity caveat found"
         )
 
+    return len(errors) == 0, errors
+
+
+def validate_recent_developments_news_ids(output: dict, valid_ids: set[str]) -> tuple[bool, list[str]]:
+    """Every `recent_developments[].news_id` must be a news ID the payload actually lists: the orchestrator turns each
+    one into its headline, and an id it cannot find would be a headline invented by the model (1 of 228 real citations
+    was not in the payload)."""
+    errors: list[str] = []
+    developments = (output.get("structured_data") or {}).get("recent_developments")
+    for i, dev in enumerate(developments if isinstance(developments, list) else []):
+        nid = dev.get("news_id") if isinstance(dev, dict) else None
+        if nid not in valid_ids:
+            errors.append(
+                f"structured_data.recent_developments[{i}].news_id: {nid!r} is not a news ID listed in the payload "
+                f"(use one of the N-ids shown)"
+            )
     return len(errors) == 0, errors
 
 
@@ -588,12 +607,21 @@ def validate_filing_depth_caveat(output: dict, has_filing_digest: bool) -> tuple
     above for why RSRCH was split out of that function entirely rather than
     folded into it under a renamed condition.
     """
-    if has_filing_digest:
-        return True, []
     errors: list[str] = []
     REQUIRED_PHRASE = "Filing depth limited"
     caveats = output.get("caveats", [])
     combined = " ".join(str(c) for c in caveats)
+
+    if has_filing_digest:
+        # The reverse case: 10 of 71 real outputs wrote this caveat with the filing digest in the payload (the prompt
+        # rule read "If true is false"), and Pass 2 reads caveats verbatim, so it told Bull and Bear there was no
+        # filing text when there was.
+        if REQUIRED_PHRASE.lower() in combined.lower():
+            errors.append(
+                "RSRCH: has_filing_digest=true but the 'Filing depth limited' caveat was written; "
+                "remove it, a filing digest is in the payload"
+            )
+        return len(errors) == 0, errors
 
     if REQUIRED_PHRASE.lower() not in combined.lower():
         errors.append(

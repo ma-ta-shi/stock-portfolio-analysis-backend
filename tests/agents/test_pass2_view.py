@@ -242,3 +242,18 @@ def test_renderer_survives_a_non_dict_pass2_view():
     )
     msg = build_pass2_user_message(bundle, compressed)
     assert "NOT AVAILABLE" in msg
+
+
+def test_recent_developments_pass_the_headline_and_date_but_not_the_source():
+    """Bull and Bear got "N4, high, positive" with no headline: the Researcher's merge step now stores each cited id
+    with its headline, date and source."""
+    stored = {"news_id": "N4", "event": "TD announces a C$10 billion buyback", "date": "2026-09-30",
+              "source": "Yahoo", "significance": "high", "sentiment": "positive"}
+    out = {"structured_data": {"recent_developments": [stored, {"news_id": "N9", "significance": "low"}]}}
+
+    top = build_pass2_view("RSRCH", out)["top_recent_developments"]
+
+    assert top[0] == {"news_id": "N4", "event": "TD announces a C$10 billion buyback", "date": "2026-09-30",
+                      "significance": "high", "sentiment": "positive"}
+    assert top[1] == {"news_id": "N9", "significance": "low"}  # an unhydrated item is passed as stored
+

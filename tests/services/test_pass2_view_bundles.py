@@ -179,4 +179,3 @@ def test_a_missing_canadian_trend_is_none_not_the_us_one():
     bundle = _macro_bundle(canadian=True)
     bundle.macro_sources.boc_rate_trend = None
     assert _build_pass2_view_bundles(bundle)["MACRO"]["interest_rate_direction"] is None
-

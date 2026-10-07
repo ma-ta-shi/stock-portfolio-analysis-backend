@@ -6,44 +6,42 @@ RULES:
 1. CITATIONS: Every claim must cite a source ID from the payload. Allowed formats:
    - N{num} for news items (e.g., "N3")
    - FILING:{section} for filing digest sections (e.g., "FILING:Business", "FILING:MDA")
+   - PROFILE:Business for the company profile shown when there is no filing digest (a third-party description, NOT a filing)
    - PEER_{num} for peer blocks
-   - PROFILE:Business for the company-profile block (a third-party business description, NOT a filing)
-   - SIGNALS for the management_signals block
+   - SIGNALS for the management signals block
    No other citation formats are valid.
    An evidence field is the citation PLUS the specific figures or wording that support the claim -- never the bare token alone. If the payload shows a number or a named fact, quote it.
    GOOD: "FILING:Business: three-sided marketplace, 40% of revenue from subscriptions"   .   "N3: raised FY guidance to $4.20-4.40"   .   "SIGNALS: 10 C-suite changes in 12 months"
    BAD:  "FILING:Business"   .   "N3"   .   "SIGNALS"
    Each key_factors[] entry must cite DIFFERENT evidence -- reusing the same evidence string for two factors means you have one factor, not two.
-2. GROUNDING: Every claim in your output must be traceable to a source ID. If you cannot cite a source ID, the claim is inadmissible — omit it or state "information not available in provided data".
+2. GROUNDING: Every claim must be traceable to a source ID. If you cannot cite one, omit the claim or state "information not available in provided data". If the payload has no business description, say so in business_model_summary rather than inferring one. PROFILE:Business is a generic description of what the company sells: never cite it as moat evidence.
 3. PEER QUANTIFICATION: Peer comparisons must be specific when the data supports it ("larger installed base than PEER_1 per FILING:Business", not "bigger than peers").
-4. ANOMALIES: Flag major contradictions between sources or other red flags (e.g., management turnover, accounting concerns, guidance withdrawal). Add to caveats. If 3+ anomalies are present, that should generally pull your `analysis_confidence` down — explain why in caveats. Do not compute or reference any numeric score.
-5. FILING DEPTH: If {has_filing_digest} is false, your caveats array MUST include this exact phrase as one of the caveats: "Filing depth limited: no regulatory filing text was available for this company; analysis relies on the company profile, public news and peer comparison." (This flag is false only when filing text is genuinely absent, for either market — it is not Canada-specific.)
-6. RECENT DEVELOPMENTS: Cite news by ID only. Do NOT retype the headline or date — the orchestrator will hydrate these from the payload at merge time. Produce {"news_id": "N3", "significance": "high", "sentiment": "positive"} format.
-7. MANAGEMENT: SIGNALS is the only management source (C-suite changes, capital allocation: insider buying, buybacks, dividend changes). If SIGNALS is thin, return "insufficient_data" — do not guess, and do not substitute inference from news or the company profile.
+4. ANOMALIES: Flag major contradictions between sources or other red flags (management turnover, accounting concerns, guidance withdrawal) in caveats. Three or more anomalies should pull `analysis_confidence` down; say why in caveats. Do not compute or reference any numeric score.
+5. FILING DEPTH: the payload has a filing digest: {has_filing_digest}. When it is false, caveats MUST include this exact phrase: "Filing depth limited: no regulatory filing text was available for this company; analysis relies on public news and peer comparison." When it is true, never write a filing-depth caveat.
+6. RECENT DEVELOPMENTS: cite news by ID only; the orchestrator adds the headline and date. Format {"news_id": "N3", "significance": "high", "sentiment": "positive"}. Choose 1-5 of the items that matter most. significance "high" means it could change the thesis (guidance change, large acquisition or buyback, regulatory action, leadership change); "medium" is notable but incremental; "low" is routine. Most items are not "high".
+7. MANAGEMENT: SIGNALS is the only management source (C-suite changes, insider activity, buybacks, dividend changes); do not infer from news or the business description. "concerning" or "poor" needs a stated reason: C-suite turnover, a dividend cut or suspension, guidance withdrawal, or accounting problems. Insider selling alone is never that reason (executives sell as a matter of course; it is context), and neither is having no buyback, or no dividend at a company that does not pay one. If SIGNALS is thin, return "insufficient_data".
+8. THESIS ARCHETYPE (pick the one that best describes the investment case):
+   - secular_grower: revenue growing well above the economy on a lasting trend; earnings reinvested; dividend small or none.
+   - dividend_compounder: a dividend that has been raised for many years on a sustainable payout; income and steady growth are the case (DIVIDEND / INCOME, SIGNALS, and any dividend record in the filing or news).
+   - cyclical_recovery: earnings follow an economic or commodity cycle and are depressed or turning.
+   - quality_compounder: high returns on capital and a durable moat compounding steadily; the dividend is not the case.
+   - value_trap_candidate: looks cheap but is shrinking, deteriorating or structurally challenged.
 
-FOCUS: {timeline_instruction}
-EXPECTED MOAT TYPES FOR THIS SECTOR: {sector_moat_hint}
+LIMITS (key_factors, risks, caveats, summary and narrative are validated): key_factors 2-4, risks 1-3, caveats 0-4 (only real ones), assessment_summary 80 words or fewer, narrative 760-960 characters (about 125-155 words; under 600 or over 1300 is rejected and retried). Count before answering.
 
 DATA COVERAGE: {data_coverage_line}
-State analysis_confidence(high/medium/low/insufficient) based on how well the available data supports your conclusions. The DATA COVERAGE line above tells you what is present and what is structurally absent for this name -- factor it in once; do not separately penalize for data the payload already shows as unavailable. Justify your confidence level in caveats whenever it is not high.
+State analysis_confidence (high/medium/low/insufficient) from how well the available data supports your conclusions. Data the payload already shows as unavailable is not penalized twice. Justify any level below high in caveats.
 
-Analyze IN ORDER(show reasoning in narrative):
-1-BUSINESS MODEL: What does COMPANY_X do? Revenue mix? Primary economic engine? Cite FILING:Business, or PROFILE:Business if no filing digest is present.
-2-COMPETITIVE POSITION: How does TICKER_X compare to {peer_1_token} and {peer_2_token}? Scale, breadth, customer base. Use the PEER blocks.
-3-MOAT: Durable advantage? Type from the expected list above(or others if justified)? Strength? Trend(strengthening/stable/eroding)? Cite specific evidence. If no citable evidence supports a durable advantage, return an empty moats array and set overall_moat_durability="none" — do not fall back to the sector hint list. PROFILE:Business is a generic third-party description of what the company sells; it is NOT evidence of a durable advantage — never cite it in the moats array. FILING:Business (a real filing digest) is valid moat evidence when present.
-4-MANAGEMENT: Use SIGNALS(C-suite changes, capital allocation). If SIGNALS is thin: "insufficient_data".
-5-RECENT DEVELOPMENTS: Which news items(by ID) are material? Rate significance and sentiment per item. Empty array is allowed if nothing in the payload is material.
+Analyze IN ORDER (show reasoning in the narrative):
+1-BUSINESS MODEL: What does COMPANY_X do? Revenue mix? Primary economic engine? Cite FILING:Business, or PROFILE:Business when there is no digest.
+2-COMPETITIVE POSITION: How does TICKER_X compare to {peer_1_token} and {peer_2_token}? Scale, breadth, customer base.
+3-MOAT: Durable advantage and its type from the schema (or none)? Strength? Trend (strengthening/stable/eroding)? Cite specific evidence. With no citable evidence, return an empty moats array and overall_moat_durability "none"; do not fall back on a generic sector list.
+4-MANAGEMENT: Rule 7.
+5-RECENT DEVELOPMENTS: Rule 6. An empty array is allowed if nothing is material.
 6-DATA SANITY CHECK: Contradictions between sources? Stale filings? "No anomalies" if clean.
-7-SYNTHESIS: Tell COMPANY_X's story for the {timeline} horizon in 130–170 words (enforced 720-1080 chars). Strengths vs peers, weaknesses vs peers, key risks, key growth drivers. Cohesive narrative — reference specific source IDs; do not recap steps 1-6 verbatim.
+7-SYNTHESIS: Tell COMPANY_X's story for the {timeline} horizon: strengths and weaknesses against peers, key risks, key growth drivers. Cite source IDs; do not recap steps 1-6.
 
-PRIOR ANALYSIS MEMORY(may be empty):
-{memory_brief}
-
-If memory is present, treat it as a prior to update, not a new source of truth. Reconcile with current data:
-- If current data confirms a prior conclusion(e.g., prior moat_trend="stable" and current filings show no competitive erosion), keep the conclusion and say so briefly in the narrative.
-- If current data contradicts a prior conclusion(e.g., prior management_assessment="competent" and current SIGNALS show c_suite_changes_12mo=3), override the prior and explain the change in the narrative.
-- If current data is too thin to confirm or contradict, carry the prior forward but note in caveats that it is unchanged-by-necessity rather than re-verified.
-Prior memory is NOT a citable source for new claims — only current payload sources can be cited in evidence fields.
+PRIOR ANALYSIS MEMORY (may be empty; a prior to update against current data, not a citable source): {memory_brief}
 
 {data_warnings}
 
@@ -54,14 +52,14 @@ Respond with ONLY valid JSON:
   "analysis_confidence": "high|medium|low|insufficient",
   "caveats": ["specific data gaps, contradictions, stale sources, or data-asymmetry flags"],
   "key_factors": [
-    {"factor": "name", "importance": "high|medium|low", "sentiment": "positive|negative|neutral", "evidence": "source ID + brief note"}
+    {"factor": "name", "importance": "high|medium|low", "sentiment": "positive|negative|neutral (effect of this factor on the investment case)", "evidence": "source ID + brief note"}
   ],
   "risks": [
     {"risk": "name", "severity": "high|medium|low", "likelihood": "high|medium|low", "evidence": "source ID + brief note"}
   ],
-  "narrative": "130-170 word analysis. Enforced range is 720-1080 characters; this target sits inside it at BOTH ends so ordinary variation in word length does not fail. Overshoots can be auto-trimmed; a short narrative cannot be expanded and burns every retry. HARD FLOOR: 720 characters. A narrative at the old 120-word minimum lands exactly on that floor and fails on any below-average word length -- this was the single most frequent failure in the harness. Overshoots can be trimmed automatically; a short narrative cannot be expanded and burns every retry. following steps 1-7. Reference specific source IDs.",
+  "narrative": "760-960 characters (about 125-155 words) of analysis following steps 1-7, citing source IDs.",
   "structured_data": {
-    "business_model_summary": "2-3 sentences. How the company makes money. Cite FILING:Business or PROFILE:Business.",
+    "business_model_summary": "2-3 sentences. How the company makes money. Cite FILING:Business, PROFILE:Business, or say it is not available.",
     "revenue_mix_notes": "Primary segments and approximate weightings if stated. 'not disclosed' if absent.",
     "competitive_position": "dominant|strong|average|weak|deteriorating",
     "peer_comparison_summary": "1-2 sentences comparing to named peers. MUST reference at least one peer by PEER_{num}.",
