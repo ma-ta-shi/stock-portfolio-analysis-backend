@@ -38,7 +38,7 @@ structlog.configure(wrapper_class=structlog.make_filtering_bound_logger(logging.
 from data.pipeline import _fetch_usd_cad  # noqa: E402
 from services import data_audit as audit  # noqa: E402
 
-CHECKS = ("fundamentals", "snapshot", "technicals", "macro", "currency", "research", "gaps")
+CHECKS = ("fundamentals", "snapshot", "technicals", "macro", "currency", "research", "fundamental_inputs", "gaps")
 
 
 async def _main(tickers: list[str], refresh: bool, show_ok: bool, only: set[str]) -> int:
@@ -59,6 +59,7 @@ async def _main(tickers: list[str], refresh: bool, show_ok: bool, only: set[str]
             "technicals": lambda b=bundle: audit.check_technicals(b),
             "currency": lambda b=bundle: audit.check_currency(b),
             "research": lambda b=bundle: audit.check_research(b),
+            "fundamental_inputs": lambda b=bundle: audit.check_fundamental_inputs(b),
             "gaps": lambda b=bundle: audit.check_gaps(b),
         }
         for name in CHECKS:
