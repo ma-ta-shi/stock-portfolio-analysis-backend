@@ -201,7 +201,12 @@ def _data_coverage_line(field_presence: dict[str, bool], sector_commodity_releva
 
 
 def _fmt(v, suffix: str = ""):
-    return "N/A" if v is None else f"{v}{suffix}"
+    # Figures are shown to 2 decimals (Canada GDP used to print as "3.1126084520850084%").
+    if v is None:
+        return "N/A"
+    if isinstance(v, float):
+        v = round(v, 2)
+    return f"{v}{suffix}"
 
 
 def _rate_block(m: MacroSourcesBundle, is_ca: bool) -> str:
@@ -242,10 +247,10 @@ def _cpi_block(m: MacroSourcesBundle, is_ca: bool) -> str:
 
 
 def _gdp_block(m: MacroSourcesBundle, is_ca: bool) -> str:
-    lines = [f"  US GDP QoQ (annualized): {_fmt(m.us_gdp_qoq, '%')} | 4q trend: {_fmt(m.us_gdp_4q_trend)}"]
+    lines = [f"  US GDP QoQ (annualized): {_fmt(m.us_gdp_qoq, '%')} | YoY growth vs last quarter: {_fmt(m.us_gdp_4q_trend)}"]
     if is_ca:
         lines.append(
-            f"  Canada GDP QoQ (annualized): {_fmt(m.ca_gdp_qoq, '%')} | 4q trend: {_fmt(m.ca_gdp_4q_trend)}"
+            f"  Canada GDP QoQ (annualized): {_fmt(m.ca_gdp_qoq, '%')} | YoY growth vs last quarter: {_fmt(m.ca_gdp_4q_trend)}"
         )
     return "\n".join(lines)
 
@@ -284,7 +289,7 @@ def _commod_block(m: MacroSourcesBundle) -> str:
 
 def _statcan_block(m: MacroSourcesBundle) -> str:
     return (
-        f"  Housing starts (SAAR): {_fmt(m.statcan_housing_starts)}\n"
+        f"  Housing starts (annualized units, SAAR): {_fmt(None if m.statcan_housing_starts is None else round(m.statcan_housing_starts))}\n"
         f"  Retail sales YoY: {_fmt(m.statcan_retail_sales_yoy, '%')}"
     )
 
@@ -339,7 +344,7 @@ COMMODITIES (COMMOD):
 SECTOR CONTEXT:
   Company sector: {company_info.get('sector')}
 
-REMINDER: Your narrative must be 80-120 words (480-720 chars). This is strictly enforced."""
+REMINDER: narrative 640-720 characters; key_factors 2-4; risks 1-3."""
 
     field_presence = {
         "rate": m.policy_rate_age_days is not None,

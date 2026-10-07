@@ -107,7 +107,7 @@ class MacroSourcesBundle(ContractModel):
     rate_trend: Literal["tightening", "pausing", "easing"] | None
     cpi_trend: Literal["rising", "stable", "falling"] | None
     cad_trend: Literal["cad_strengthening", "stable", "cad_weakening"] | None
-    vix_regime: Literal["low", "elevated", "high"] | None
+    vix_regime: Literal["low", "normal", "elevated", "high"] | None
 
     # --- Yield curve shape per jurisdiction (added 2026-08-07 — real gap
     # vs. the live Macro Economist prompt, missing from data-pipeline.md

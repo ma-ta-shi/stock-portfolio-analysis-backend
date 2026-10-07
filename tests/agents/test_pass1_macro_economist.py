@@ -32,7 +32,7 @@ def _macro(**overrides) -> SimpleNamespace:
         unemployment=4.1, unemployment_6m_delta=0.2, unemployment_age_days=7,
         statcan_unemployment_ca=6.5, ca_unemployment_6m_delta=0.1,
         cad_usd=0.73, cad_trend="stable", cad_usd_90d_change_pct=1.2, cad_usd_age_days=0,
-        vix=15.2, vix_regime="low", vix_30d_avg=16.0, vix_age_days=0,
+        vix=15.2, vix_regime="normal", vix_30d_avg=16.0, vix_age_days=0,
         sector_commodity_relevant=False, sector_commodity_name=None,
         sector_commodity_level=None, sector_commodity_direction=None,
         sector_commodity_age_days=None, commodity_90d_change_pct=None,
@@ -78,7 +78,7 @@ def test_ca_specific_fields_render_for_ca_stock():
     assert "Canada GDP QoQ" in msg
     assert "Canada Unemployment Rate (LFS): 6.5%" in msg
     assert "STATISTICS CANADA" in msg
-    assert "Housing starts (SAAR): 245000.0" in msg
+    assert "Housing starts (annualized units, SAAR): 245000" in msg
 
 
 def test_ca_specific_fields_absent_for_us_stock():

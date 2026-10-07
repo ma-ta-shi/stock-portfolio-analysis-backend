@@ -329,10 +329,10 @@ def _real_gdp_growth(series: pd.Series, as_of: date) -> dict:
     (qoq_annualized_pct / yoy_pct)."""
     dropped = _sorted_dropna(series)
     if dropped.empty:
-        return {"qoq_annualized_pct": None, "yoy_pct": None}
+        return {"qoq_annualized_pct": None, "yoy_pct": None, "prior_yoy_pct": None}
     dropped = dropped[dropped.index <= pd.Timestamp(as_of)]
     if len(dropped) < 2:
-        return {"qoq_annualized_pct": None, "yoy_pct": None}
+        return {"qoq_annualized_pct": None, "yoy_pct": None, "prior_yoy_pct": None}
     latest = float(dropped.iloc[-1])
     prev_q = float(dropped.iloc[-2])
     qoq = round(((latest / prev_q) ** 4 - 1) * 100, 2) if prev_q > 0 else None
@@ -341,7 +341,13 @@ def _real_gdp_growth(series: pd.Series, as_of: date) -> dict:
         year_ago = float(dropped.iloc[-5])
         if year_ago > 0:
             yoy = round((latest / year_ago - 1) * 100, 2)
-    return {"qoq_annualized_pct": qoq, "yoy_pct": yoy}
+    # YoY of the previous quarter, so the trend can say whether growth is picking up or slowing
+    prior_yoy = None
+    if len(dropped) >= 6:
+        prior, prior_year_ago = float(dropped.iloc[-2]), float(dropped.iloc[-6])
+        if prior_year_ago > 0:
+            prior_yoy = round((prior / prior_year_ago - 1) * 100, 2)
+    return {"qoq_annualized_pct": qoq, "yoy_pct": yoy, "prior_yoy_pct": prior_yoy}
 
 
 # ---------- trend classification (first-pass thresholds, not sourced from
@@ -368,17 +374,21 @@ def _cpi_trend(delta_pct: float | None) -> Literal["rising", "stable", "falling"
     return "stable"
 
 
-def _gdp_trend(yoy_pct: float | None) -> Literal["rising", "stable", "falling"] | None:
-    """Own deadband, not _cpi_trend's ±0.3 — a 12-month GDP change and a
-    3-month CPI change are different-scale quantities, so reusing CPI's
-    threshold would be an unexamined borrow, not a real design choice.
-    First-pass, not sourced from any doc, same disclosure as every other
-    threshold in this module."""
-    if yoy_pct is None:
+_GDP_TREND_DEADBAND_PP = 0.3
+
+
+def _gdp_trend(yoy_pct: float | None, prior_yoy_pct: float | None) -> Literal["rising", "stable", "falling"] | None:
+    """Is year-over-year growth picking up or slowing: this quarter's YoY against last quarter's, with a
+    0.3pp deadband. It used to classify the YoY level (above 1% is "rising"), so it said "rising" for almost
+    every run and the Macro agent copied that into growth_outlook "accelerating" in 73 of 80 real outputs.
+    On 8 real US quarters this gives rising 2, falling 4, stable 2. First-pass threshold, not sourced from
+    any doc, same disclosure as every other threshold in this module."""
+    if yoy_pct is None or prior_yoy_pct is None:
         return None
-    if yoy_pct > 1.0:
+    change = yoy_pct - prior_yoy_pct
+    if change > _GDP_TREND_DEADBAND_PP:
         return "rising"
-    if yoy_pct < -1.0:
+    if change < -_GDP_TREND_DEADBAND_PP:
         return "falling"
     return "stable"
 
@@ -395,14 +405,19 @@ def _cad_trend(
     return "stable"
 
 
-def _vix_regime(vix: float | None) -> Literal["low", "elevated", "high"] | None:
+def _vix_regime(vix: float | None) -> Literal["low", "normal", "elevated", "high"] | None:
+    """low under 15, normal 15 to 20 (the long-run average is about 19), elevated 20 to 25, high above 25. The band
+    used to call everything from 15 to 25 "elevated", so a VIX of 15.3 reached the Macro agent and Pass 2 as
+    "elevated" and the agent wrote "elevated volatility may increase financing costs" (CAR-UN.TO, 2026-10-06)."""
     if vix is None:
         return None
     if vix < 15:
         return "low"
     if vix > 25:
         return "high"
-    return "elevated"
+    if vix > 20:
+        return "elevated"
+    return "normal"
 
 
 def _curve_shape(
@@ -644,7 +659,7 @@ async def _fetch_statcan_fields(stats_canada: StatsCanadaProvider, as_of: date) 
         "ca_cpi_3m_delta": ca_cpi_3m_delta,
         "ca_cpi_trend": _cpi_trend(ca_cpi_3m_delta),
         "ca_gdp_qoq": gdp_index["qoq_annualized_pct"] if gdp_index else None,
-        "ca_gdp_4q_trend": _gdp_trend(gdp_yoy_pct),
+        "ca_gdp_4q_trend": _gdp_trend(gdp_yoy_pct, gdp_index.get("prior_yoy_pct") if gdp_index else None),
     }
 
 
@@ -782,7 +797,7 @@ async def compute_macro_sources(
         us_cpi_yoy=us_cpi_yoy,
         us_core_cpi_yoy=us_core_cpi_yoy,
         us_gdp_qoq=us_gdp_growth["qoq_annualized_pct"],
-        us_gdp_4q_trend=_gdp_trend(us_gdp_growth["yoy_pct"]),
+        us_gdp_4q_trend=_gdp_trend(us_gdp_growth["yoy_pct"], us_gdp_growth["prior_yoy_pct"]),
         vix_30d_avg=vix_30d_avg,
         rate_trend=_rate_trend(policy_rate_delta_bp),
         boc_rate_trend=_rate_trend(boc_rate_delta_bp),
