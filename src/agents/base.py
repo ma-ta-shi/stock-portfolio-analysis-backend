@@ -569,45 +569,23 @@ class BaseRunner:
 
         return "\n\n".join(parts)
 
-    # Overshoot up to this fraction over the max is trimmed locally instead of
-    # spending a retry. Beyond it, the output is too far off to salvage mechanically.
+    # A list over its cap by up to this fraction (plus one item) is cut by importance instead of spending a retry;
+    # beyond it, the output is too far off to salvage mechanically. Strings are never cut (see _auto_trim).
     AUTO_TRIM_TOLERANCE = 0.20
 
     @staticmethod
     def _auto_trim(result: dict, errors: list[str]) -> bool:
-        """Trim small `too long` overshoots to the last sentence boundary, in place.
+        """Repair small, mechanical overshoots in place: a list one or two items over its cap, and a percentage band with
+        text around it. A string that is too long is NOT cut: the cut fell at a sentence boundary near the limit, which
+        removed the closing sentence of the narrative (the synthesis) in 16 of 61 real Researcher outputs, averaging 203
+        characters, and nothing reported it. Over-long strings are retried (the retry message asks to condense), and
+        the validator ceilings sit where the model's real lengths do.
 
-        The model can control narrative length roughly but not precisely --
-        salvaging a small overshoot locally avoids burning a retry attempt the
-        model demonstrably cannot win.
-
-        Returns True if every error was resolved by trimming.
+        Returns True if it changed something.
         """
-        # Unit-aware: word limits are the Pass 1 norm, not the exception, so a
-        # `chars`-only pattern would never match a `max 80 words` error.
-        pattern = re.compile(r"^(\w+): too long \((\d+) (chars|words), max (\d+)")
         resolved = 0
-        for err in errors:
-            m = pattern.match(err)
-            if not m:
-                continue
-            field, actual, unit, limit = (m.group(1), int(m.group(2)), m.group(3), int(m.group(4)))
-            text = result.get(field)
-            if not isinstance(text, str) or actual > limit * (1 + BaseRunner.AUTO_TRIM_TOLERANCE):
-                continue
-            # Word limits trim on word boundaries; char limits on characters.
-            if unit == "words":
-                window = " ".join(text.split()[:limit])
-            else:
-                window = text[:limit]
-            cut = max(window.rfind(". "), window.rfind("! "), window.rfind("? "))
-            half = (len(window) if unit == "words" else limit) * 0.5
-            trimmed = window[: cut + 1].rstrip() if cut > half else window.rstrip()
-            if trimmed:
-                result[field] = trimmed
-                resolved += 1
 
-        # Over-long ARRAYS are the same class of imprecision as over-long strings.
+        # Over-long ARRAYS are a mechanical overshoot.
         # Truncation is by IMPORTANCE, not position: every key_factors/risks entry
         # carries an `importance` of high|medium|low, so dropping the lowest-ranked
         # item is principled where dropping the last one would be arbitrary.

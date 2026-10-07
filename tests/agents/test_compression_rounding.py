@@ -70,3 +70,15 @@ def test_numpy_floats_are_handled_like_plain_floats():
     assert _rounded(np.float64(514.27)) == 514.27
     assert type(_rounded(np.float64(0.5))) is float
     assert _rounded({"a": [np.float64(1234.56789)]}) == {"a": [1234.6]}
+
+
+def test_pass2_reads_350_tokens_of_a_narrative_so_a_1300_character_one_is_whole():
+    """The Researcher and Fundamental narrative ceiling is 1300 characters; the old 300 token (1200 character) cut
+    would have removed the closing synthesis."""
+    from agents.compression import NARRATIVE_VIEW_TOKENS
+    from agents.utils import truncate_to_tokens
+
+    assert NARRATIVE_VIEW_TOKENS == 350
+    narrative = "x" * 1300
+    assert truncate_to_tokens(narrative, NARRATIVE_VIEW_TOKENS) == narrative
+    assert truncate_to_tokens("x" * 1500, NARRATIVE_VIEW_TOKENS).endswith("...")

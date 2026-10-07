@@ -771,6 +771,7 @@ async def recent_errors(
                 LLMCall.parsed_ok,
                 LLMCall.parse_error,
                 LLMCall.finish_reason,
+                LLMCall.auto_trimmed,
             ).where(LLMCall.created_at >= since, LLMCall.call_site.like("agent:%"))
         )
     ).all()
@@ -786,6 +787,10 @@ async def recent_errors(
             found.append(("parse", agent, rule_slug(call.parse_error or "unparseable", 70)))
         if call.finish_reason not in _NORMAL_FINISH:
             found.append(("finish", agent, str(call.finish_reason)))
+        if call.auto_trimmed:
+            # The trimmer rescues the call, so it never shows as a retry; a list over its cap was cut by importance
+            # (Researcher: 22 of 61 first attempts, Fundamental: 43 of 61 before this was reported).
+            found.append(("trimmed", agent, "a list over its cap was cut by the trimmer (the prompt should state the cap)"))
         for signal in found:
             signal_count[signal] += 1
             signal_runs.setdefault(signal, set()).add(call.run_id)

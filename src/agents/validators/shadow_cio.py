@@ -87,7 +87,7 @@ def validate_shadow_cio(
     if ts and len(ts) < 100:
         errors.append(f"thesis_summary: too short ({len(ts)} chars, min 100)")
     elif ts and len(ts) > 300:
-        # Phrased to match base.py's _auto_trim pattern -- "too long (N chars, max M)".
+        # (base.py's trimmer used to cut an overshoot of up to 20% here; it no longer cuts strings, so this retries.)
         # It exists precisely because "the model can control narrative length roughly
         # but not precisely", and the shadow overshot at 301/307/349: a 0.3-16% overshoot
         # it burns retries on and cannot reliably win. The previous message

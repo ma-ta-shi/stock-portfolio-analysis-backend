@@ -161,6 +161,7 @@ async def _call(
     finish_reason="stop",
     parse_error=None,
     minutes_ago=5,
+    auto_trimmed=False,
 ):
     entry = {
         "seq": seq,
@@ -176,6 +177,7 @@ async def _call(
         "response_path": f"2026-09-29\\AAPL_abcd1234\\{seq}_{site.replace(':', '-')}.{attempt}.response.json",
         "total_duration_s": 8.0,
         "prompt_eval_count": 2000,
+        "auto_trimmed": auto_trimmed,
     }
     async with _maker(engine)() as session:
         call = LLMCall.from_call_log_entry(entry, run_id=run_id, agent_pass="pass1")
@@ -1369,3 +1371,17 @@ def test_every_mapped_agent_template_is_a_real_prompt_file():
     hashed = set(prompt_fingerprints()["files"])
     missing = {site: path for site, path in _AGENT_TEMPLATES.items() if path not in hashed}
     assert missing == {}
+
+
+async def test_a_call_the_trimmer_rescued_is_reported_as_a_quality_signal():
+    """It never shows as a retry, so a run whose lists were cut looked clean (Fundamental: 43 of 61 first attempts)."""
+    engine = await _engine()
+    run_id = await _run(engine, "AAPL", "completed", triggered_min=60, completed_min=55)
+    await _call(engine, run_id, seq=1, attempt=1, validator_passed=True, auto_trimmed=True)
+
+    async with _maker(engine)() as session:
+        d = await recent_errors(session, WINDOW_START, now=NOW)
+
+    assert [(x["kind"], x["agent"]) for x in d["signals"]] == [("trimmed", "fund")]
+    assert "trimmed   fund" in format_recent_errors(d)
+
