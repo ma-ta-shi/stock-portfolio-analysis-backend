@@ -85,6 +85,7 @@ from agents.base import BaseRunner
 from agents.macro_hints import currency_exposure_hint, sector_macro_hint
 from agents.prompts import fill, load_template
 from agents.utils import (
+    as_of_date,
     compute_data_quality_assessment,
     render_data_coverage_line,
     render_data_warnings,
@@ -315,7 +316,7 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     statcan_section = f"\n\nSTATISTICS CANADA (CA demand indicators):\n{_statcan_block(m)}" if is_ca else ""
 
     text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
-Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}
+Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {as_of_date(bundle)}
 
 INTEREST RATES (RATE):
 {_rate_block(m, is_ca)}

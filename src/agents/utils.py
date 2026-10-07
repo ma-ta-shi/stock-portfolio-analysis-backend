@@ -413,6 +413,13 @@ def gate2_check(pass2_outputs: dict) -> tuple[bool, str]:
     return True, "Gate 2 passed"
 
 
+def as_of_date(bundle) -> str:
+    """The date the data was fetched, "2026-10-07", for the "As of:" line of every payload. Every age and staleness limit in the
+    pipeline is in days (they all compare `data_vintage.date()`), so the model needs the date and nothing finer: the full
+    stamp carried seconds and microseconds ("2026-10-07T03:07:23.722117+00:00") that nothing reads."""
+    return bundle.data_vintage.date().isoformat()
+
+
 def currency_note(mismatch: dict | None, *, filings: bool = False) -> str:
     """The payload line that says what currency the figures are in when a company reports in a different currency
     than it trades in (see data/precompute/currency.py); empty when there is no mismatch. `filings` adds that amounts

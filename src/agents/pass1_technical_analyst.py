@@ -64,6 +64,7 @@ from functools import partial
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import (
+    as_of_date,
     compute_data_quality_assessment,
     render_data_coverage_line,
     render_data_warnings,
@@ -221,7 +222,7 @@ def build_user_message(bundle: DataBundle) -> tuple[str, dict[str, bool]]:
     trend_basis = "SMA stack order" if ti.get("stack_order") else "20/50-day averages only, under 200 sessions of history"
 
     text = f"""{bundle.stock.ticker} ({company_info.get('name')}) | {company_info.get('sector')} | {bundle.stock.exchange} | {bundle.stock.currency}
-Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vintage.isoformat()}{earnings_flag}{volume_flag}
+Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {as_of_date(bundle)}{earnings_flag}{volume_flag}
 
 EARNINGS PROXIMITY: {_fmt(earnings_days, ' days')}
 
