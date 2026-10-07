@@ -23,8 +23,6 @@ the prompt to read CanadianDataFlags's per-dimension fields directly, not
 resurrecting a field the design doc explicitly deprecated.
 """
 
-from typing import Literal
-
 from pydantic import NonNegativeInt, model_validator
 
 from data.schemas.base import ContractModel
@@ -37,16 +35,10 @@ class ManagementSignals(ContractModel):
     data.schemas.common's submodels), so it's colocated here rather than
     in common.py.
 
-    insider_net_direction_90d is Optional, deviating from the ticket's
-    literal required-Literal spec: a 3-value enum with no None conflates
-    "insiders traded net-neutral" (a real, resolved reading) with "we
-    couldn't determine this" (e.g. edgartools fetch failed) under the same
-    "neutral" value — the same class of ambiguity fixed in
-    CanadianDataFlags/MacroSourcesBundle by keeping "unknown" and "known,
-    resolved to a specific value" distinguishable. buyback_activity/
-    dividend_activity/changes_detail stay required str — an empty string
-    is already a natural, unambiguous "nothing to report" for free text,
-    unlike a closed enum.
+    buyback_activity/dividend_activity/changes_detail are required str: an empty string is already a natural,
+    unambiguous "nothing to report" for free text, unlike a closed enum. (An `insider_net_direction_90d` enum used to sit
+    here; it said "selling" for 7 of 8 names and in all 54 saved Researcher inputs, and the sized insider summary
+    carries everything it did, so it was removed 2026-10-06.)
 
     c_suite_changes_12mo is NonNegativeInt, not bool (changed 2026-08-07,
     contract-vs-consumer audit) — the live Stock Researcher Agent Prompt.md
@@ -65,7 +57,6 @@ class ManagementSignals(ContractModel):
 
     c_suite_changes_12mo: NonNegativeInt | None
     changes_detail: str
-    insider_net_direction_90d: Literal["buying", "neutral", "selling"] | None
     buyback_activity: str
     dividend_activity: str
 
@@ -129,6 +120,11 @@ class ResearchSourcesBundle(ContractModel):
     # is not this field; the two are related but distinct signals.
     has_filing_digest: bool
 
+    # A third-party business description (the data provider's company profile), anonymized and cut to about 250 tokens,
+    # fetched ONLY when there is no Business digest (a pure-Canadian name with no US filing, a fetch failure), so the
+    # Researcher is not left with no description of what the company does. None whenever a Business digest exists.
+    business_profile: str | None = None
+
     # Added 2026-08-07 (contract-vs-consumer audit): which of the
     # attempted data sources failed to resolve for this run (e.g.
     # ["transcript", "analyst_estimates"]) — the live Stock Researcher
@@ -189,6 +185,12 @@ class ResearchSourcesBundle(ContractModel):
                 raise ValueError(f"{age_name} must be None when {list_name} is empty")
             if count > 0 and age is None:
                 raise ValueError(f"{age_name} must not be None when {list_name} is non-empty")
+        return self
+
+    @model_validator(mode="after")
+    def _check_business_profile_only_without_a_business_digest(self) -> "ResearchSourcesBundle":
+        if self.business_profile is not None and any(d.section == "Business" for d in self.filing_digests):
+            raise ValueError("business_profile must be None when a Business filing digest exists")
         return self
 
     @model_validator(mode="after")

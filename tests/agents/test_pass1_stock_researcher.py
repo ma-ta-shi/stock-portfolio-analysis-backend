@@ -37,10 +37,9 @@ def _peer_block(peer_id="PEER_1", content="Business: peer summary. Recent news: 
 
 
 def _management_signals(
-    insider="buying", buyback="active", dividend="held", c_suite=None
+    buyback="active", dividend="held", c_suite=None
 ):
     return SimpleNamespace(
-        insider_net_direction_90d=insider,
         buyback_activity=buyback,
         dividend_activity=dividend,
         c_suite_changes_12mo=c_suite,
@@ -63,15 +62,19 @@ def _bundle(**overrides) -> SimpleNamespace:
         price_info={"current_price": 105.0, "market_cap": 1.3e11, "currency": "CAD",
                      "high_52w": 120.0, "low_52w": 60.0},
         risk_metrics={"beta": 1.8},
+        insider_activity={"transactions": [], "value_currency": "CAD"},
         dividend_info={"dividend_yield": None, "payout_ratio": None},
         research_sources=SimpleNamespace(
-            filing_digests=[_filing_digest()],
+            filing_digests=[_filing_digest(), _filing_digest(section="MDA", content="MDA digest content.")],
             news_items=[_news_item()],
             peer_blocks=[_peer_block()],
             management_signals=_management_signals(),
             missing_sources_list=[],
             has_filing_digest=True,
             transcript_excerpts=[],
+            peer_names={"PEER_1": "Peer One Inc."},
+            dual_class_flag=False,
+            business_profile=None,
             # 86bbummwp Tier 2 -- real fields on ResearchSourcesBundle, well
             # within _stale_data()'s own thresholds by default.
             latest_filing_age_days=30,
@@ -122,10 +125,10 @@ def test_low_quality_tier_news_is_filtered_out():
 def test_renders_management_signals_from_structured_fields():
     bundle = _bundle()
     bundle.research_sources.management_signals = _management_signals(
-        insider="selling", buyback="suspended", dividend="cut", c_suite=2
+        buyback="suspended", dividend="cut", c_suite=2
     )
     msg, _ = build_user_message(bundle)
-    assert "Insider activity (90d): selling" in msg
+    assert "Insider activity (90d): no qualifying insider purchases or sales" in msg  # the sized summary, not a bare direction
     assert "Buyback activity: suspended" in msg
     assert "Dividend activity: cut" in msg
     assert "C-suite changes (12mo): 2" in msg
@@ -170,8 +173,7 @@ def test_no_transcript_excerpts_renders_honestly_not_fabricated():
     """transcript_excerpts is permanently [] today (D3) -- must render as
     honestly unavailable, never a fabricated placeholder."""
     msg, _ = build_user_message(_bundle())
-    assert "EARNINGS TRANSCRIPT:" in msg
-    assert "not available" in msg
+    assert "EARNINGS TRANSCRIPT" not in msg  # nothing in it, so the block is left out rather than sent as a dead line
 
 
 def test_data_coverage_line_reflects_real_missing_sources():
@@ -182,11 +184,12 @@ def test_data_coverage_line_reflects_real_missing_sources():
     assert "no peer comparables available" in msg
 
 
-def test_data_coverage_line_standard_when_nothing_missing_except_permanent_gap():
+def test_data_coverage_line_standard_when_nothing_is_missing():
     msg, _ = build_user_message(_bundle())
-    # Nothing in missing_sources_list, but the permanent transcript gap always
-    # applies -- data_coverage_line is never a bare "standard." today.
-    assert "earnings transcript excerpts are not available" in msg
+    # The permanent transcript gap is not listed (the same on every run, nothing the model can act on); it stays in
+    # the stored data_coverage the confidence rule reads.
+    assert "DATA COVERAGE: standard." in msg
+    assert "transcript" not in msg.split("BUSINESS DESCRIPTION")[0]
 
 
 def test_canadian_data_limited_flag_appears_when_sedar_unavailable():
@@ -317,13 +320,14 @@ def _valid_stock_researcher_output(**overrides) -> dict:
     return base
 
 
-def _validate(output, has_filing_digest, material_absent=None, anomalies=None, stale_data=None):
+def _validate(output, has_filing_digest, material_absent=None, anomalies=None, stale_data=None, valid_news_ids=None):
     return _validate_with_caveats(
         output,
         has_filing_digest=has_filing_digest,
         material_absent=material_absent or [],
         anomalies=anomalies or [],
         stale_data=stale_data or [],
+        valid_news_ids=valid_news_ids,
     )
 
 
@@ -410,35 +414,16 @@ def test_data_coverage_matches_data_coverage_line_semantics():
 
 
 def test_anomalies_empty_by_default():
-    """Default fixture: buyback=active, insider=buying -- no contradiction."""
+    """Default fixture: nothing is flagged."""
     assert _anomalies(_bundle()) == []
 
 
-def test_anomalies_flags_buyback_active_with_insider_selling():
+def test_a_buyback_with_insider_selling_is_not_a_data_anomaly():
+    """It flagged 15 of 59 real runs and forced data quality to "low" ("unreliable" to Pass 2); two true facts are not a
+    contradiction in the data, and both reach the model in SIGNALS."""
     bundle = _bundle(research_sources=SimpleNamespace(
         filing_digests=[_filing_digest()], news_items=[_news_item()], peer_blocks=[_peer_block()],
-        management_signals=_management_signals(insider="selling", buyback="active"),
-        missing_sources_list=[], has_filing_digest=True, transcript_excerpts=[],
-    ))
-    result = _anomalies(bundle)
-    assert len(result) == 1
-    assert "buyback" in result[0].lower()
-    assert "sellers" in result[0].lower()
-
-
-def test_anomalies_not_flagged_when_buyback_suspended():
-    bundle = _bundle(research_sources=SimpleNamespace(
-        filing_digests=[_filing_digest()], news_items=[_news_item()], peer_blocks=[_peer_block()],
-        management_signals=_management_signals(insider="selling", buyback="suspended"),
-        missing_sources_list=[], has_filing_digest=True, transcript_excerpts=[],
-    ))
-    assert _anomalies(bundle) == []
-
-
-def test_anomalies_not_flagged_when_insider_buying():
-    bundle = _bundle(research_sources=SimpleNamespace(
-        filing_digests=[_filing_digest()], news_items=[_news_item()], peer_blocks=[_peer_block()],
-        management_signals=_management_signals(insider="buying", buyback="active"),
+        management_signals=_management_signals(buyback="active"),
         missing_sources_list=[], has_filing_digest=True, transcript_excerpts=[],
     ))
     assert _anomalies(bundle) == []
@@ -453,16 +438,17 @@ def test_stale_data_empty_for_default_fixture():
 
 def test_stale_data_flags_stale_filing_past_normal_reporting_cycle():
     bundle = _bundle()
-    bundle.research_sources.latest_filing_age_days = 150
+    bundle.research_sources.latest_filing_age_days = 500
     assert "filings" in _stale_data(bundle)
 
 
-def test_stale_data_filing_within_normal_quarterly_cycle_not_flagged():
-    """80 days is a completely normal filing age (companies report roughly
-    quarterly) -- must not be flagged."""
+def test_stale_data_an_annual_report_months_old_is_not_flagged():
+    """The digests come from the annual report, so 228 days (KO), 235 (ENB.TO) and 218 (BAM.TO) are normal; the old
+    120 day limit made all three "low" quality for Pass 2 on every run."""
     bundle = _bundle()
-    bundle.research_sources.latest_filing_age_days = 80
-    assert "filings" not in _stale_data(bundle)
+    for age in (80, 228, 365):
+        bundle.research_sources.latest_filing_age_days = age
+        assert "filings" not in _stale_data(bundle)
 
 
 def test_stale_data_flags_stale_news():
@@ -501,3 +487,156 @@ def test_the_researcher_payload_states_the_currency_conversion_and_that_filing_a
 def test_the_researcher_payload_has_no_currency_note_when_there_is_no_mismatch():
     msg, _ = build_user_message(_bundle())
     assert "NOTE: statements are reported" not in msg
+
+
+def test_the_business_digest_is_sent_once_and_labelled_for_citation():
+    """The Business digest used to be sent twice (BUSINESS DESCRIPTION, then FILING:Business under FILING HIGHLIGHTS)."""
+    msg, _ = build_user_message(_bundle())
+    assert msg.count("Business digest content.") == 1
+    assert "BUSINESS DESCRIPTION (cite as FILING:Business):" in msg
+    assert "FILING:MDA: MDA digest content." in msg and "FILING:Business:" not in msg
+
+
+def test_price_and_market_cap_are_rounded():
+    """TD.TO printed 168.5800018310547 CAD and a market cap of 275293962659.2229."""
+    bundle = _bundle(price_info={"current_price": 168.5800018310547, "market_cap": 275293962659.2229,
+                                  "currency": "CAD", "high_52w": 175.3300018310547, "low_52w": 109.5})
+    msg, _ = build_user_message(bundle)
+    assert "Current: 168.58 CAD | 52w High: 175.33 | 52w Low: 109.50" in msg
+    assert "Market Cap: 275.29B CAD" in msg
+
+
+def test_insider_activity_is_the_sized_summary_the_sentiment_agent_reads():
+    """Every one of 54 real outputs saw a bare "selling"; management was called concerning in 41 of them."""
+    bundle = _bundle(price_info={"current_price": 1.0, "market_cap": 1e11, "currency": "CAD", "high_52w": 2.0, "low_52w": 1.0})
+    bundle.insider_activity = {"transactions": [
+        {"date": datetime.now(UTC).date().isoformat(), "transaction_type": "sale", "value": 1.0e5, "is_issuer": False},
+    ], "value_currency": "CAD"}
+    msg, _ = build_user_message(bundle)
+    assert "none above the notable threshold" in msg and "routine" in msg
+
+
+def test_the_dividend_record_is_shown_not_only_the_yield():
+    """The dividend_compounder archetype is defined by the record, which was in the bundle and never shown."""
+    bundle = _bundle(dividend_info={"dividend_yield": 0.0242, "payout_ratio": 0.613, "dividend_growth_5yr": 0.0456,
+                                    "consecutive_years_paid": 7})
+    msg, _ = build_user_message(bundle)
+    assert "Yield: 2.42% | Payout ratio: 61.30% | 5-year dividend growth: 4.6% a year | paid in each of the last 7 years" in msg
+
+
+# ---------- the merge step between the model's answer and storage ----------
+
+
+def _answer(**overrides):
+    out = {
+        "assessment_summary": "COMPANY_X is ahead of PEER_1_COMPANY.",
+        "caveats": ["TICKER_X insiders sold shares."],
+        "narrative": "COMPANY_X (TICKER_X) leads PEER_1_COMPANY on scale (N1).",
+        "structured_data": {"recent_developments": [
+            {"news_id": "N1", "significance": "high", "sentiment": "positive"}]},
+    }
+    out.update(overrides)
+    return out
+
+
+def test_the_real_names_replace_the_anonymization_tokens_everywhere():
+    """9 of 61 real outputs carried COMPANY_X or PEER_1_COMPANY into Pass 2: deanonymize_text_fields was never called."""
+    from agents.pass1_stock_researcher import merge_researcher_output
+
+    merged = merge_researcher_output(_answer(), _bundle())
+
+    assert merged["narrative"] == "Shopify Inc (SHOP.TO) leads Peer One Inc. on scale (N1)."
+    assert merged["assessment_summary"] == "Shopify Inc is ahead of Peer One Inc.."
+    assert merged["caveats"] == ["SHOP.TO insiders sold shares."]
+
+
+def test_a_cited_news_id_is_stored_with_its_headline_date_and_source():
+    from agents.pass1_stock_researcher import merge_researcher_output
+
+    dev = merge_researcher_output(_answer(), _bundle())["structured_data"]["recent_developments"]
+
+    assert dev == [{"news_id": "N1", "event": "Company announces new product", "date": "2026-09-20T00:00:00+00:00",
+                    "source": "Reuters", "significance": "high", "sentiment": "positive"}]
+
+
+def test_the_dual_class_caveat_is_added_after_the_names_are_restored():
+    from agents.pass1_stock_researcher import merge_researcher_output
+
+    bundle = _bundle()
+    bundle.research_sources.dual_class_flag = True
+    caveats = merge_researcher_output(_answer(), bundle)["caveats"]
+
+    assert caveats[0] == "SHOP.TO insiders sold shares."
+    assert caveats[1].startswith("Dual-class share structure")
+    assert len(merge_researcher_output(_answer(), _bundle())["caveats"]) == 1  # no flag, nothing added
+
+
+def test_a_news_id_the_payload_does_not_list_is_dropped_not_raised_on():
+    """Only reachable when the answer failed validation on every attempt."""
+    from agents.pass1_stock_researcher import merge_researcher_output
+
+    answer = _answer(structured_data={"recent_developments": [
+        {"news_id": "N1", "significance": "high", "sentiment": "positive"},
+        {"news_id": "N99", "significance": "low", "sentiment": "neutral"}]})
+
+    dev = merge_researcher_output(answer, _bundle())["structured_data"]["recent_developments"]
+
+    assert [d["news_id"] for d in dev] == ["N1"]
+
+
+def test_the_model_is_made_to_retry_a_news_id_that_is_not_in_the_payload():
+    ok, errors = _validate(_answer(structured_data={"recent_developments": [{"news_id": "N99"}]}), True,
+                           valid_news_ids={"N1"})
+    assert not ok and any("recent_developments[0].news_id" in e for e in errors)
+
+
+async def test_the_runner_returns_the_merged_answer(monkeypatch):
+    """Through the real run(): what comes back is what gets stored."""
+    from agents.pass1_stock_researcher import StockResearcherRunner
+
+    runner = StockResearcherRunner()
+
+    async def fake_call(self, system, user, validator, **kwargs):
+        # the validator the runner built must accept the id the payload lists and reject an invented one
+        assert all("news_id" not in e for e in validator(_answer())[1])
+        assert any("news_id" in e for e in validator(_answer(structured_data={"recent_developments": [{"news_id": "N99"}]}))[1])
+        return _answer(), []
+
+    monkeypatch.setattr(StockResearcherRunner, "call_with_validation", fake_call)
+
+    out, errors = await runner.run(_bundle(stock=SimpleNamespace(ticker="SHOP.TO", currency="CAD", exchange="TSX")))
+
+    assert errors == []
+    assert "COMPANY_X" not in out["narrative"] and "TICKER_X" not in out["narrative"]
+    assert out["structured_data"]["recent_developments"][0]["event"] == "Company announces new product"
+
+
+def test_with_no_digest_the_business_description_is_the_labelled_company_profile():
+    """A name with no digest (pure-Canadian, a fetch failure) had no description of what the company does at all."""
+    bundle = _bundle()
+    bundle.research_sources.filing_digests = []
+    bundle.research_sources.has_filing_digest = False
+    bundle.research_sources.missing_sources_list = ["filing_digests"]
+    bundle.research_sources.business_profile = "COMPANY_X makes anvils."
+
+    msg, presence = build_user_message(bundle)
+
+    assert "BUSINESS DESCRIPTION (a third-party company profile, not a filing; cite as PROFILE:Business):\nCOMPANY_X makes anvils." in msg
+    assert "(the business description is a third-party company profile)" in msg
+    assert presence["business_description"] is True and presence["filing_highlights"] is False
+
+
+def test_with_neither_digest_nor_profile_the_description_says_so():
+    bundle = _bundle()
+    bundle.research_sources.filing_digests = []
+    msg, presence = build_user_message(bundle)
+    assert "N/A — no filing digest available for this name." in msg
+    assert presence["business_description"] is False
+
+
+def test_a_missing_company_name_falls_back_to_the_ticker_not_a_gap():
+    from agents.pass1_stock_researcher import merge_researcher_output
+
+    bundle = _bundle(company_info={"name": None, "sector": "Technology"})
+
+    assert merge_researcher_output(_answer(), bundle)["narrative"].startswith("SHOP.TO (SHOP.TO) leads")

@@ -17,8 +17,8 @@ against `data/schemas/research_sources_bundle.py` and
   scope decision) -- honestly renders as unavailable, not a bug in this port.
 - `management_signals`: the harness fixture used free-text narrative; the real
   `ManagementSignals` model gives derived enums (`buyback_activity`,
-  `dividend_activity`, `insider_net_direction_90d`) instead -- rendered from
-  those directly, not reconstructed as prose.
+  `dividend_activity`) instead, and the insider line is the sized summary the Sentiment
+  agent reads -- rendered from those directly, not reconstructed as prose.
 - `peer_1_token`/`peer_2_token`: the harness fills these with the peer's REAL
   ticker (`peers[0].get("ticker")`) -- but research_sources.py's own docstring
   ("A peer's own ticker is not separately templated anywhere in the live
@@ -73,20 +73,14 @@ was split out of it entirely rather than folded in under a renamed flag.
   1. `_data_coverage()` below mirrors `_data_coverage_line()`'s own logic
   instead, so both representations of the same underlying signal stay in
   sync by construction, not by convention.
-- `anomalies`: one new cross-check, `buyback_activity`/`insider_net_direction_90d`
-  computed independently from the same insider-transaction fetch
-  (`precompute/research_sources.py`) and never compared until now. Real,
-  correct, cheap logic -- but `_compute_buyback_activity()`'s own docstring
-  documents that `"active"` is structurally rare for both markets (Form 4
-  doesn't capture large-scale US buybacks; the CA aggregate fallback
-  hardcodes `is_issuer=False`), so don't expect this to fire often in
-  practice.
+- `anomalies`: none today. The one cross-check (an active buyback while insiders are net sellers) flagged 15 of 59
+  real runs and forced data quality to "low" for a contradiction that is not one in the data; both facts reach the
+  model in SIGNALS (2026-10-06, ledger BB-105).
 - `stale_data`: `latest_filing_age_days`/`latest_news_age_days` are real,
-  already-computed fields (`ResearchSourcesBundle`), same "age of latest
-  item, not fetch recency" shape as Macro Economist's own age fields -- a
-  filing filed 80 days ago is completely normal (companies report roughly
-  quarterly), so the threshold has to survive a normal filing cycle, not
-  flag most companies as stale most of the time. `latest_transcript_age_days`
+  already-computed fields (`ResearchSourcesBundle`), "age of latest item, not
+  fetch recency", like Macro Economist's own age fields. The filing digests come
+  from the annual report, so the filing limit is 450 days (it was 120, a quarterly
+  cycle, which flagged KO, ENB.TO and BAM.TO on every run). `latest_transcript_age_days`
   is permanently `None` today (D3, transcripts don't exist yet) -- not
   flagged here, that's a `data_coverage` gap (already tracked via
   `missing_sources_list`), not a staleness signal; nothing to measure an age
@@ -98,11 +92,25 @@ from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import RenderedField, compute_data_quality_assessment, currency_note, render_data_warnings
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
-from agents.validators.pass1 import validate_filing_depth_caveat, validate_stock_researcher
+from agents.validators.pass1 import (
+    validate_filing_depth_caveat,
+    validate_recent_developments_news_ids,
+    validate_stock_researcher,
+)
+from data.precompute.insider import summarize_insider_activity
+from data.precompute.research_sources import (
+    apply_dual_class_caveat,
+    build_hydrated_developments,
+    deanonymize_text_fields,
+)
 from data.schemas.data_bundle import DataBundle
 
 _COVERAGE_SOURCES = ("filing_digests", "peer_blocks", "news_items")
-_STALE_FILING_DAYS = 120  # ~1 quarter (90d) plus a buffer for real-world reporting lag
+# The digests come from the annual report (10-K, 20-F, 40-F), so the latest one is normally up to a year old. The old
+# limit of 120 days (a quarterly cycle) flagged KO (228 days), ENB.TO (235) and BAM.TO (218) as stale on every run,
+# which made their data quality "low" for Pass 2 and forced a caveat for nothing. Stale means an annual report overdue:
+# a year plus about three months of filing lag.
+_STALE_FILING_DAYS = 450
 _STALE_NEWS_DAYS = 30     # no fresh news at all in a month is a real gap worth flagging
 
 
@@ -112,6 +120,7 @@ def _validate_with_caveats(
     material_absent: list[str],
     anomalies: list[str],
     stale_data: list[str],
+    valid_news_ids: set[str] | None = None,
 ) -> tuple[bool, list[str]]:
     """Composing validator (86bbummwp 1d, extended by the follow-on
     confidence/data-quality coupling rule) -- merges the base schema check
@@ -147,20 +156,25 @@ def _validate_with_caveats(
         anomalies=anomalies,
         stale_data=stale_data,
     )
-    return passed and fd_passed and cq_passed, errors + fd_errors + cq_errors
+    nid_passed, nid_errors = (True, []) if valid_news_ids is None else validate_recent_developments_news_ids(
+        output, valid_news_ids
+    )
+    return passed and fd_passed and cq_passed and nid_passed, errors + fd_errors + cq_errors + nid_errors
 
 
 def _data_coverage_line(bundle: DataBundle) -> str:
     gaps = []
     missing = set(bundle.research_sources.missing_sources_list)
     if "filing_digests" in missing:
-        gaps.append("no filing digest available for this name")
+        gaps.append("no filing digest available for this name"
+                    + (" (the business description is a third-party company profile)"
+                       if bundle.research_sources.business_profile else ""))
     if "peer_blocks" in missing:
         gaps.append("no peer comparables available")
     if "news_items" in missing:
         gaps.append("no recent news available")
-    # Permanent, not conditional on this run -- D3, see module docstring.
-    gaps.append("earnings transcript excerpts are not available (not yet built into the data pipeline)")
+    # The permanent transcript gap (D3) is not listed: it is the same on every run and the model cannot act on it. It
+    # stays in the stored data_coverage (see _data_coverage), which is what the confidence rule reads.
     return "standard." if not gaps else "; ".join(gaps) + "."
 
 
@@ -177,14 +191,11 @@ def _data_coverage(bundle: DataBundle) -> dict:
 
 
 def _anomalies(bundle: DataBundle) -> list[str]:
-    """D6's `anomalies` flag (86bbummwp Tier 2) -- one cross-check between two
-    management-signal fields computed independently from the same
-    insider-transaction fetch (`precompute/research_sources.py`) and never
-    compared before now. See module docstring for the real-world caveat on
-    how often `buyback_activity == "active"` actually occurs."""
-    ms = bundle.research_sources.management_signals
-    if ms.buyback_activity == "active" and ms.insider_net_direction_90d == "selling":
-        return ["buyback program active while insiders are net sellers over the past 90 days"]
+    """D6's `anomalies` flag (86bbummwp Tier 2). None today: the one cross-check it made is gone (below). Kept as a
+    function so the flag is still passed through the same plumbing every Pass 1 agent shares."""
+    # The one cross-check this used to make (an active buyback while insiders are net sellers) is gone: it flagged 15 of
+    # 59 real runs, and an anomaly forces data quality to "low" ("unreliable" to Pass 2), but insiders selling while a
+    # company buys back is not a contradiction in the data, only two facts. Both reach the model in SIGNALS.
     return []
 
 
@@ -206,11 +217,25 @@ def _business_description(bundle: DataBundle) -> RenderedField:
     )
     if business:
         return RenderedField(text=business.content, present=True)
+    profile = bundle.research_sources.business_profile
+    if profile:
+        # The fallback when there is no digest: the data provider's company description, not a filing.
+        return RenderedField(text=profile, present=True)
     return RenderedField(text="N/A — no filing digest available for this name.", present=False)
 
 
+def _business_header(bundle: DataBundle) -> str:
+    """The Business digest is shown once, here, and cited as FILING:Business (it used to be sent a second time under
+    FILING HIGHLIGHTS)."""
+    if any(d.section == "Business" for d in bundle.research_sources.filing_digests):
+        return "BUSINESS DESCRIPTION (cite as FILING:Business):"
+    if bundle.research_sources.business_profile:
+        return "BUSINESS DESCRIPTION (a third-party company profile, not a filing; cite as PROFILE:Business):"
+    return "BUSINESS DESCRIPTION:"
+
+
 def _filing_highlights(bundle: DataBundle) -> RenderedField:
-    digests = bundle.research_sources.filing_digests
+    digests = [d for d in bundle.research_sources.filing_digests if d.section != "Business"]  # Business is shown above
     if not digests:
         return RenderedField(text="N/A", present=False)
     text = "\n".join(f"FILING:{d.section}: {d.content}" for d in digests)
@@ -224,12 +249,9 @@ def _earnings_transcript(bundle: DataBundle) -> RenderedField:
     # be False here for every real run, not a bug in this field.
     excerpts = bundle.research_sources.transcript_excerpts
     if not excerpts:
-        return RenderedField(
-            text="N/A — earnings transcript excerpts are not available (not yet built into the data pipeline).",
-            present=False,
-        )
+        return RenderedField(text="", present=False)  # the block is left out of the message while it is empty
     text = "\n".join(f"[{t.quarter} {t.type}] {t.content}" for t in excerpts)
-    return RenderedField(text=text, present=True)
+    return RenderedField(text=f"EARNINGS TRANSCRIPT:\n{text}\n\n", present=True)
 
 
 def _recent_developments(bundle: DataBundle) -> RenderedField:
@@ -247,10 +269,49 @@ def _recent_developments(bundle: DataBundle) -> RenderedField:
     return RenderedField(text=text, present=True)
 
 
+def _shown_news_ids(bundle: DataBundle) -> set[str]:
+    """The news ids the payload lists (what the model may cite): the same filter _recent_developments renders."""
+    return {i.id for i in bundle.research_sources.news_items if i.quality_tier != "low"}
+
+
+def merge_researcher_output(output: dict, bundle: DataBundle) -> dict:
+    """The merge step between the model's answer and storage, in the order the functions' own docstrings require:
+    put the real names back in place of COMPANY_X, TICKER_X and PEER_n_COMPANY, replace each cited news id with its
+    headline, date and source, then add the dual-class caveat when the flag is set.
+
+    These three functions (86bawptxh, 86bawptxr) were written and unit-tested in precompute/research_sources.py and
+    never called, so 9 of 61 real outputs carried raw COMPANY_X or PEER_1_COMPANY text into Pass 2, recent developments
+    were stored as bare ids, and the dual-class caveat was never added. A news id the payload does not list (possible
+    only when the answer failed validation on every attempt) is dropped rather than raised on."""
+    if not isinstance(output, dict):
+        return output
+    rs = bundle.research_sources
+    # A missing company name falls back to the ticker: an empty replacement would delete COMPANY_X and leave a gap.
+    merged = deanonymize_text_fields(
+        output, bundle.company_info.get("name") or bundle.stock.ticker, bundle.stock.ticker, dict(rs.peer_names)
+    )
+    sd = merged.get("structured_data")
+    if isinstance(sd, dict) and isinstance(sd.get("recent_developments"), list):
+        listed = {i.id for i in rs.news_items}
+        known = [d for d in sd["recent_developments"] if isinstance(d, dict) and d.get("news_id") in listed]
+        sd["recent_developments"] = build_hydrated_developments(rs, known)
+    caveats = merged.get("caveats")
+    merged["caveats"] = apply_dual_class_caveat(caveats if isinstance(caveats, list) else [], rs.dual_class_flag)
+    return merged
+
+
 def _management_signals(bundle: DataBundle) -> str:
     ms = bundle.research_sources.management_signals
+    # The same sized summary the Sentiment agent reads. The bare direction said "selling" in all 54 real outputs
+    # (executives sell as a matter of course), so the agent called management "concerning" in 41 of them.
+    insider = summarize_insider_activity(
+        bundle.insider_activity.get("transactions", []),
+        bundle.price_info.get("market_cap"),
+        bundle.insider_activity.get("value_currency"),
+        bundle.price_info.get("currency"),
+    )
     lines = [
-        f"  Insider activity (90d): {ms.insider_net_direction_90d or 'unknown'}",
+        f"  Insider activity (90d): {insider['text']}",
         f"  Buyback activity: {ms.buyback_activity}",
         f"  Dividend activity: {ms.dividend_activity}",
     ]
@@ -279,12 +340,26 @@ def _beta_line(bundle: DataBundle) -> RenderedField:
     return RenderedField(text=text, present=beta is not None)
 
 
+def _price(value) -> str:
+    return "N/A" if value is None else f"{value:.2f}"
+
+
+def _market_cap(value, currency) -> str:
+    """275293962659.2229 reads as 275.29B CAD."""
+    if value is None:
+        return "N/A"
+    for limit, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M")):
+        if abs(value) >= limit:
+            return f"{value / limit:.2f}{suffix} {currency or ''}".strip()
+    return f"{value:.0f} {currency or ''}".strip()
+
+
 def _price_context(bundle: DataBundle) -> str:
     p = bundle.price_info
     currency = p.get("currency")
     lines = [
-        f"  Current: {p.get('current_price')} {currency} | 52w High: {p.get('high_52w')} | 52w Low: {p.get('low_52w')}",
-        f"  Market Cap: {p.get('market_cap', 'N/A')}",
+        f"  Current: {_price(p.get('current_price'))} {currency} | 52w High: {_price(p.get('high_52w'))} | 52w Low: {_price(p.get('low_52w'))}",
+        f"  Market Cap: {_market_cap(p.get('market_cap'), currency)}",
         _beta_line(bundle).text,
     ]
     return "\n".join(lines)
@@ -297,6 +372,13 @@ def _dividend_context(bundle: DataBundle) -> RenderedField:
     yield_str = f"{yield_pct * 100:.2f}%" if yield_pct is not None else "N/A"
     payout_str = f"{payout_pct * 100:.2f}%" if payout_pct is not None else "N/A"
     text = f"  Yield: {yield_str} | Payout ratio: {payout_str}"
+    # The record the dividend_compounder archetype is defined by: it was in the bundle but never shown, so KO, ENB.TO and
+    # TD.TO were all called quality_compounder.
+    growth, years = d.get("dividend_growth_5yr"), d.get("consecutive_years_paid")
+    if growth is not None:
+        text += f" | 5-year dividend growth: {growth * 100:.1f}% a year"
+    if years:
+        text += f" | paid in each of the last {years} years"
     # present if either component is real -- the two are independent
     # signals (a name could have a real yield but no payout ratio data, or
     # vice versa), so "both missing" is the honest absent case, not "both
@@ -343,7 +425,7 @@ Timeline: {ctx.timeline} | Account: {ctx.account_type} | As of: {bundle.data_vin
 
 DATA COVERAGE: {_data_coverage_line(bundle)}
 
-BUSINESS DESCRIPTION:
+{_business_header(bundle)}
 {business.text}
 
 RECENT DEVELOPMENTS (NEWS):
@@ -355,10 +437,7 @@ MANAGEMENT SIGNALS:
 FILING HIGHLIGHTS:
 {filing_highlights.text}
 
-EARNINGS TRANSCRIPT:
-{earnings_transcript.text}
-
-{peers.text}
+{earnings_transcript.text}{peers.text}
 
 PRICE CONTEXT:
 {_price_context(bundle)}
@@ -414,11 +493,9 @@ class StockResearcherRunner(BaseRunner):
                 # them, not substituted with the real name.
                 "sector": bundle.company_info.get("sector"),
                 "timeline": ctx.timeline,
-                "timeline_instruction": f"Timeline: {ctx.timeline}.",
                 "data_coverage_line": _data_coverage_line(bundle),
                 "data_warnings": render_data_warnings(self.last_anomalies, self.last_stale_data),
                 "memory_brief": "",
-                "sector_moat_hint": "",
                 "has_filing_digest": str(bundle.research_sources.has_filing_digest).lower(),
                 # Literal citation tokens, not real peer tickers -- see module
                 # docstring for why this differs from the harness.
@@ -426,7 +503,7 @@ class StockResearcherRunner(BaseRunner):
                 "peer_2_token": peers[1].peer_id if len(peers) > 1 else "another peer",
             },
         )
-        return await self.call_with_validation(
+        result, errors = await self.call_with_validation(
             system_prompt,
             user_msg,
             partial(
@@ -435,7 +512,9 @@ class StockResearcherRunner(BaseRunner):
                 material_absent=material_absent,
                 anomalies=self.last_anomalies,
                 stale_data=self.last_stale_data,
+                valid_news_ids=_shown_news_ids(bundle),
             ),
             max_tokens=4000,
             temperature=0.3,
         )
+        return merge_researcher_output(result, bundle), errors

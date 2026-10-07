@@ -25,6 +25,11 @@ from agents.pass2_view import build_pass2_view
 from agents.utils import truncate_to_tokens
 from data.schemas.data_bundle import DataBundle
 
+# How much of each Pass 1 narrative Pass 2 reads (about 4 characters a token). Raised from 300 (2026-10-06) to cover the
+# 1300 character ceiling the Researcher and Fundamental narratives now have, so the cut does not remove their closing
+# synthesis. Whether Pass 2 should have a cut at all is open (ledger BB-100).
+NARRATIVE_VIEW_TOKENS = 350
+
 AGENT_KEYS = {
     "RSRCH": "stock_researcher",
     "FUND": "fundamental_analyst",
@@ -93,7 +98,7 @@ def compress_pass1_outputs(
             "data_quality_assessment": mechanical_quality.get(agent_id, "low"),
             "caveats": output.get("caveats", []),
             "pass2_view": view,
-            "narrative_truncated": truncate_to_tokens(output.get("narrative", ""), 300),
+            "narrative_truncated": truncate_to_tokens(output.get("narrative", ""), NARRATIVE_VIEW_TOKENS),
         }
     return compressed
 

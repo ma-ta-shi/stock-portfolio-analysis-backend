@@ -30,7 +30,6 @@ def _research_bundle(
         management_signals=ManagementSignals(
             c_suite_changes_12mo=None,
             changes_detail="",
-            insider_net_direction_90d=None,
             buyback_activity="",
             dividend_activity="",
         ),

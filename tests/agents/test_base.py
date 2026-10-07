@@ -423,10 +423,15 @@ class TestCallWithValidation:
         assert '"short"' in second_user_msg
 
     @pytest.mark.asyncio
-    async def test_auto_trims_a_small_overshoot_without_a_retry(self):
+    async def test_an_over_long_string_is_retried_not_cut(self):
+        """A cut at the last sentence boundary removed the closing sentence of the narrative in 16 of 61 real Researcher
+        outputs and nothing reported it, so a string over its limit is retried."""
         long_summary = "word " * 90  # 90 words, over an 80-word max
         session = FakeSession(
-            FakeResponse(200, _ollama_chat_response({"assessment_summary": long_summary.strip()}))
+            [
+                FakeResponse(200, _ollama_chat_response({"assessment_summary": long_summary.strip()})),
+                FakeResponse(200, _ollama_chat_response({"assessment_summary": "a short, complete summary"})),
+            ]
         )
         runner = BaseRunner()
         runner.session = session
@@ -439,8 +444,8 @@ class TestCallWithValidation:
 
         result, errors = await runner.call_with_validation("sys", "usr", validator)
         assert errors == []
-        assert len(result["assessment_summary"].split()) <= 80
-        assert len(session.calls) == 1, "auto-trim must not spend a retry"
+        assert result["assessment_summary"] == "a short, complete summary"
+        assert len(session.calls) == 2, "the over-long summary is retried, not cut"
 
     @pytest.mark.asyncio
     async def test_retries_on_json_parse_error(self):
@@ -844,15 +849,13 @@ class TestCallWithValidationStart:
         assert len(session.calls) == MAX_RETRIES
 
     @pytest.mark.asyncio
-    async def test_auto_trims_without_a_retry(self):
+    async def test_an_over_long_string_is_retried_not_cut(self):
         long_summary = "word " * 90  # 90 words, over an 80-word max
         session = FakeSession(
-            FakeResponse(
-                200,
-                _ollama_generate_response(
-                    {"assessment_summary": long_summary.strip()}, context=[5]
-                ),
-            )
+            [
+                FakeResponse(200, _ollama_generate_response({"assessment_summary": long_summary.strip()}, context=[5])),
+                FakeResponse(200, _ollama_generate_response({"assessment_summary": "a short, complete summary"}, context=[5])),
+            ]
         )
         runner = BaseRunner()
         runner.session = session
@@ -868,7 +871,8 @@ class TestCallWithValidationStart:
         )
         assert errors == []
         assert context == [5]
-        assert len(session.calls) == 1, "auto-trim must not spend a retry"
+        assert result["assessment_summary"] == "a short, complete summary"
+        assert len(session.calls) == 2, "the over-long summary is retried, not cut"
 
     @pytest.mark.asyncio
     async def test_does_not_catch_ollama_unavailable(self, monkeypatch):
@@ -1022,33 +1026,14 @@ class TestParseJsonResponse:
 
 
 class TestAutoTrim:
-    def test_trims_to_last_sentence_boundary_when_present(self):
-        # Lengths are derived, not hand-counted, so the fixture can't drift out
-        # of sync with the assertions: `prefix` ends in ". " past the trim
-        # window's halfway point, so the trimmer should cut there rather than
-        # hard-truncating mid-filler.
-        prefix = "A" * 23 + ". "
-        text = prefix + "xxx"
-        limit = 26
-        errors = [f"narrative: too long ({len(text)} chars, max {limit})"]
-        result = {"narrative": text}
-        resolved = BaseRunner._auto_trim(result, errors)
-        assert resolved is True
-        assert result["narrative"] == prefix.rstrip()
-
-    def test_hard_truncates_to_limit_when_no_sentence_boundary(self):
-        result = {"narrative": "x" * 45}
-        errors = ["narrative: too long (45 chars, max 40)"]
-        resolved = BaseRunner._auto_trim(result, errors)
-        assert resolved is True
-        assert result["narrative"] == "x" * 40
-
-    def test_does_not_trim_a_gross_overshoot(self):
-        result = {"narrative": "x" * 100}
-        errors = ["narrative: too long (100 chars, max 40)"]
-        resolved = BaseRunner._auto_trim(result, errors)
-        assert resolved is False
-        assert result["narrative"] == "x" * 100
+    def test_a_string_over_its_limit_is_left_alone(self):
+        """The old sentence-boundary cut lost the conclusion; strings are retried instead."""
+        for text, error in (("A" * 23 + ". xxx", "narrative: too long (26 chars, max 26)"),
+                            ("x" * 45, "narrative: too long (45 chars, max 40)"),
+                            ("x" * 100, "narrative: too long (100 chars, max 40)")):
+            result = {"narrative": text}
+            assert BaseRunner._auto_trim(result, [error]) is False
+            assert result["narrative"] == text
 
     def test_truncates_array_by_importance_not_position(self):
         result = {

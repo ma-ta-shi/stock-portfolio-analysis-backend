@@ -66,6 +66,12 @@ def _obj(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def _development(item):
+    if not isinstance(item, dict) or "event" not in item:
+        return item
+    return {key: item[key] for key in ("news_id", "event", "date", "significance", "sentiment") if key in item}
+
+
 def _top(seq, n: int) -> list:
     """First `n` items. `top_*` fields are slices of a full array, not separate fields."""
     return list(seq)[:n] if isinstance(seq, list) else []
@@ -92,7 +98,9 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             # top_* are slices of the full arrays the LLM produces
             "top_growth_drivers": _top(c.get("growth_drivers"), 2),
             "top_competitive_threats": _top(c.get("competitive_threats"), 2),
-            "top_recent_developments": _top(c.get("recent_developments"), 2),
+            # Stored hydrated by the Researcher's merge step (headline, date and source beside the id); Bull and Bear
+            # used to get "N4, high, positive" with no headline to read. The source is left out of the view.
+            "top_recent_developments": [_development(d) for d in _top(c.get("recent_developments"), 2)],
             "peer_comparison_summary": c.get("peer_comparison_summary"),
         }
 

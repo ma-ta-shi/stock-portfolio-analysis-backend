@@ -198,7 +198,7 @@ class TestStockResearcher:
 
     def test_assessment_summary_too_long_fails(self):
         out = _stock_researcher_output()
-        out["assessment_summary"] = " ".join(["word"] * 85)  # 85 words
+        out["assessment_summary"] = " ".join(["word"] * 100)  # 100 words, over the 96 ceiling (the prompt says 80)
         passed, errors = validate_stock_researcher(out)
         assert not passed
         assert any("assessment_summary" in e for e in errors)
@@ -212,7 +212,7 @@ class TestStockResearcher:
 
     def test_narrative_too_long_fails(self):
         out = _stock_researcher_output()
-        out["narrative"] = "A" * 1100  # over 1080 chars
+        out["narrative"] = "A" * 1400  # over the 1300 ceiling
         passed, errors = validate_stock_researcher(out)
         assert not passed
         assert any("narrative" in e and "long" in e for e in errors)
@@ -297,6 +297,30 @@ class TestStockResearcher:
         out["caveats"] = ["Some other caveat."]
         passed, errors = validate_filing_depth_caveat(out, has_filing_digest=True)
         assert passed, errors
+
+    def test_a_researcher_note_with_nothing_to_caveat_may_have_no_caveats(self):
+        """The old minimum of 1 was only met because the payload listed a permanent transcript gap to mention."""
+        out = _stock_researcher_output()
+        out["caveats"] = []
+        passed, errors = validate_stock_researcher(out)
+        assert passed, errors
+        out["caveats"] = ["a", "b", "c", "d", "e"]
+        assert not validate_stock_researcher(out)[0]
+
+    def test_a_researcher_narrative_of_650_characters_is_complete_enough(self):
+        """Two of 16 replay narratives were 651 and 679 characters against the old 720 floor."""
+        out = _stock_researcher_output()
+        out["narrative"] = "x " * 325
+        passed, errors = validate_stock_researcher(out)
+        assert passed, errors
+
+    def test_the_filing_depth_caveat_is_rejected_when_a_digest_is_present(self):
+        """10 of 71 real outputs wrote it with the filing digest in the payload, and Pass 2 reads caveats verbatim."""
+        out = _stock_researcher_output()
+        out["caveats"] = ["Filing depth limited: no regulatory filing text was available for this company."]
+        passed, errors = validate_filing_depth_caveat(out, has_filing_digest=True)
+        assert not passed
+        assert any("a filing digest is in the payload" in e for e in errors)
 
     def test_filing_depth_caveat_is_market_agnostic_not_gated_on_canadian_flag(self):
         """This is RSRCH's real requirement -- has_filing_digest can be False
@@ -503,7 +527,7 @@ class TestMacroEconomist:
 
     def test_narrative_too_long_fails(self):
         out = _macro_economist_output()
-        out["narrative"] = "A " * 400  # 800 chars, over 720 max
+        out["narrative"] = "A " * 450  # 900 chars, over the 864 ceiling (the prompt says 720)
         passed, errors = validate_macro_economist(out)
         assert not passed
         assert any("narrative" in e and "long" in e for e in errors)
@@ -530,3 +554,24 @@ class TestMacroEconomist:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestOvershootIsAcceptedUncutNotTrimmed:
+    """The shared trimmer used to cut a string up to 20% over its limit and removed the closing sentence; that much
+    overshoot now passes as written, and the validator ceiling is the stated limit + 20%."""
+
+    def test_a_researcher_summary_of_90_words_passes_and_97_does_not(self):
+        out = _stock_researcher_output()
+        out["assessment_summary"] = " ".join(["word"] * 90)
+        assert validate_stock_researcher(out)[0]
+        out["assessment_summary"] = " ".join(["word"] * 97)
+        assert not validate_stock_researcher(out)[0]
+
+    def test_a_technical_narrative_of_1178_characters_passes(self):
+        """ATD.TO 2026-10-06: three identical attempts of 1178 characters failed the old 1080 ceiling."""
+        out = _technical_analyst_output()
+        out["narrative"] = "A" * 1178
+        assert not any("narrative" in e for e in validate_technical_analyst(out)[1])
+        out["narrative"] = "A" * 1301
+        assert any("narrative: too long" in e for e in validate_technical_analyst(out)[1])
+

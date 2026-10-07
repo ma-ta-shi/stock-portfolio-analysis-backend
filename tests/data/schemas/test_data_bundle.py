@@ -35,7 +35,6 @@ def _empty_research_sources() -> ResearchSourcesBundle:
         management_signals=ManagementSignals(
             c_suite_changes_12mo=0,
             changes_detail="",
-            insider_net_direction_90d=None,
             buyback_activity="",
             dividend_activity="",
         ),

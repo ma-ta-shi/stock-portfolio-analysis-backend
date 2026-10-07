@@ -56,12 +56,8 @@ from data.schemas.research_sources_bundle import ManagementSignals, ResearchSour
 
 logger = structlog.get_logger(__name__)
 
-_PEER_NEWS_DAYS = 30  # a peer's recent news is 1-2 flavor headlines embedded in a
-# <=200-token block, not a citation-tracked list, so it keeps the single capped request
-# (never `thorough`): the newest 2 headlines are all it needs (BB-023).
 _PEER_SUMMARY_TOKEN_BUDGET = 50
 _PEER_BLOCK_TOKEN_BUDGET = 200
-_NEWS_LABEL = "Recent news: "
 
 _CA_MARKET_SUFFIXES = (".TO", ".V")  # mirrors router.py's own _CA_SUFFIXES (private
 # there) - duplicated here rather than imported across a private module boundary,
@@ -74,9 +70,7 @@ _SHARE_CLASS_SUFFIX_RE = re.compile(r",?\s*Class\s+[A-Za-z0-9].*$", re.IGNORECAS
 # further down (strips this same qualifier off a name for anonymization matching) -
 # one real-world signal, two different uses of it.
 
-_INSIDER_WINDOW_DAYS = 365  # covers both insider_net_direction_90d's own 90-day
-# window (filtered client-side from this) and buyback_activity's active/suspended
-# split (91-365 day range) - one fetch, two derived views.
+_INSIDER_WINDOW_DAYS = 365  # buyback_activity's active/suspended split (91-365 day range) looks back this far
 _BUYBACK_RECENT_DAYS = 90
 
 _DIVIDEND_LOOKBACK_DAYS = 1825  # ~5 years - wide enough to reliably distinguish
@@ -236,83 +230,25 @@ def _truncate_to_tokens(text: str, token_budget: int) -> str:
     return window[: cut + 1].rstrip()
 
 
-def _render_peer_content(summary: str | None, news: list[dict]) -> str | None:
-    """One human-readable string per peer, business summary + recent news
-    pre-joined. PeerBlock's schema (common.py) has only one flat `content`
-    field - no room for the two separate placeholders the live prompt
-    template actually renders ({peer_N_business_summary}/
-    {peer_N_recent_news} as two distinct lines) - so whatever eventually
-    renders that template either uses this whole string in one slot or
-    parses it back apart; that mapping decision belongs to the still-
-    unbuilt payload-rendering layer, not here.
+def _render_peer_content(summary: str | None) -> str | None:
+    """One peer's content string: its business summary, cut to a fixed token budget. PeerBlock's schema (common.py) has
+    one flat `content` field. A peer's recent news used to be rendered here too (two headlines); it is no longer fetched:
+    the Researcher echoed a peer headline in 2 of 49 real runs and one list was wrong (a TD peer's block carried a
+    Rayonier story).
 
-    The business-summary component gets its own fixed 50-token budget;
-    news headlines get whatever of the 200-token whole-block budget
-    remains, so an unusually long business summary can't silently starve
-    the news line rendered in the same block down to nothing (or vice
-    versa - the summary's own budget is fixed regardless of headline
-    length).
-
-    Returns None (not an empty string) when there is nothing to report at
-    all - the caller drops a peer with no content rather than rendering an
-    empty PEER_n block, since an empty block isn't citable evidence."""
-    business_line = None
-    if summary:
-        business_line = f"Business: {_truncate_to_tokens(summary, _PEER_SUMMARY_TOKEN_BUDGET)}"
-
-    # Router.get_news()'s raw order is provider-internal, not chronological
-    # (live-confirmed: AAPL's first raw article was not its most recent) -
-    # sort explicitly before taking the top 2. published_at is a fixed-
-    # format "%Y-%m-%d %H:%M:%S" string on both providers, so a plain
-    # string sort is correct without parsing.
-    #
-    # Deduplicate by headline while walking the sorted list, not just take
-    # a naive [:2] slice - real bug caught on real data: Router.get_news()
-    # merges a crosslisted CA ticker's TMX feed with its matching Finnhub
-    # feed and dedupes only on URL, so the same real story reaches both
-    # feeds under two different URLs and survives as two entries with an
-    # identical headline (confirmed live: TD.TO, RY.TO both had this,
-    # ~15-16% of their 180-day news volume). Without this, a peer's "top 2
-    # recent stories" could genuinely be the same story twice.
-    headlines: list[str] = []
-    seen_headlines: set[str] = set()
-    for article in sorted(news, key=lambda a: a.get("published_at", ""), reverse=True):
-        headline = article.get("headline")
-        if not headline or headline in seen_headlines:
-            continue
-        seen_headlines.add(headline)
-        headlines.append(headline)
-        if len(headlines) == 2:
-            break
-    news_line = None
-    if headlines:
-        # Business line + the "Recent news: " label both come out of the
-        # 200-token whole-block budget before truncating headlines to fit.
-        # Stays in character units end-to-end rather than converting to a
-        # token count twice (once for "used", once for "available") -
-        # doing that the first way round left a real, live-caught overflow
-        # (a maxed-out summary + long headlines rendered ~204 tokens
-        # against the 200 budget) from two floor-divisions compounding.
-        used_chars = (len(business_line) if business_line else 0) + len(_NEWS_LABEL)
-        remaining_chars = max(0, _PEER_BLOCK_TOKEN_BUDGET * 4 - used_chars)
-        truncated_headlines = _truncate_to_tokens("; ".join(headlines), remaining_chars // 4)
-        news_line = f"{_NEWS_LABEL}{truncated_headlines}"
-
-    lines = [line for line in (business_line, news_line) if line]
-    return "\n".join(lines) if lines else None
+    Returns None (not an empty string) when there is nothing to report: the caller drops a peer with no content rather
+    than rendering an empty PEER_n block, since an empty block isn't citable evidence."""
+    if not summary:
+        return None
+    return f"Business: {_truncate_to_tokens(summary, _PEER_SUMMARY_TOKEN_BUDGET)}"
 
 
-async def _fetch_peer_content(peer_ticker: str, news_days: int) -> str | None:
-    """One peer's own get_business_summary() and get_news(), fetched
-    concurrently, rendered into one content string (see
-    _render_peer_content). A fresh Router(ticker=peer_ticker) per peer -
-    Router is constructed per-ticker, not parameterizable per-call."""
+async def _fetch_peer_content(peer_ticker: str) -> str | None:
+    """One peer's own get_business_summary(), rendered into one content string (see _render_peer_content). A fresh
+    Router(ticker=peer_ticker) per peer - Router is constructed per-ticker, not parameterizable per-call."""
     async with Router(ticker=peer_ticker) as peer_router:
-        summary, news = await asyncio.gather(
-            peer_router.get_business_summary(peer_ticker),
-            peer_router.get_news(peer_ticker, news_days),
-        )
-    return _render_peer_content(summary, news)
+        summary = await peer_router.get_business_summary(peer_ticker)
+    return _render_peer_content(summary)
 
 
 async def _fetch_company_name(ticker: str) -> str | None:
@@ -340,9 +276,22 @@ async def _fetch_company_name(ticker: str) -> str | None:
     return info.get("name") or None
 
 
-async def build_peer_blocks(
-    ticker: str, peer_tickers: list[str], news_days: int = _PEER_NEWS_DAYS
-) -> list[tuple[PeerBlock, str]]:
+_BUSINESS_PROFILE_TOKEN_BUDGET = 250  # the same size as a filing digest
+
+
+async def _fetch_business_profile(ticker: str) -> str | None:
+    """The provider's own company description for the main stock (the same call the peer blocks use), or None on any
+    failure: it is a fallback for a missing digest, so it must never fail the build."""
+    try:
+        async with Router(ticker=ticker) as router:
+            profile = await router.get_business_summary(ticker)
+    except Exception:  # noqa: BLE001
+        logger.warning("research_sources_business_profile_failed", ticker=ticker)
+        return None
+    return profile.strip() if isinstance(profile, str) and profile.strip() else None
+
+
+async def build_peer_blocks(ticker: str, peer_tickers: list[str]) -> list[tuple[PeerBlock, str]]:
     """`peer_tickers` (the companies closest in market cap, resolved once per run by data/industry_benchmark.py
     and passed in, so the Fundamental and Researcher inputs cannot disagree) -> every candidate peer's content
     fetched concurrently (asyncio.gather, order-preserving - matches the
@@ -379,7 +328,7 @@ async def build_peer_blocks(
         return []
 
     contents = await asyncio.gather(
-        *(_fetch_peer_content(peer_ticker, news_days) for peer_ticker in peer_tickers)
+        *(_fetch_peer_content(peer_ticker) for peer_ticker in peer_tickers)
     )
     survivors: list[tuple[str, str]] = []
     for peer_ticker, content in zip(peer_tickers, contents, strict=True):
@@ -417,35 +366,9 @@ def _cutoff_date(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).date().isoformat()
 
 
-def _compute_insider_direction(insider_rows: list[dict]) -> str | None:
-    """buying/selling/neutral, or None if no qualifying rows exist to
-    judge from (openbb-tmx's aggregate fallback can't support this at all
-    - no per-transaction direction beyond one rollup - so this correctly
-    lands on None for that path, not a guess). Excludes is_issuer=True
-    rows (that's buyback_activity's signal, not personal insider
-    direction) and exercise/gift/other transaction types (same exclusion
-    intent as the Sentiment prompt's Form-4 M/G exclusion) - only
-    purchase/sale rows from real people carry directional conviction.
-    Netted by dollar value, not row count: a handful of large sales
-    outweighing many small purchases should read as selling, not buying."""
-    recent = [r for r in insider_rows if r.get("date") and r["date"] >= _cutoff_date(90)]
-    qualifying = [
-        r for r in recent if not r["is_issuer"] and r["transaction_type"] in ("purchase", "sale")
-    ]
-    if not qualifying:
-        return None
-    purchase_value = sum(r["value"] or 0 for r in qualifying if r["transaction_type"] == "purchase")
-    sale_value = sum(r["value"] or 0 for r in qualifying if r["transaction_type"] == "sale")
-    if purchase_value > sale_value:
-        return "buying"
-    if sale_value > purchase_value:
-        return "selling"
-    return "neutral"
-
-
 def _compute_buyback_activity(insider_rows: list[dict]) -> str:
-    """active/suspended/none, split by recency over the same 365-day
-    fetch insider_net_direction_90d uses (finding #38). Disclosed weak in
+    """active/suspended/none, split by recency over a 365-day
+    insider fetch (finding #38). Disclosed weak in
     two ways, not one: Form 4 doesn't capture large-scale US corporate
     buybacks as insider transactions the way CA sources do (confirmed
     live: AAPL had zero buyback rows across a full 365-day window despite
@@ -493,9 +416,9 @@ def _compute_dividend_activity(dividends: list[dict]) -> str:
 
 
 async def build_management_signals(ticker: str) -> ManagementSignals:
-    """One Router.get_insider_trading(ticker, 365) call feeds both
-    insider_net_direction_90d and buyback_activity (finding #38 - one
-    provider call, two derived views). dividend_activity from
+    """One Router.get_insider_trading(ticker, 365) call feeds
+    buyback_activity (finding #38). The insider direction the same call used to feed is gone: the Researcher reads the
+    sized insider summary the Sentiment agent uses (precompute/insider.py). dividend_activity from
     Router.get_dividend_history over a separate, wider window
     (_DIVIDEND_LOOKBACK_DAYS, finding #36's none-vs-suspended split needs
     more than 12 months of history to tell apart). c_suite_changes_12mo
@@ -517,7 +440,6 @@ async def build_management_signals(ticker: str) -> ManagementSignals:
     return ManagementSignals(
         c_suite_changes_12mo=None,
         changes_detail="",
-        insider_net_direction_90d=_compute_insider_direction(insider_rows),
         buyback_activity=_compute_buyback_activity(insider_rows),
         dividend_activity=_compute_dividend_activity(dividends),
     )
@@ -762,6 +684,7 @@ def build_hydrated_developments(
             raise ValueError(f"invalid news_id: {dev['news_id']!r}")
         hydrated.append(
             {
+                "news_id": dev["news_id"],
                 "event": news.headline,
                 "date": news.date.isoformat(),
                 "source": news.source,
@@ -978,6 +901,13 @@ async def build_research_sources(
     news_items = build_news_items(id_assigned_articles)
 
     peer_names = {block.peer_id: name for block, name in peer_pairs}
+    business_profile = None
+    if not any(d.section == "Business" for d in digests):
+        raw_profile = await _fetch_business_profile(ticker)
+        if raw_profile:
+            business_profile = _truncate_to_tokens(
+                anonymize_content(raw_profile, company_name, ticker, peer_names), _BUSINESS_PROFILE_TOKEN_BUDGET
+            )
     anonymized_digests = []
     for digest in digests:
         content = anonymize_content(digest.content, company_name, ticker, peer_names)
@@ -1037,6 +967,7 @@ async def build_research_sources(
         dual_class_flag=dual_class_flag,
         cik_verified=cik_verified,
         has_filing_digest=has_filing_digest,
+        business_profile=business_profile,
         missing_sources_list=missing_sources_list,
         latest_filing_age_days=latest_filing_age_days,
         latest_transcript_age_days=None,

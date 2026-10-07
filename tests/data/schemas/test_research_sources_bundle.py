@@ -11,7 +11,6 @@ def _signals(**overrides) -> ManagementSignals:
     defaults = dict(
         c_suite_changes_12mo=0,
         changes_detail="",
-        insider_net_direction_90d="neutral",
         buyback_activity="",
         dividend_activity="",
     )
@@ -58,21 +57,7 @@ def _bundle(**overrides) -> ResearchSourcesBundle:
 
 def test_management_signals_valid_construction():
     signals = _signals()
-    assert signals.insider_net_direction_90d == "neutral"
-
-
-def test_management_signals_rejects_invalid_insider_direction():
-    with pytest.raises(ValidationError):
-        _signals(insider_net_direction_90d="hodling")
-
-
-def test_management_signals_accepts_none_insider_direction():
-    """Real gap avoided proactively: None means "couldn't determine,"
-    distinct from "neutral" (a genuine, resolved zero-net reading) —
-    conflating the two under one enum would lose information a reliability
-    scorer needs."""
-    signals = _signals(insider_net_direction_90d=None)
-    assert signals.insider_net_direction_90d is None
+    assert signals.buyback_activity == "" and signals.c_suite_changes_12mo == 0
 
 
 def test_management_signals_is_frozen():
@@ -120,7 +105,6 @@ def test_c_suite_changes_12mo_accepts_none():
 def test_valid_construction():
     bundle = _bundle()
     assert bundle.transcript_count == 1
-    assert bundle.management_signals.insider_net_direction_90d == "neutral"
 
 
 # ---------- count/list consistency ----------
@@ -257,11 +241,6 @@ def test_management_signals_round_trips_through_model_dump():
     assert ManagementSignals.model_validate(signals.model_dump()) == signals
 
 
-def test_management_signals_round_trips_with_none_insider_direction():
-    signals = _signals(insider_net_direction_90d=None)
-    assert ManagementSignals.model_validate(signals.model_dump()) == signals
-
-
 def test_management_signals_round_trips_with_none_c_suite_changes():
     signals = _signals(c_suite_changes_12mo=None)
     assert ManagementSignals.model_validate(signals.model_dump()) == signals
@@ -275,7 +254,7 @@ def test_bundle_round_trips_through_model_dump():
     bundle = _bundle()
     dumped = bundle.model_dump()
     assert dumped["filing_digests"] == [{"section": "MDA", "content": "...", "token_count": 200}]
-    assert dumped["management_signals"]["insider_net_direction_90d"] == "neutral"
+    assert "insider_net_direction_90d" not in dumped["management_signals"]
     assert ResearchSourcesBundle.model_validate(dumped) == bundle
 
 

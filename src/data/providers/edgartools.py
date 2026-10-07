@@ -538,7 +538,7 @@ class EdgarToolsDataProvider(StockDataProvider):
     # and F (tax-withholding share delivery) are COMMON, not edge cases —
     # every row in both live samples fell into this set. Both are
     # compensation mechanics, not directional market conviction, so mapping
-    # them to "other" (excluded from insider_net_direction_90d, same as
+    # them to "other" (excluded from the insider direction, same as
     # exercise/gift) is deliberate, not an oversight.
     _FORM4_CODE = {"P": "purchase", "S": "sale", "M": "exercise", "G": "gift"}
 
