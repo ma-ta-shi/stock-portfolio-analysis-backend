@@ -96,7 +96,7 @@ def _fake_bundle(**overrides) -> SimpleNamespace:
         analyst_consensus={"consensus_rating": "buy", "target_mean": 250.0},
         short_interest=None,
         analyst_rating_changes=None, canadian_data_flags=None,
-        not_applicable=None,
+        not_applicable=None, metric_profile=None,
         technical_indicators={"volatility_regime_derived": "normal"},
         support_resistance={"nearest_support": 210.0, "nearest_resistance": 230.0},
         macro_sources=SimpleNamespace(

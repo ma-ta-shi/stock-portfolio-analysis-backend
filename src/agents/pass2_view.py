@@ -138,6 +138,11 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             "revenue_growth_annual": b.get("revenue_growth_annual"),
             "revenue_growth_3yr_cagr": b.get("revenue_growth_3yr_cagr"),
             "fcf_to_net_income": b.get("fcf_to_net_income"),
+            "pb_ratio": b.get("pb_ratio"),
+            "roa": b.get("roa"),
+            "equity_to_assets": b.get("equity_to_assets"),
+            "cash_runway_quarters": b.get("cash_runway_quarters"),
+            "valuation_lens": b.get("valuation_lens"),
         }
 
     if agent_id == "TECH":

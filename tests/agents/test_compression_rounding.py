@@ -82,3 +82,27 @@ def test_pass2_reads_350_tokens_of_a_narrative_so_a_1300_character_one_is_whole(
     narrative = "x" * 1300
     assert truncate_to_tokens(narrative, NARRATIVE_VIEW_TOKENS) == narrative
     assert truncate_to_tokens("x" * 1500, NARRATIVE_VIEW_TOKENS).endswith("...")
+
+
+def test_a_metric_the_fundamental_view_leaves_out_is_not_printed_as_none():
+    """A bank's D/E and FCF/NI are not passed to Pass 2: no "debt_to_equity: None" or "not_applicable" line either."""
+    from datetime import UTC, datetime
+    from types import SimpleNamespace
+
+    from agents.compression import build_pass2_user_message
+
+    bundle = SimpleNamespace(
+        stock=SimpleNamespace(ticker="TD.TO", currency="CAD", exchange="TSX"),
+        company_info={"name": "Toronto-Dominion Bank", "sector": "Finance"},
+        context=SimpleNamespace(account_type="tfsa", timeline="medium_term"),
+        data_vintage=datetime(2026, 10, 1, tzinfo=UTC),
+    )
+    view = {"valuation_vs_sector": "fair", "pb_ratio": 2.16, "roe": 0.1275, "debt_to_equity": None, "fcf_to_net_income": None,
+            "valuation_lens": "Value on P/B against ROE, with P/E."}
+    compressed = {"FUND": {"assessment_summary": "s", "analysis_confidence": "high", "caveats": [], "pass2_view": view,
+                           "narrative_truncated": "n"}}
+
+    msg = build_pass2_user_message(bundle, compressed, agent_ids=("FUND",), account_neutral=True)
+
+    assert "pb_ratio: 2.16" in msg and "valuation_lens: Value on P/B against ROE, with P/E." in msg
+    assert "debt_to_equity" not in msg and "fcf_to_net_income" not in msg and "None" not in msg
