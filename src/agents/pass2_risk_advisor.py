@@ -28,7 +28,7 @@ Uses groundedness_score (NOT confidence).
 NO recommendation field.
 beta and max_drawdown_1yr are orchestrator-injected (NOT LLM-produced).
 downside_scenarios: 2-4 items, no two within ±2% estimated_impact_pct.
-key_factors: sentiment must be negative|neutral only.
+key_factors was cut 2026-10-07 (no consumer; the narrative and downside_scenarios carry the content).
 
 86bbummwp follow-on: Stage A's own `_validate_with_caveats()` now composes
 `validate_risk_advisor_stage_a` with a confidence/data-quality coupling rule

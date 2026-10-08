@@ -27,11 +27,6 @@ def _valid_bull_output() -> dict:
         "weakest_point": "TECH: Stock is trading in a sideways range below 52w highs; if the $178 support breaks, technical selling could pressure the stock before fundamentals reassert.",
         "weakest_point_type": "negative_catalyst",
         "caveats": ["RSRCH analysis_confidence=high but DataStream integration risk not yet quantifiable."],
-        "key_factors": [
-            {"factor": "AI copilot adoption", "importance": "high", "sentiment": "positive", "evidence": "RSRCH: 2,400 customers activated AI copilot in 90 days"},
-            {"factor": "FCF generation", "importance": "high", "sentiment": "positive", "evidence": "FUND: FCF yield 4.8% vs sector 3.2%"},
-            {"factor": "Management conviction", "importance": "medium", "sentiment": "positive", "evidence": "SENT: CEO bought 85,000 shares at $183 — insider conviction signal"},
-        ],
         "thesis_risks": [
             {"risk": "SAP AI acceleration could erode moat", "severity": "high", "likelihood": "medium", "evidence": "RSRCH: SAP announced AI copilot roadmap"},
         ],
@@ -81,19 +76,6 @@ class TestBullAdvocate:
     def test_confidence_out_of_range_fails(self):
         out = _valid_bull_output()
         out["confidence"] = 105
-        passed, errors = validate_bull_advocate(out)
-        assert not passed
-
-    def test_key_factors_positive_sentiment_required(self):
-        out = _valid_bull_output()
-        out["key_factors"][0]["sentiment"] = "neutral"  # must be positive
-        passed, errors = validate_bull_advocate(out)
-        assert not passed
-        assert any("sentiment" in e and "positive" in e for e in errors)
-
-    def test_too_few_key_factors_fails(self):
-        out = _valid_bull_output()
-        out["key_factors"] = [out["key_factors"][0]]  # only 1
         passed, errors = validate_bull_advocate(out)
         assert not passed
 
@@ -190,10 +172,6 @@ def _valid_bear_output() -> dict:
         "strongest_argument": "RSRCH: SAP's AI roadmap directly attacks GlobalTech's switching cost moat — the primary bull thesis anchor. If moat erodes, the valuation premium collapses.",
         "weakest_point": "FUND: FCF yield of 4.8% provides genuine cushion that limits downside; the bear case requires moat erosion to play out faster than the market expects.",
         "caveats": [],
-        "key_factors": [
-            {"factor": "Moat erosion risk from SAP", "importance": "high", "sentiment": "negative", "evidence": "RSRCH: SAP announced competing AI copilot roadmap"},
-            {"factor": "Valuation premium unsupported", "importance": "high", "sentiment": "negative", "evidence": "FUND: PE 28.5x vs sector 26x with decelerating growth risk"},
-        ],
         "thesis_risks": [
             {"risk": "AI copilot success would be a fundamental thesis blow to bear case", "severity": "high", "likelihood": "medium", "evidence": "thesis assumption: bull case is plausible if attach rates sustain"},
         ],
@@ -251,14 +229,6 @@ class TestBearAdvocate:
         out["recommendation"] = "neutral"
         passed, errors = validate_bear_advocate(out)
         assert not passed
-
-    def test_key_factors_negative_sentiment_required(self):
-        out = _valid_bear_output()
-        out["key_factors"][0]["sentiment"] = "neutral"  # must be negative
-        passed, errors = validate_bear_advocate(out)
-        assert not passed
-        assert any("sentiment" in e and "negative" in e for e in errors)
-
 
 class TestBearArchetypeAlignment:
     """86bbuhjup finding 5: this whole object was completely unvalidated before this fix
@@ -473,10 +443,6 @@ def _valid_tax_output() -> dict:
         "thesis_summary": "Holding GLBL in a TFSA incurs a 15% US withholding tax on the 1.8% dividend that is not recoverable under the Canada-US tax treaty. The effective yield drops to 1.53%. For a pure capital appreciation thesis in TFSA, the tax drag is minimal.",
         "strongest_signal": "WHT: 15% US withholding tax on dividends is NOT recoverable in a TFSA — this costs 0.27% annually on the 1.8% yield.",
         "caveats": ["Tax rules verified against CRA guidance as of March 2026."],
-        "key_factors": [
-            {"factor": "US dividend WHT drag", "importance": "medium", "sentiment": "negative", "evidence": "WHT: 15% non-recoverable in TFSA per Canada-US treaty"},
-            {"factor": "Capital gains tax-free in TFSA", "importance": "high", "sentiment": "positive", "evidence": "REF: TFSA capital gains are completely tax-free"},
-        ],
         "narrative": "GlobalTech Industries (GLBL) is a US-domiciled company (DOM) trading on NASDAQ (LIST). The dividend yield of 1.8% (DIVID) triggers US withholding tax of 15% (WHT) when held in a TFSA. Unlike an RRSP, a TFSA is not recognized as a retirement account under the Canada-US tax treaty (Article XVIII), so the withholding tax exemption does not apply. This results in an effective after-tax yield of 1.53% (ELIG: not eligible for Canadian dividend tax credit as a US-domiciled stock). The 0.27% annual tax drag from withholding is modest and should not be the primary factor in the investment decision for a capital-appreciation-oriented thesis. For a medium-term TFSA investor, the dominant tax advantage is the capital gains exemption (CGAIN) — any price appreciation from $187 to the analyst target of $205 would be entirely tax-free in a TFSA, compared to a 50% inclusion rate in a taxable account. The ROOM consideration (ROOM) is relevant: holding a high-growth stock in TFSA maximizes the tax-free compounding advantage. If an investor expects 10-15% total return from GlobalTech, holding it in TFSA rather than trading account saves approximately $500-750 per $5,000 position in capital gains taxes annually at a 40% marginal rate. However, if dividend income is the primary objective (e.g., for retirement income), the RRSP is superior due to the WHT exemption, which would save the 0.27% annual drag and preserve the full 1.8% yield. Summary recommendation: TFSA is a good fit for capital-appreciation investors; RRSP is marginally better for income-focused investors due to WHT exemption on the dividend. FUND reports a payout ratio of 22%, so the dividend is a small component of total return and the withholding drag stays secondary; MACRO notes no pending treaty change that would alter the Article XVIII treatment over the holding period (REF/TFSA: contribution room is restored on January 1 of the year following a sell, so an exit is not permanently costly).",
         "tax_profile": {
             "account_fit_score": "good",
@@ -665,10 +631,6 @@ def _valid_risk_stage_a_output() -> dict:
         "thesis_summary": "GlobalTech presents a moderate risk profile. Beta of 1.18 amplifies market moves. The DataStream acquisition increases leverage but FCF is strong enough to manage it. TFSA medium-term investors face asymmetric loss risk from permanent room destruction.",
         "strongest_signal": "FUND: D/E of 0.42 post-DataStream acquisition is the highest in 5 years — rising leverage in a high-rate environment constrains financial flexibility.",
         "caveats": [],
-        "key_factors": [
-            {"factor": "Elevated leverage post-acquisition", "importance": "high", "sentiment": "negative", "evidence": "FUND: D/E 0.42 post-DataStream vs historical 0.15"},
-            {"factor": "Moderate technical trend weakness", "importance": "medium", "sentiment": "neutral", "evidence": "TECH: RSI 51.3, sideways trend, confluence_score 1/3"},
-        ],
         "narrative": "GlobalTech Industries presents a moderate-to-acceptable risk profile for a TFSA medium-term investment. The primary risk is the post-DataStream acquisition leverage (FUND: D/E 0.42), which is not alarming in absolute terms but represents a significant increase from the historical 0.15 baseline. In a 4.5% rate environment (MACRO), higher leverage amplifies interest expense sensitivity, and a further rate increase would compound the refinancing risk on any floating-rate debt taken on for the acquisition. The beta of 1.18 (BETA: injected) means GlobalTech will experience roughly 18% more volatility than the broader market on both the upside and downside — manageable for a medium-term holder but meaningful for a TFSA account, where realized losses permanently reduce sheltered contribution room rather than merely deferring a tax bill. The 52-week high-to-low range (VOL: $215.80 to $142.30) demonstrates real downside exposure of 34% from the prior peak, though the stock is currently trading at $187.42 — well above the 52-week low, suggesting the worst of the drawdown has likely already occurred absent a new catalyst. Two distinct downside scenarios exist: (1) SAP competitive disruption causing multiple compression as switching costs erode, and (2) DataStream integration failure driving a delay to the promised margin expansion. These two scenarios are structurally distinct and not meaningfully correlated with each other, which provides a fair stress test of the risk framework rather than two versions of the same underlying event. Overall, GlobalTech represents an appropriate risk profile for a TFSA medium-term position sized moderately rather than aggressively.",
         "risk_profile": {
             "volatility_assessment": "moderate",
@@ -697,13 +659,6 @@ class TestRiskAdvisorStageA:
         assert not passed
         assert any("recommendation" in e for e in errors)
 
-    def test_positive_sentiment_in_key_factors_fails(self):
-        out = _valid_risk_stage_a_output()
-        out["key_factors"][0]["sentiment"] = "positive"  # must be negative or neutral
-        passed, errors = validate_risk_advisor_stage_a(out)
-        assert not passed
-        assert any("sentiment" in e for e in errors)
-
     def test_too_few_downside_scenarios_fails(self):
         out = _valid_risk_stage_a_output()
         out["risk_profile"]["downside_scenarios"] = [out["risk_profile"]["downside_scenarios"][0]]
@@ -711,13 +666,14 @@ class TestRiskAdvisorStageA:
         assert not passed
         assert any("downside_scenarios" in e for e in errors)
 
-    def test_downside_scenarios_too_close_fails(self):
+    def test_scenario_impacts_close_together_are_accepted(self):
+        """The 2-point spacing rule was dropped 2026-10-07: across 465 saved scenario pairs it never caught a duplicated cause (wording
+        overlap of the rejected pairs 0.04, the same as every other pair) and forced the model to spread what it judged equal."""
         out = _valid_risk_stage_a_output()
         out["risk_profile"]["downside_scenarios"][0]["estimated_impact_pct"] = -18.0
-        out["risk_profile"]["downside_scenarios"][1]["estimated_impact_pct"] = -17.5  # within ±2%
+        out["risk_profile"]["downside_scenarios"][1]["estimated_impact_pct"] = -17.5
         passed, errors = validate_risk_advisor_stage_a(out)
-        assert not passed
-        assert any("2%" in e or "close" in e for e in errors)
+        assert not any("close" in e for e in errors)
 
     def test_invalid_risk_reward_ratio_fails(self):
         out = _valid_risk_stage_a_output()
@@ -964,32 +920,6 @@ def test_evidence_quoting_a_value_is_accepted(text):
     assert _evidence_carries_value(text)
 
 
-def test_duplicate_evidence_across_key_factors_is_rejected():
-    from agents.validators.pass2 import validate_bull_advocate
-    out = {"key_factors": [
-        {"factor": "a", "importance": "high", "sentiment": "positive",
-         "evidence": "FUND: roe 15.7%"},
-        {"factor": "b", "importance": "high", "sentiment": "positive",
-         "evidence": "FUND: roe 15.7%"},
-    ]}
-    _, errors = validate_bull_advocate(out)
-    assert any("duplicate evidence" in e for e in errors)
-
-
-def test_bear_key_factors_evidence_is_checked_like_bulls():
-    """Bear validated key_factors sentiment but never their evidence -- the same
-    one-agent-not-its-sibling gap found on the prompt side."""
-    from agents.validators.pass2 import validate_bear_advocate
-    out = {"key_factors": [
-        {"factor": "a", "importance": "high", "sentiment": "negative",
-         "evidence": "FUND: debt_to_equity"},
-        {"factor": "b", "importance": "high", "sentiment": "negative",
-         "evidence": "FUND: net_margin"},
-    ]}
-    _, errors = validate_bear_advocate(out)
-    assert any("without values" in e for e in errors)
-
-
 def test_retry_message_states_the_exact_shortfall():
     """_auto_trim can salvage an overshoot but nothing can expand a short field, so
     the only mechanical help is telling the model exactly how much it needs."""
@@ -1058,33 +988,6 @@ class TestTaxStrategistCitationEnforcement:
         passed, errors = validate_tax_strategist(out)
         assert passed, errors
 
-    # --- rule 9: key_factors evidence format --------------------------------------
-    def test_key_factor_evidence_without_leading_token_fails(self):
-        out = _valid_tax_output()
-        # Token present, but mid-sentence -- not the declared compact format.
-        out["key_factors"][0]["evidence"] = "the rate is 15% under WHT rules"
-        assert any("key_factors[0].evidence" in e for e in self._err(out))
-
-    def test_key_factor_evidence_empty_fails(self):
-        out = _valid_tax_output()
-        out["key_factors"][0]["evidence"] = "   "
-        assert any("key_factors[0].evidence" in e for e in self._err(out))
-
-    # --- rule 10: narrative citation breadth --------------------------------------
-    # The two tests that used to live here (test_narrative_without_pass1_ids_fails,
-    # test_narrative_with_one_pass1_id_fails_unless_it_is_fund) tested a >=2-distinct-
-    # Pass-1-IDs narrative floor that pass2.py's own validate_tax_strategist (see its
-    # detailed comment above the tax-metric-token check, ~line 682) documents removing
-    # deliberately on 2026-09-03 (audit E88/E90): it was the single most frequent
-    # first-attempt failure, and retrying against it made narratives WORSE (the model
-    # satisfied it by enumerating all 5 agent IDs in one sentence supporting no tax
-    # claim, while a real, correctly-grounded, densely-cited narrative was rejected
-    # 3/3 for naming no agent). The >=3 tax-metric-token rule below replaced it. These
-    # two tests were never updated when the rule they tested was removed -- found via
-    # a real, repeated pytest failure surfacing across two separate work sessions
-    # (86bbummwp, 86bbt1k1p) before being traced to root cause here. Deleted, not
-    # "fixed" -- reinstating the old behavior would be a regression against a decision
-    # already measured and rejected.
     def test_narrative_without_ref_fails(self):
         out = _valid_tax_output()
         out["narrative"] = out["narrative"].replace("REF/TFSA", "guidance")
@@ -1168,37 +1071,6 @@ class TestTaxStrategistCitationEnforcement:
         passed, errors = validate_tax_strategist(out)
         assert passed, errors
 
-    # --- rule 9, second half: a token with no claim behind it ---------------------
-    def test_evidence_that_is_only_a_token_fails(self):
-        """Observed live on RY.TO: evidence was the literal string "CGAIN:".
-
-        Valid token, valid colon, nothing asserted. The prefix rule alone accepted it.
-        """
-        out = _valid_tax_output()
-        out["key_factors"][0]["evidence"] = "CGAIN:"
-        assert any("states no claim" in e for e in self._err(out))
-
-    def test_evidence_with_a_trivially_short_body_fails(self):
-        out = _valid_tax_output()
-        out["key_factors"][0]["evidence"] = "RSRCH: trading"  # also seen live
-        assert any("states no claim" in e for e in self._err(out))
-
-    def test_evidence_with_a_real_claim_passes(self):
-        out = _valid_tax_output()
-        out["key_factors"][0]["evidence"] = "DIVID: 2.0% yield, 4 payments/yr"
-        passed, errors = validate_tax_strategist(out)
-        assert passed, errors
-
-    def test_short_evidence_carrying_a_figure_is_accepted(self):
-        """Regression: a flat char-minimum rejected "DIVID: 2.0%" -- a correct compact
-        citation with a real figure in 4 chars -- causing two terminal failures live.
-        Rejecting valid output is worse than the gap it closed: a terminal failure
-        drops the agent from the CIO payload entirely."""
-        out = _valid_tax_output()
-        out["key_factors"][0]["evidence"] = "DIVID: 2.0%"
-        passed, errors = validate_tax_strategist(out)
-        assert passed, errors
-
     def test_soft_errors_are_only_narrative_citation_breadth(self):
         """Anything that makes the output unusable or unsafe must stay hard."""
         from agents.validators.pass2 import split_soft_errors
@@ -1217,12 +1089,6 @@ class TestTaxStrategistCitationEnforcement:
 class TestTaxStrategistMargToken:
     """MARG is advertised by the prompt (rule 1) and rendered in the pre-computed block, so the
     validator must accept it as a citation token like the other metric tokens."""
-
-    def test_key_factor_evidence_may_start_with_marg(self):
-        out = _valid_tax_output()
-        out["key_factors"][0]["evidence"] = "MARG: 29.65% combined rate values the RRSP deduction"
-        passed, errors = validate_tax_strategist(out)
-        assert passed, errors
 
     def test_strongest_signal_may_cite_marg(self):
         out = _valid_tax_output()
@@ -1246,3 +1112,23 @@ class TestTaxStrategistMargToken:
             out["narrative"] = out["narrative"].replace(tok, "x")
         out["narrative"] += " The MARGINAL rate is high."
         assert any("tax-metric tokens" in e for e in validate_tax_strategist(out)[1])
+
+
+def test_core_argument_evidence_must_quote_a_value_not_only_field_names():
+    """Bull emitted "FUND: revenue_growth_yoy, roe" with the figures in the payload. This was checked on key_factors until those were
+    cut from Pass 2 (2026-10-07); core_arguments carries the evidence now, for both advocates."""
+    from agents.validators.pass2 import validate_bear_advocate, validate_bull_advocate
+    for validate in (validate_bull_advocate, validate_bear_advocate):
+        out = {"structured_data": {"core_arguments": [{"argument": "a", "strength": "primary", "evidence": "FUND: debt_to_equity, roe"}]}}
+        _, errors = validate(out)
+        assert any("core_arguments[0].evidence" in e and "without values" in e for e in errors)
+        out["structured_data"]["core_arguments"][0]["evidence"] = "FUND: roe 15.7%"
+        _, errors = validate(out)
+        assert not any("core_arguments[0].evidence" in e for e in errors)
+
+
+def test_the_pass2_agents_no_longer_ask_for_key_factors():
+    from agents.validators.pass2 import validate_bear_advocate, validate_bull_advocate
+    for validate in (validate_bull_advocate, validate_bear_advocate):
+        _, errors = validate({})
+        assert not any("key_factors" in e for e in errors)

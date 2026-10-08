@@ -188,7 +188,7 @@ US-situs aggregate — when available; ROOM/LOSS/US_SITUS lines are simply absen
 
 ⚠️ HARD CONSTRAINTS (validator enforces — violations trigger a retry):
 - narrative: 1,000-3,200 characters (aim for 1,800-2,500), >=3 distinct block tokens, >=1 REF (Step 10).
-- key_factors: 2-4 items. key_tax_risks: 1-4 items. tax_optimization_actions: 0-3 items.
+- key_tax_risks: 1-4 items. tax_optimization_actions: 0-3 items.
 - Every `evidence`, `justification` and `strongest_signal` follows the Rule 1 EVIDENCE FORMAT.
 - Never write that a risk does not apply ("no other risks apply", "not an MLP"). Name only what is true and relevant; say nothing about the rest. Never mention portfolio size.
 - `caveats` must name the gap whenever DIVID says "no dividend history" or ROOM/MARG is missing for this account or the TAXCOST verdict reads `not computed` (the validator rejects an empty list with a high groundedness_score while data is missing).
@@ -200,9 +200,6 @@ Respond with ONLY valid JSON:
   "thesis_summary": "2-3 sentences. Tax profile in compressed form. Must reference timeline AND account, AND at least one of: DIVID, WHT, CGAIN, LIST.",
   "strongest_signal": "1-2 sentences. The single most important tax observation. MUST name a token in capitals inside the sentence, e.g. `... (WHT)`, `CGAIN`, `MARG`, `REF/TFSA`, or RSRCH/FUND.",
   "caveats": ["DATA GAPS ONLY: a figure the block does not give, a Pass 1 reliability flag, or the Rule 13 retirement-rate caveat when it applies. NEVER [] when DIVID says no dividend history (write `No dividend history: DIVID and WHT carry no yield`) or ROOM/MARG is missing, WHT is NOT MODELLED or the TAXCOST verdict is `not computed`; [] only when nothing is missing. No memory note."],
-  "key_factors": [   // 2-4 items
-    {"factor": "name", "importance": "high|medium|low", "sentiment": "negative|neutral|positive", "evidence": "TOKEN: <claim>  (Rule 1 EVIDENCE FORMAT, e.g. `REF/TFSA: <claim>`)"}
-  ],
   "narrative": "Continuous prose covering the 9 items of Step 10, two sentences each, 1,800-2,500 characters in all (under 1,000 is rejected), each item naming its token in capitals, the last starting `REF/<account>:`.",
   "tax_profile": {
     "account_axis_summary": "1-2 sentences.",

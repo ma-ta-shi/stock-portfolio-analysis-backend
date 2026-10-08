@@ -25,7 +25,6 @@ def _section(start: str, end: str) -> str:
 @pytest.mark.parametrize(
     "stated",
     [
-        "key_factors: 2-4",
         "key_tax_risks: 1-4",
         "tax_optimization_actions: 0-3",
         "1,000-3,200 characters",

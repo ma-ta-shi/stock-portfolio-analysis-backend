@@ -26,7 +26,6 @@ def _narrative_errors(n_chars: int) -> list[str]:
     "stated",
     [
         "1,000-2,400 characters",  # the hard-constraints line
-        "key_factors: 2-4 items",
         "// 2-4 scenarios",
         "under 1,000 or over 2,400 is rejected",
     ],
@@ -45,15 +44,6 @@ def test_the_narrative_the_prompt_asks_for_sits_inside_the_validators_bounds():
 def test_the_prompt_no_longer_counts_the_narrative_in_words():
     assert "250-400 words" not in STAGE_A
     assert "stop at 400 words" not in STAGE_A
-
-
-def test_the_sentiment_rule_explains_why_and_says_what_to_do_with_a_mitigant():
-    assert re.search(r'"sentiment": "negative\|neutral"', STAGE_A)
-    assert "a mitigating factor is" in STAGE_A and 'never "positive"' in STAGE_A
-
-
-def test_the_distinct_impact_rule_is_on_the_impact_field():
-    assert re.search(r"estimated_impact_pct\": <number[^>]*at least 2 points", STAGE_A)
 
 
 @pytest.mark.parametrize("enum", ["very_high|high|moderate|low", "high|medium|low", "favorable|neutral|unfavorable"])
@@ -135,5 +125,8 @@ def test_the_prompt_ties_dividend_scenarios_to_fund_and_beta_wording_to_the_r_sq
     assert "the sign of such a beta means nothing" in STAGE_A
 
 
-def test_scenario_spacing_is_stated_for_every_scenario():
-    assert "at least 3 points away from every other's" in STAGE_A
+def test_the_prompt_no_longer_asks_for_spaced_impacts():
+    """Dropped 2026-10-07 (see test_pass2_validators): spacing never caught a duplicate and forced fake precision."""
+    assert "points away" not in STAGE_A and "at least 2 points" not in STAGE_A
+
+

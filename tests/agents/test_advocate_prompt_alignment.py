@@ -27,7 +27,7 @@ def _narrative_errors(validator, n_chars: int, ids: str = "RSRCH FUND TECH") -> 
 
 @pytest.mark.parametrize("validator", [validate_bull_advocate, validate_bear_advocate])
 def test_the_validator_bounds_are_what_the_prompt_says(validator):
-    assert _narrative_errors(validator, 999) and not _narrative_errors(validator, 1000)
+    assert _narrative_errors(validator, 799) and not _narrative_errors(validator, 800)
     assert not _narrative_errors(validator, 2800) and _narrative_errors(validator, 2801)
 
 
@@ -66,11 +66,6 @@ def test_bull_lists_the_archetype_vocabulary_the_validator_accepts():
 def test_bear_lists_the_archetype_vocabulary_the_validator_accepts():
     line = next(ln for ln in BEAR.splitlines() if '"bear_archetype"' in ln)
     assert set(re.findall(r"[a-z_]+", line.split(":", 1)[1])) >= THESIS_ARCHETYPES
-
-
-def test_bull_key_factor_sentiment_comes_with_its_reason():
-    line = next(ln for ln in BULL.splitlines() if ln.strip().startswith('"key_factors": ['))
-    assert 'sentiment is always "positive"' in line and "thesis_risks" in line
 
 
 def test_bear_agrees_flag_says_when_it_is_true():

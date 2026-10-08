@@ -107,7 +107,7 @@ _PROMPT_VERSIONS = {
 # drowning the real signal in structural noise. Verified directly against
 # each agent's own validator source, not guessed:
 # - key_factors: never referenced anywhere in validators/cio.py or
-#   validators/shadow_cio.py -- only the synthesis-pass agents lack it. The five Pass 1 agents stopped writing it on 2026-10-07
+#   validators/shadow_cio.py -- only the synthesis-pass agents lack it. The five Pass 1 agents and the four Pass 2 agents stopped writing it on 2026-10-07
 #   (nothing read it and it cost about a fifth of their output; their narrative now carries the evidence, ledger BB-107).
 # - risks: never referenced anywhere outside validators/pass1.py -- the
 #   four Pass 2 advocates and all three synthesis-pass agents structurally
@@ -117,7 +117,7 @@ _PROMPT_VERSIONS = {
 #   validator never checks narrative/synthesis_narrative at all -- both
 #   structural, unlike bull/bear/tax/risk_stage_a and cio_stage_b, which
 #   all have real, validated narrative fields.
-_NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio", "RSRCH", "FUND", "TECH", "SENT", "MACRO"}
+_NO_KEY_FACTORS_EXPECTED = {"cio_stage_a", "cio_stage_b", "shadow_cio", "RSRCH", "FUND", "TECH", "SENT", "MACRO", "bull", "bear", "tax", "risk"}
 _NO_RISKS_EXPECTED = {"bull", "bear", "tax", "risk", "cio_stage_a", "cio_stage_b", "shadow_cio"}
 _NO_NARRATIVE_EXPECTED = {"cio_stage_a", "shadow_cio"}
 

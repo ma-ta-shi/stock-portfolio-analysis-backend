@@ -6,13 +6,14 @@ why this is close to a clean port.
 
 recommendation: hard-coded to "bearish".
 confidence: integer 0-100 (directional conviction DOWN).
-key_factors: all sentiment must be "negative".
+key_factors was cut 2026-10-07 (no consumer; core_arguments carries the evidence).
 thesis_archetype vocabulary: same 5 values as Bull.
 At confidence <35: high-bar bear framing + numeric token in evidence required.
 """
 from agents.base import BaseRunner
 from agents.compression import build_pass2_user_message, extract_confidence_levels, extract_data_quality_levels
 from agents.prompts import fill, load_template
+from agents.reference_points import asymmetry_reference
 from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.pass2 import validate_bear_advocate
 from data.schemas.data_bundle import DataBundle
@@ -66,4 +67,7 @@ class BearAdvocateRunner(BaseRunner):
         )
         if result:
             result["recommendation"] = "bearish"
+            # Written by code from the data (agents/reference_points.py): the model invented these numbers when it wrote the field.
+            if isinstance(result.get("structured_data"), dict):
+                result["structured_data"]["asymmetry_assessment"] = asymmetry_reference(bundle)
         return result, errors
