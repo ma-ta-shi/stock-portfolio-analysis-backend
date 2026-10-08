@@ -114,7 +114,10 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             # `insufficient_data` is valid only when all three multiples are missing.
             "valuation_vs_sector": c.get("valuation_vs_sector"),
             "health_rating": c.get("health_rating"),
-            "guidance_vs_consensus": c.get("guidance_vs_consensus"),
+            # The stored Fundamental field is still named guidance_vs_consensus, but there is no guidance source: it is the
+            # reported EPS against consensus over the last four quarters. Bear wrote "FUND: guidance_vs_consensus below" as
+            # evidence, which reads as company guidance. Pass 2 gets the name that says what it is.
+            "earnings_vs_consensus": c.get("guidance_vs_consensus"),
             "dividend_sustainability": c.get("dividend_sustainability"),
             # Numeric passthrough from DataBundle, never the LLM. margin_trend was
             # explicitly moved out of the LLM's interpretive fields in v5.1 and is
@@ -143,6 +146,16 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             "equity_to_assets": b.get("equity_to_assets"),
             "cash_runway_quarters": b.get("cash_runway_quarters"),
             "valuation_lens": b.get("valuation_lens"),
+            "forward_pe": b.get("forward_pe"),
+            "peg_ratio": b.get("peg_ratio"),
+            "ps_ratio": b.get("ps_ratio"),
+            "ev_ebitda": b.get("ev_ebitda"),
+            "gross_margin": b.get("gross_margin"),
+            "interest_coverage": b.get("interest_coverage"),
+            "current_ratio": b.get("current_ratio"),
+            "dividend_yield": b.get("dividend_yield"),
+            "payout_ratio": b.get("payout_ratio"),
+            "dividend_growth_5yr": b.get("dividend_growth_5yr"),
         }
 
     if agent_id == "TECH":
@@ -160,6 +173,15 @@ def build_pass2_view(agent_id: str, agent_output: dict, bundle: dict | None = No
             "nearest_support": b.get("nearest_support"),
             "nearest_resistance": b.get("nearest_resistance"),
             "volatility_regime_derived": b.get("volatility_regime_derived"),
+            "rsi_14": b.get("rsi_14"),
+            "price_vs_sma20_pct": b.get("price_vs_sma20_pct"),
+            "price_vs_sma50_pct": b.get("price_vs_sma50_pct"),
+            "price_vs_sma200_pct": b.get("price_vs_sma200_pct"),
+            "volume_ratio_today": b.get("volume_ratio_today"),
+            "support_atr_distance": b.get("support_atr_distance"),
+            "resistance_atr_distance": b.get("resistance_atr_distance"),
+            # The model's own read of RSI against price (set by the Technical agent), mentioned in 19 of 31 Pass 2 runs
+            "momentum_divergence": c.get("momentum_divergence"),
         }
 
     if agent_id == "SENT":

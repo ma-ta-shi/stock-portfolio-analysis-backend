@@ -22,13 +22,8 @@ data/schemas/data_bundle.py, not yet a typed sub-schema), `bundle.context`
 import json
 
 from agents.pass2_view import build_pass2_view
-from agents.utils import as_of_date, truncate_to_tokens
+from agents.utils import as_of_date
 from data.schemas.data_bundle import DataBundle
-
-# How much of each Pass 1 narrative Pass 2 reads (about 4 characters a token). Raised from 300 (2026-10-06) to cover the
-# 1300 character ceiling the Researcher and Fundamental narratives now have, so the cut does not remove their closing
-# synthesis. Whether Pass 2 should have a cut at all is open (ledger BB-100).
-NARRATIVE_VIEW_TOKENS = 350
 
 AGENT_KEYS = {
     "RSRCH": "stock_researcher",
@@ -97,8 +92,14 @@ def compress_pass1_outputs(
             # quality, so "low" is the honest, conservative default.
             "data_quality_assessment": mechanical_quality.get(agent_id, "low"),
             "caveats": output.get("caveats", []),
+            # The agent's own cited risks. Delivered 2026-10-07 after a replay (3 runs x Bull, Bear, Risk): 15 to 20% of the words
+            # and numbers unique to them showed up in the Pass 2 outputs against 2 to 5% by chance, and Bear's downside triggers and
+            # Bull's thesis risks took Pass 1 risks (US retail competition) in place of its own speculation (a dividend cut).
+            "risks": output.get("risks") or [],
             "pass2_view": view,
-            "narrative_truncated": truncate_to_tokens(output.get("narrative", ""), NARRATIVE_VIEW_TOKENS),
+            # Sent whole. The old 300 then 350 token cut could no longer bind: every Pass 1 validator caps the narrative at
+            # 1300 characters (about 325 tokens), and it trimmed 1 of 200 stored narratives (ledger BB-100).
+            "narrative": output.get("narrative", ""),
         }
     return compressed
 
@@ -196,8 +197,11 @@ def build_pass2_user_message(
 
         # Serialize pass2_view fields compactly
         for k, v in p2v.items():
-            if v is None and agent_id == "FUND":
-                continue  # a metric this kind of company is not judged on is left out, not printed as None
+            if v is None:
+                # Left out, not printed as "None": a metric this kind of company is not judged on (Fundamental) or a
+                # value that does not apply (Macro commodity context). A genuine gap is not lost: the agent's caveats and
+                # the mechanical data quality (shown beside its confidence) carry it.
+                continue
             v = _rounded(v)
             if isinstance(v, dict):
                 lines.append(f"  {k}: {json.dumps(v)}")
@@ -206,7 +210,11 @@ def build_pass2_user_message(
             else:
                 lines.append(f"  {k}: {v}")
 
-        lines.append(f"  narrative(key points): {out['narrative_truncated']}")
+        risks = [r for r in (out.get("risks") or []) if isinstance(r, dict) and r.get("risk")]
+        if risks:
+            lines.append("  risks: " + "; ".join(
+                f"{r['risk']} ({r.get('severity', '?')} severity, {r.get('likelihood', '?')} likelihood): {r.get('evidence', '')}" for r in risks))
+        lines.append(f"  narrative: {out['narrative']}")
         lines.append("")
 
     if missing_agents:

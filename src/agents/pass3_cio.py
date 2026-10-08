@@ -280,10 +280,9 @@ def build_user_message(
         f"Timeline: {ctx.timeline} | Account: {ctx.account_type}",
         f"Disagreement Score: {disagreement_score}/100 — Category: {disagreement_category}",
         "",
-        "=== PASS 1 RELIABILITY SUMMARY ===",
-        build_pass1_summaries(compressed_pass1),
-        "",
     ]
+    # The Pass 1 summaries are in the system prompt ({pass1_summaries}); this message used to repeat them (the same five
+    # lines twice in every stage A prompt, about 450 tokens), as the Bull and Risk messages did before they were fixed.
     lines.append("=== PASS 2 OUTPUTS ===")
     lines.append(build_advocate_summary(pass2_outputs.get("bull"), "BULL"))
     lines.append(build_advocate_summary(pass2_outputs.get("bear"), "BEAR"))
@@ -451,6 +450,8 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
 
 
 class CIORunner(BaseRunner):
+    GROUND_MODE = "log"  # figures not in this agent's input are recorded in validator_errors, never a retry (agents/grounding.py)
+
     async def run(
         self,
         bundle: DataBundle,

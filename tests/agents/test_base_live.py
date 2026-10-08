@@ -156,7 +156,6 @@ async def test_technical_analyst_prompt_runs_end_to_end_against_real_ollama():
         "assessment_summary",
         "analysis_confidence",
         "caveats",
-        "key_factors",
         "risks",
         "narrative",
         "interpretive_fields",

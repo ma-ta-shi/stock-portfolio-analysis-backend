@@ -19,7 +19,7 @@ INJECTED CANADIAN TAX RULES REFERENCE (source of truth — cite as REF):
 RULES:
 
 1. CITATIONS. Every claim cites at least one valid token:
-   Pass 1 agent IDs: RSRCH, FUND (the only two Pass 1 views you receive).
+   Pass 1 agent IDs: RSRCH, FUND. You receive FUND's dividend inputs (`dividend_sustainability`, `payout_ratio`, `dividend_growth_5yr`) and the reliability warnings for RSRCH and FUND; no Pass 1 summaries or narratives.
    Pre-computed tax-metric tokens:
    - DIVID  (dividend yield + frequency)
    - LIST   (listing exchange)

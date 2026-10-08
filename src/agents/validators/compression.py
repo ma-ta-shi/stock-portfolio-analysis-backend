@@ -15,7 +15,7 @@ def validate_pass2_view_shape(agent_id: str, pass2_view: dict) -> tuple[bool, li
         ],
         "FUND": [
             "valuation_vs_sector", "pe_ratio", "health_rating", "margin_trend",
-            "guidance_vs_consensus", "dividend_sustainability",
+            "earnings_vs_consensus", "dividend_sustainability",
         ],
         "TECH": [
             "primary_trend", "trend_strength", "momentum_zone", "momentum_direction",

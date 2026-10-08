@@ -50,6 +50,7 @@ import aiohttp
 import structlog
 
 from agents.capture import map_finish_reason, write_call_artifacts
+from agents.grounding import FLAG_MARK, grounding_errors
 from agents.validators.cio import SOFT_ERROR_PREFIXES as _SOFT_CIO
 from agents.validators.pass2 import SOFT_ERROR_PREFIXES as _SOFT_P2
 
@@ -208,6 +209,11 @@ class BaseRunner:
     `data/precompute/sentiment.py`'s per-call session (that module is a
     stateless batch function with no object lifecycle; this class is not).
     """
+
+    # Grounding mode (agents/grounding.py): a figure in the narrative, summary or caveats that is not in the data the agent was given.
+    # "once" (Pass 1, which restates its data): fails the first attempt that reaches it, the figure named; later it is only recorded.
+    # "log" (Pass 2 and CIO, which also propose scenario numbers): only recorded in validator_errors, never a retry. None: not checked.
+    GROUND_MODE: str | None = None
 
     def __init__(self, session: aiohttp.ClientSession | None = None):
         self.session = session
@@ -655,6 +661,7 @@ class BaseRunner:
         make_call: Callable[[str], Awaitable[tuple[dict, list[int] | None]]],
         user_message: str,
         validator: Callable[[dict], tuple[bool, list[str]]],
+        ground_context: str | None = "",
     ) -> tuple[dict, list[str], list[int] | None]:
         """Shared retry/validation core (86bc2d414 follow-up) used by
         call_with_validation, call_with_validation_start, and
@@ -703,12 +710,30 @@ class BaseRunner:
         last_result = {}
         last_errors: list[str] = []
         current_message = user_message
+        # Grounding (agents/grounding.py): the data message plus the instructions are the context, since the model legitimately
+        # recites a threshold from its own rules ("avg dollar volume > $1M" in Technical's thin-volume caveat).
+        ground_text = (ground_context or "") + "\n" + user_message
+        ground_retry_spent = False
+
+        def check(result: dict, attempt: int) -> tuple[bool, list[str], list[str]]:
+            """(passed, errors that count against the attempt, grounding flags only recorded). "once" lets a flag fail the first
+            attempt that reaches it (never the last, which would cost the output) so the model sees the figure named; after that,
+            and always in "log" mode, a flag is recorded in validator_errors and nothing more."""
+            nonlocal ground_retry_spent
+            passed, errors = validator(result)
+            if not self.GROUND_MODE or ground_context is None:
+                return passed, errors, []
+            flags = grounding_errors(result, ground_text)
+            if flags and self.GROUND_MODE == "once" and not ground_retry_spent and attempt < MAX_RETRIES - 1:
+                ground_retry_spent = True
+                return False, [*errors, *flags], []
+            return passed, errors, flags
 
         for attempt in range(MAX_RETRIES):
             try:
                 self.current_attempt = attempt + 1
                 result, context = await make_call(current_message)
-                passed, errors = validator(result)
+                passed, errors, noted = check(result, attempt)
                 if self.call_log:
                     self.call_log[-1]["passed"] = passed
                     self.call_log[-1]["errors"] = errors
@@ -727,20 +752,22 @@ class BaseRunner:
                     # `passed` staleness itself predates this ticket and
                     # is out of scope to fix here.
                     self.call_log[-1]["validator_passed"] = passed
-                    self.call_log[-1]["validator_errors"] = errors
+                    self.call_log[-1]["validator_errors"] = [*errors, *noted]
                 if passed:
                     return result, [], context
                 # Salvage small length overshoots locally rather than spending a
                 # retry the model demonstrably cannot win (see _auto_trim).
-                if self._auto_trim(result, errors):
+                # Not when a grounding flag is among the errors: the trim would pass the attempt and the flagged figure would ship
+                # with the one grounding retry already spent on it.
+                if not any(FLAG_MARK in e for e in errors) and self._auto_trim(result, errors):
                     if self.call_log:
                         self.call_log[-1]["auto_trimmed"] = True
-                    passed, errors = validator(result)
+                    passed, errors, noted = check(result, attempt)
                     if passed:
                         logger.info("auto_trimmed_length_bound")
                         if self.call_log:
                             self.call_log[-1]["validator_passed"] = True
-                            self.call_log[-1]["validator_errors"] = []
+                            self.call_log[-1]["validator_errors"] = noted
                         return result, [], context
                 # On the final attempt only, accept output whose only remaining
                 # errors are soft (SOFT_ERROR_PREFIXES) rather than spending this
@@ -758,7 +785,7 @@ class BaseRunner:
                             self.call_log[-1]["passed"] = True
                             self.call_log[-1]["soft_errors"] = soft
                             self.call_log[-1]["validator_passed"] = True
-                            self.call_log[-1]["validator_errors"] = soft
+                            self.call_log[-1]["validator_errors"] = [*soft, *noted]
                         return result, [], context
                 last_result = result
                 last_errors = errors
@@ -796,7 +823,7 @@ class BaseRunner:
         async def _make_call(msg: str) -> tuple[dict, list[int] | None]:
             return await self.call_model(system_prompt, msg, max_tokens, temperature), None
 
-        result, errors, _ = await self._retry_loop(_make_call, user_message, validator)
+        result, errors, _ = await self._retry_loop(_make_call, user_message, validator, system_prompt)
         return result, errors
 
     async def call_with_validation_start(
@@ -823,7 +850,7 @@ class BaseRunner:
                 msg, system=system_prompt, max_tokens=max_tokens, temperature=temperature
             )
 
-        return await self._retry_loop(_make_call, user_message, validator)
+        return await self._retry_loop(_make_call, user_message, validator, system_prompt)
 
     async def call_with_validation_continue(
         self,
@@ -855,7 +882,7 @@ class BaseRunner:
             )
             return result, None
 
-        result, errors, _ = await self._retry_loop(_make_call, prompt, validator)
+        result, errors, _ = await self._retry_loop(_make_call, prompt, validator, None)  # no data message to ground against: the data went in an earlier turn
         return result, errors
 
     def timing_summary(self) -> dict:

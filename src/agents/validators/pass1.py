@@ -34,41 +34,8 @@ def _check_string(obj: dict, field: str, min_chars: int, max_chars: int, errors:
         errors.append(f"{field}: too long ({c} chars, max {max_chars})")
 
 
-def _check_key_factors(key_factors: list, errors: list[str], required_sentiments: set | None = None,
-                       lo: int = 2, hi: int = 4):
-    """Bounds are declared PER AGENT in each prompt's Array-bounds table, so they are
-    parameters, not constants. Sentiment lowered its floor to 1 (thin Canadian
-    coverage forces invention at a floor of 2 -- see protocol doc 44.4/47.5); the
-    others remain 2-4. test_prompt_contract.py asserts these stay in step."""
-    if not isinstance(key_factors, list):
-        errors.append("key_factors: must be a list")
-        return
-    if len(key_factors) < lo:
-        errors.append(f"key_factors: need >={lo} items, got {len(key_factors)}")
-    if len(key_factors) > hi:
-        errors.append(f"key_factors: need <={hi} items, got {len(key_factors)}")
-    valid_imp = {"high", "medium", "low"}
-    valid_sent = {"positive", "negative", "neutral"}
-    for i, kf in enumerate(key_factors):
-        if not isinstance(kf, dict):
-            errors.append(f"key_factors[{i}]: must be a dict")
-            continue
-        for sub in ("factor", "importance", "sentiment", "evidence"):
-            if sub not in kf or not kf[sub]:
-                errors.append(f"key_factors[{i}].{sub}: missing or empty")
-        if kf.get("importance") not in valid_imp:
-            errors.append(f"key_factors[{i}].importance: must be high|medium|low")
-        sent = kf.get("sentiment", "")
-        if sent not in valid_sent:
-            errors.append(f"key_factors[{i}].sentiment: must be positive|negative|neutral")
-        if required_sentiments and sent not in required_sentiments:
-            errors.append(
-                f"key_factors[{i}].sentiment: must be one of {required_sentiments}, got '{sent}'"
-            )
-
-
 def _check_risks(risks: list, errors: list[str], lo: int = 1, hi: int = 3):
-    """Per-agent bounds -- see _check_key_factors. Sentiment allows 0 risks: a data
+    """Per-agent bounds, declared in each prompt. Sentiment allows 0 risks: a data
     gap is a caveat, not a risk, and a floor of 1 made the model manufacture one in
     5 of 6 runs (protocol doc 49.1/49.5)."""
     if not isinstance(risks, list):
@@ -163,9 +130,12 @@ def _check_interpretive_fields(output: dict, errors: list, spec: dict) -> None:
 
 
 
-# Summary ceiling 96 words and narrative ceilings = the stated limit + 20%: the shared trimmer used to cut up to 20% over
+# Summary ceiling 96 words and narrative ceilings = the stated limit + 20 to 25%: the shared trimmer used to cut up to 20% over
 # (removing the closing sentence of the narrative), so an output that overshot by that much passed; it now passes uncut.
-# The prompts still state the lower limits (80 words; 1080 characters; Macro 720).
+# The prompts state 80 words, a 900 to 1,200 character narrative (Macro 720); the ceiling is 1,500 (it was 1,300 while the agents
+# also wrote key_factors: without them the narrative carries the evidence and runs longer, with more figures in about the same
+# space, so the limit was raised and not the content cut, ledger BB-107).
+NARRATIVE_CEILING = 1500
 def validate_stock_researcher(output: dict) -> tuple[bool, list[str]]:
     """Validate Stock Researcher output."""
     errors: list[str] = []
@@ -173,7 +143,7 @@ def validate_stock_researcher(output: dict) -> tuple[bool, list[str]]:
     # Required top-level fields
     for field in (
         "assessment_summary",
-        "analysis_confidence", "caveats", "key_factors", "risks", "narrative",
+        "analysis_confidence", "caveats", "risks", "narrative",
         "structured_data",
     ):
         _require_field(output, field, errors)
@@ -187,7 +157,7 @@ def validate_stock_researcher(output: dict) -> tuple[bool, list[str]]:
         errors.append("assessment_summary: must be non-empty")
 
     # narrative: floor 600 (about 100 words), like Sentiment and Technical: of 16 replays the two too-short narratives were 651 and 679 chars, complete notes
-    _check_narrative_chars(output, 600, 1300, errors)
+    _check_narrative_chars(output, 600, NARRATIVE_CEILING, errors)
 
     # caveats: 0-4 items. The old minimum of 1 was only ever met because the payload always listed a permanent
     # "transcript not available" gap to mention; with that line gone a clean note has nothing to caveat, and padding
@@ -197,9 +167,6 @@ def validate_stock_researcher(output: dict) -> tuple[bool, list[str]]:
         errors.append("caveats: must be a list")
     elif len(caveats) > 4:
         errors.append(f"caveats: need <=4 items, got {len(caveats)}")
-
-    # key_factors: 2-4 items
-    _check_key_factors(output.get("key_factors", []), errors)
 
     # risks: 1-3 items
     _check_risks(output.get("risks", []), errors)
@@ -291,7 +258,7 @@ def validate_fundamental_analyst(output: dict) -> tuple[bool, list[str]]:
     # (86bbuhk82 item 3: "resolve the structured_data/interpretive_fields split").
     required = [
         "assessment_summary",
-        "analysis_confidence", "caveats", "key_factors", "risks", "narrative",
+        "analysis_confidence", "caveats", "risks", "narrative",
         "interpretive_fields",
     ]
     for field in required:
@@ -307,7 +274,7 @@ def validate_fundamental_analyst(output: dict) -> tuple[bool, list[str]]:
     # to analysis_confidence, the one real, live signal for "this agent cannot produce a
     # useful analysis" (pass1-confidence-model.md). Deliberately an EXACT match, not loosened
     # to include "low" -- confirmed live (86bbummwp) that a real "low"-confidence
-    # Fundamental call still produces fully compliant narrative/key_factors content on its own
+    # Fundamental call still produces fully compliant narrative/risks content on its own
     # merits, so exempting "low" from these checks would let honestly-thin-but-real output
     # skip checks it can already satisfy. (validate_stub_fundamental in compression.py is the
     # separate, narrower check that does accept "low" for the one fixture that needs it.)
@@ -319,16 +286,14 @@ def validate_fundamental_analyst(output: dict) -> tuple[bool, list[str]]:
         _sweep_declared_enums(output, errors)
         # Insufficient data: the content checks below do not apply. This return was
         # at FUNCTION indent, so it fired unconditionally and made every check after
-        # it unreachable -- narrative length, key_factors bounds, risks bounds,
+        # it unreachable -- narrative length, risks bounds,
         # interpretive-field enums and the declared-enum sweep. Found 2026-09-03 when
-        # a FUND output with 5 key_factors passed a 2-4 bound.
+        # a FUND output with 5 risks passed a 1-3 bound.
         return len(errors) == 0, errors
 
-    # narrative: floor 600 like the other agents (2 of 63 first attempts were short); ceiling 1300 (the stated 1080 + 20%,
-    # see the note above validate_stock_researcher)
-    _check_narrative_chars(output, 600, 1300, errors)
+    # narrative: floor 600 like the other agents (2 of 63 first attempts were short); ceiling NARRATIVE_CEILING
+    _check_narrative_chars(output, 600, NARRATIVE_CEILING, errors)
 
-    _check_key_factors(output.get("key_factors", []), errors)
     _check_risks(output.get("risks", []), errors)
 
     # A second, formerly-unreachable legacy `structured_data`/`pass2_view` block (guarded by
@@ -348,7 +313,7 @@ def validate_technical_analyst(output: dict) -> tuple[bool, list[str]]:
 
     required = [
         "assessment_summary",
-        "analysis_confidence", "caveats", "key_factors", "risks", "narrative",
+        "analysis_confidence", "caveats", "risks", "narrative",
         "interpretive_fields",
     ]
     for field in required:
@@ -359,8 +324,7 @@ def validate_technical_analyst(output: dict) -> tuple[bool, list[str]]:
         errors.append(f"assessment_summary: too long ({word_count(summary)} words, max 96)")
 
     # Floor 600, as Sentiment's (2026-10-03): the shorter prompt made too-short narratives 641-692 characters in 3 of 18 replays.
-    _check_narrative_chars(output, 600, 1300, errors)
-    _check_key_factors(output.get("key_factors", []), errors)
+    _check_narrative_chars(output, 600, NARRATIVE_CEILING, errors)
     _check_risks(output.get("risks", []), errors)
 
     # Same deletion as validate_fundamental_analyst above -- the old unreachable
@@ -377,7 +341,7 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
 
     for field in (
         "assessment_summary",
-        "analysis_confidence", "caveats", "key_factors", "risks", "narrative",
+        "analysis_confidence", "caveats", "risks", "narrative",
         "structured_data",
     ):
         _require_field(output, field, errors)
@@ -388,9 +352,8 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
 
     # Floor 600 (about 100 words), not 720: of 24 replays after the prompt rewrite the model's too-short narratives were 562-694 characters;
     # Pass 2 reads the narrative as one of several fields, and 600 to 1,080 characters is a complete 4 to 7 sentence synthesis.
-    _check_narrative_chars(output, 600, 1300, errors)
-    # Sentiment's declared bounds: key_factors 1-3, risks 0-2 (thin-data path).
-    _check_key_factors(output.get("key_factors", []), errors, lo=1, hi=3)
+    _check_narrative_chars(output, 600, NARRATIVE_CEILING, errors)
+    # Sentiment's declared bound: risks 0-2 (thin-data path).
     _check_risks(output.get("risks", []), errors, lo=0, hi=2)
 
     # structured_data
@@ -405,7 +368,7 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
             )
 
         # news_sentiment.overall -- declared in the real schema (5-value, distinct from the
-        # 3-value key_factors[].sentiment vocabulary, hence not in the shared sweep), unenforced
+        # 3-value sentiment vocabulary, hence not in the shared sweep), unenforced
         # until now. Surfaced by the permanent enum-inventory test, not a live failure.
         ns = sd.get("news_sentiment")
         if isinstance(ns, dict):
@@ -437,7 +400,7 @@ def validate_macro_economist(output: dict) -> tuple[bool, list[str]]:
 
     for field in (
         "assessment_summary",
-        "analysis_confidence", "caveats", "key_factors", "risks", "narrative",
+        "analysis_confidence", "caveats", "risks", "narrative",
         "structured_data",
     ):
         _require_field(output, field, errors)
@@ -449,7 +412,6 @@ def validate_macro_economist(output: dict) -> tuple[bool, list[str]]:
     # Macro narrative: 80-120 words → 480-720 chars (SHORTER than other agents)
     _check_narrative_chars(output, 480, 864, errors)
 
-    _check_key_factors(output.get("key_factors", []), errors)
     _check_risks(output.get("risks", []), errors)
 
     # structured_data

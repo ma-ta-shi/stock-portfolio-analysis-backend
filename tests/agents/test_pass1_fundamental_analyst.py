@@ -307,10 +307,6 @@ def _valid_fundamental_output(**overrides) -> dict:
         "assessment_summary": "A solid technology company with strong fundamentals.",
         "analysis_confidence": "high",
         "caveats": ["Coverage limited to public filings and earnings calls."],
-        "key_factors": [
-            {"factor": "Revenue growth", "importance": "high", "sentiment": "positive", "evidence": "FILING:10-K: 14.2% YoY"},
-            {"factor": "FCF generation", "importance": "high", "sentiment": "positive", "evidence": "FILING:MD&A: FCF yield 4.8%"},
-        ],
         "risks": [
             {"risk": "Competitive pressure", "severity": "medium", "evidence": "N1: new entrant"},
         ],

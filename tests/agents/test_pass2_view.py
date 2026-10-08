@@ -204,7 +204,7 @@ def test_renderer_reads_real_fields_off_a_databundle_shaped_object():
             "analysis_confidence": "high",
             "caveats": [],
             "pass2_view": {"thesis_archetype": "secular_grower"},
-            "narrative_truncated": "n",
+            "narrative": "n",
         }
     }
     bundle = SimpleNamespace(
@@ -228,7 +228,7 @@ def test_renderer_survives_a_non_dict_pass2_view():
     from agents.compression import build_pass2_user_message
     compressed = {"SENT": {"assessment_summary": "s", "analysis_confidence": "medium",
                            "caveats": [],
-                           "pass2_view": "not a dict", "narrative_truncated": "n"}}
+                           "pass2_view": "not a dict", "narrative": "n"}}
     # SimpleNamespace, not a real DataBundle -- build_pass2_user_message only reads
     # a handful of attributes off it (see the module docstring's field mapping), and
     # this test is about rendering degradation, not DataBundle validity. Same
@@ -257,3 +257,33 @@ def test_recent_developments_pass_the_headline_and_date_but_not_the_source():
                       "significance": "high", "sentiment": "positive"}
     assert top[1] == {"news_id": "N9", "significance": "low"}  # an unhydrated item is passed as stored
 
+
+
+def test_the_tech_view_carries_the_models_momentum_divergence_and_the_fund_view_the_new_figures():
+    tech = build_pass2_view("TECH", {"interpretive_fields": {"momentum_divergence": "bearish"}},
+                            {"rsi_14": 48.6, "support_atr_distance": 0.4})
+    fund = build_pass2_view("FUND", {}, {"forward_pe": 15.0, "payout_ratio": 1.26})
+
+    assert tech["momentum_divergence"] == "bearish" and tech["rsi_14"] == 48.6 and tech["support_atr_distance"] == 0.4
+    assert fund["forward_pe"] == 15.0 and fund["payout_ratio"] == 1.26
+
+
+def test_no_pass2_or_cio_prompt_names_a_pass1_field_that_nothing_sends():
+    """Ledger BB-101: a prompt that tells an agent to use a Pass 1 field the handoff does not carry is a silent gap.
+    Checked over the Pass 1 field names the Pass 2 and CIO prompts can refer to."""
+    import re
+    from pathlib import Path
+
+    delivered = {"assessment_summary", "analysis_confidence", "caveats", "narrative"}
+    for agent_id in ("RSRCH", "FUND", "TECH", "SENT", "MACRO"):
+        delivered |= set(build_pass2_view(agent_id, {}, {}))
+    pass1_fields = {"key_factors", "risks", "dominant_themes", "contrarian_signals", "suggested_invalidation_level",
+                    "invalidation_atr_distance", "pattern_signal", "pattern_confirmed", "moat_assessment", "management_notes",
+                    "revenue_mix_notes", "business_model_summary", "growth_drivers", "competitive_threats",
+                    "recent_developments", "reliability_factors", "data_quality_assessment", "peer_sentiment_comparison"}
+    # These are Pass 1 outputs the handoff does not carry (ledger BB-103); a prompt must not tell an agent to use one.
+    prompts = Path(__file__).resolve().parents[2] / "prompts"
+    for path in ("bull_advocate/v1.txt", "bear_advocate/v1.txt", "risk_advisor/v1_stage_a.txt", "tax_strategist/v1.txt",
+                 "cio/v1_stage_a.txt", "cio/v1_stage_b.txt", "shadow_cio/v1.txt"):
+        named = set(re.findall(r"`([a-z][a-z0-9_]{3,})`", (prompts / path).read_text(encoding="utf-8")))
+        assert not (named & pass1_fields) - delivered, (path, sorted((named & pass1_fields) - delivered))

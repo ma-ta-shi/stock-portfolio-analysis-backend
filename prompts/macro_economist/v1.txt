@@ -7,7 +7,6 @@ RULES:
    An evidence field is the citation PLUS the specific figures that support the claim -- never the bare token alone. If the payload shows a number, quote it.
    GOOD: "RATE: BoC held at 3.63%, 90d delta -25bp"   .   "CPI: 2.4% YoY, 3m delta +0.3pp"   .   "FX: CAD/USD -4.1% over 90d"
    BAD:  "RATE"   .   "CPI"   .   "FX"
-   Each key_factors[] entry must cite DIFFERENT evidence -- reusing the same evidence string for two factors means you have one factor, not two.
 2. GROUNDING: Every claim must be traceable to a citation. If you cannot cite, omit the claim or state "data not available". Use only the figures and country the payload shows; do not describe a US figure as Canadian or the reverse.
 3. SPECIFIC TRANSMISSION: Do NOT write generic macro commentary. Every rationale must name the specific transmission mechanism for {sector}. Compare:
    BAD: "RATE: rising rates are a headwind for the sector" (no mechanism)
@@ -22,7 +21,7 @@ RULES:
 9. STATCAN: For a Canadian name the STATISTICS CANADA block (housing starts, retail sales YoY) shows domestic demand. Use it, citing STATCAN, only where it bears on {sector} (housing, consumer, lenders, materials); otherwise leave it out.
 10. MATERIAL HEADWINDS ONLY: A geopolitical or trade concern is mentioned only if it ties to a payload block (typically COMMOD). No fabricated stubs.
 
-LIMITS (key_factors, risks, narrative and summary are validated; keep the rest to them too): key_factors 2-4, risks 1-3, sector_tailwinds 1-4, sector_headwinds 1-4, evidence 15 words or fewer, tailwind/headwind items 20 words or fewer, assessment_summary 80 words or fewer, narrative 640-720 characters (about 105-120 words; under 480 is rejected, an overshoot is trimmed). Count before answering.
+LIMITS (risks, narrative and summary are validated; keep the rest to them too): risks 1-3 (at least one is required), sector_tailwinds 1-4, sector_headwinds 1-4, evidence 15 words or fewer, tailwind/headwind items 20 words or fewer, assessment_summary 80 words or fewer, narrative 640-720 characters (about 105-120 words; under 480 is rejected, an overshoot is trimmed). Count before answering.
 
 FOCUS: {timeline_instruction}
 SECTOR MACRO SENSITIVITIES: {sector_macro_hint}
@@ -51,9 +50,6 @@ Respond with ONLY valid JSON:
   "assessment_summary": "≤80 words. Most important macro finding first.",
   "analysis_confidence": "high|medium|low|insufficient",
   "caveats": ["specific data gaps, contradictions, stale series, or qualitative concerns"],
-  "key_factors": [
-    {"factor": "name", "importance": "high|medium|low", "sentiment": "positive|negative|neutral (effect of this factor on THIS stock)", "evidence": "≤15 words, starts with citation token"}
-  ],
   "risks": [
     {"risk": "name", "severity": "high|medium|low", "likelihood": "high|medium|low", "evidence": "≤15 words, starts with citation token"}
   ],

@@ -19,7 +19,7 @@ MANDATORY CAVEATS (add one only when its condition is true; never write a caveat
 
 FIELD DEFINITIONS: the primary trend is the SMA stack order shown in the payload and is the headline trend: if it is "mixed", say so and describe the lean separately (price against the 200-day, the weekly trend), never call it bullish or bearish; you judge trend_strength. volume_confirmation is "confirming" when volume leans with the primary trend (up-day volume above down-day volume for a bullish trend, the reverse for a bearish one, and today's volume agreeing with today's price change), "diverging" when it leans against it, otherwise "inconclusive". confluence_score (0-3) counts how many of momentum, volume and level proximity agree with the primary trend.
 
-LIMITS (hard): key_factors 2-4 items; risks 1-3; assessment_summary at most 80 words; narrative 140-190 words (checked as 600-1080 characters; a short narrative cannot be fixed on retry, so aim for about 170 words). In key_factors, `sentiment` says which case the factor supports: positive = bullish, negative = bearish, neutral = neither. It is never an indicator label (not "diverging", "near_support" or "bearish").
+LIMITS (hard): risks 1-3 (at least one is required, drawn from the payload); assessment_summary at most 80 words; narrative 150-200 words (checked as 600-1500 characters; a short narrative cannot be fixed on retry, so aim for about 175 words). The narrative carries the evidence: cite the indicator values behind each claim.
 
 {memory_brief}
 {data_warnings}
@@ -30,13 +30,10 @@ Respond with ONLY valid JSON:
   "assessment_summary": "at most 80 words, most important technical finding first",
   "analysis_confidence": "high|medium|low|insufficient",
   "caveats": ["specific data gaps, anomalies, signal conflicts, earnings proximity, thin volume"],
-  "key_factors": [
-    {"factor": "name", "importance": "high|medium|low", "sentiment": "positive|negative|neutral", "evidence": "block label + the indicator values, e.g. 'MOMO: RSI=57.4, zone=neutral'"}
-  ],
   "risks": [
     {"risk": "name", "severity": "high|medium|low", "likelihood": "high|medium|low", "evidence": "block label + the indicator values"}
   ],
-  "narrative": "140-190 words following the analysis order, citing indicator values; end with the main conflict and the confluence count",
+  "narrative": "150-200 words following the analysis order, citing indicator values; end with the main conflict and the confluence count",
   "interpretive_fields": {
     "trend_strength": "strong|moderate|weak",
     "volume_confirmation": "confirming|diverging|inconclusive",

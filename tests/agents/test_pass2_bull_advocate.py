@@ -25,7 +25,7 @@ def _compressed_pass1():
     return {
         "RSRCH": {
             "assessment_summary": "s", "analysis_confidence": "high", "caveats": [],
-            "pass2_view": {"thesis_archetype": "secular_grower"}, "narrative_truncated": "n",
+            "pass2_view": {"thesis_archetype": "secular_grower"}, "narrative": "n",
         }
     }
 

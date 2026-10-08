@@ -9,9 +9,9 @@ PROMPT = (Path(__file__).resolve().parents[2] / "prompts" / "stock_researcher" /
 
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
     """32 of 59 first attempts failed raw (22 wrote 5 key_factors, 20 overshot the narrative, 4 had no caveats)."""
-    for limit in ("key_factors 2-4", "risks 1-3", "caveats 0-4", "assessment_summary 80 words or fewer",
-                  "narrative 760-960 characters"):
+    for limit in ("risks 1-3", "caveats 0-4", "assessment_summary 80 words or fewer", "narrative 900-1,200 characters", "over 1500"):
         assert limit in PROMPT
+    assert "key_factors" not in PROMPT  # removed 2026-10-07 (ledger BB-107)
     assert "HARD FLOOR" not in PROMPT  # the repeated 900-character narrative warning is gone
 
 
@@ -47,3 +47,8 @@ def test_the_profile_fallback_is_citable_but_never_moat_evidence():
     assert "PROFILE:Business for the company profile shown when there is no filing digest" in PROMPT
     assert "never cite it as moat evidence" in PROMPT
     assert "EXPECTED MOAT TYPES" not in PROMPT
+
+
+def test_the_grounding_rule_forbids_computing_figures():
+    """The Researcher wrote invented figures ("38%") in about 1 in 3 first attempts; the other Pass 1 prompts already forbid computing."""
+    assert "never calculate a percentage, a difference or a ratio yourself" in PROMPT

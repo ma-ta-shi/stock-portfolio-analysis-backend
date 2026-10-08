@@ -6,15 +6,15 @@ PROMPT = (Path(__file__).resolve().parents[2] / "prompts" / "technical_analyst" 
 
 
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
-    """25 of 51 real runs retried; the model wrote 4 to 6 key_factors because only the validator knew the cap."""
-    assert "key_factors 2-4 items" in PROMPT and "risks 1-3" in PROMPT and "at most 80 words" in PROMPT
-    assert "600-1080 characters" in PROMPT
+    """25 of 51 real runs retried; most wrote more list items than the cap because only the validator knew it."""
+    assert "risks 1-3" in PROMPT and "at most 80 words" in PROMPT
+    assert "600-1500 characters" in PROMPT
 
 
-def test_it_says_what_sentiment_means_for_a_technical_factor():
-    """56 first-attempt errors: the model wrote 'diverging', 'bearish', 'near_support' into key_factors[].sentiment."""
-    assert "positive = bullish, negative = bearish, neutral = neither" in PROMPT
-    assert "never an indicator label" in PROMPT
+def test_key_factors_are_not_asked_for_and_the_narrative_carries_the_evidence():
+    """56 first-attempt errors came from key_factors[].sentiment; the list is gone (nothing read it), the narrative cites the values."""
+    assert "key_factors" not in PROMPT
+    assert "The narrative carries the evidence" in PROMPT
 
 
 def test_the_model_is_not_asked_for_fields_code_decides():

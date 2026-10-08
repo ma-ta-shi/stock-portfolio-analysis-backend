@@ -90,7 +90,7 @@ def _fake_bundle(**overrides) -> SimpleNamespace:
         growth_metrics={"revenue_growth_yoy": 0.1, "revenue_growth_3yr_cagr": 0.09},
         profitability_metrics={"margin_trend": "stable", "roe": 0.3, "net_margin": 0.25,
                                 "operating_margin": 0.3, "fcf_to_net_income": 1.0},
-        balance_sheet_metrics={"debt_to_equity": 1.5},
+        balance_sheet_metrics={"debt_to_equity": 1.5}, dividend_info={},
         peer_metrics={"industry_benchmark": None},
         insider_activity={"transactions": []},
         analyst_consensus={"consensus_rating": "buy", "target_mean": 250.0},
@@ -1114,11 +1114,13 @@ async def test_run_quality_summary_written_on_happy_path():
     assert "shadow_cio" not in summary.agents_with_empty_key_factors
     assert "cio_stage_a" not in summary.agents_with_empty_narrative
     assert "shadow_cio" not in summary.agents_with_empty_narrative
-    # But the 5 Pass 1 agents genuinely have none of these three fields in
-    # this fixture, and Pass 1 IS where all three are real, validated
-    # fields -- they must still show up, not get swept away by the fix.
-    assert set(summary.agents_with_empty_key_factors) >= {"RSRCH", "FUND", "TECH", "SENT", "MACRO"}
+    # The 5 Pass 1 agents genuinely have no risks or narrative in this fixture, and those ARE real, validated Pass 1 fields:
+    # they must still show up. They no longer write key_factors (removed 2026-10-07), so an empty one is not flagged for them,
+    # while the Pass 2 agents that still write it are.
     assert set(summary.agents_with_empty_risks) >= {"RSRCH", "FUND", "TECH", "SENT", "MACRO"}
+    assert set(summary.agents_with_empty_narrative) >= {"RSRCH", "FUND", "TECH", "SENT", "MACRO"}
+    assert not (set(summary.agents_with_empty_key_factors or []) & {"RSRCH", "FUND", "TECH", "SENT", "MACRO"})
+    assert set(summary.agents_with_empty_key_factors) >= {"bull", "bear", "tax", "risk"}
 
 
 @pytest.mark.asyncio
@@ -1234,12 +1236,11 @@ async def test_run_quality_summary_degenerate_output_flags():
     assert run.status == RunStatus.FAILED  # Gate 2 failure -- confirms the bounded mocking worked
 
     summary = await _summary_for(session, run)
-    assert "RSRCH" not in summary.agents_with_empty_key_factors
     assert "RSRCH" not in summary.agents_with_empty_risks
     assert "RSRCH" not in summary.agents_with_empty_narrative
     # FUND (no fields at all) and TECH (explicitly empty) COMPLETED with thin
-    # output: flagged by name.
-    assert set(summary.agents_with_empty_key_factors) >= {"FUND", "TECH"}
+    # output: flagged by name. (Pass 1 agents no longer write key_factors, so it is not flagged for them.)
+    assert not (set(summary.agents_with_empty_key_factors or []) & {"RSRCH", "FUND", "TECH", "SENT", "MACRO"})
     assert set(summary.agents_with_empty_risks) >= {"FUND", "TECH"}
     assert set(summary.agents_with_empty_narrative) >= {"FUND", "TECH"}
     # SENT and MACRO FAILED outright (no output at all). This test originally
@@ -1251,7 +1252,7 @@ async def test_run_quality_summary_degenerate_output_flags():
         summary.agents_with_empty_risks,
         summary.agents_with_empty_narrative,
     ):
-        assert not {"SENT", "MACRO"} & set(empties)
+        assert not {"SENT", "MACRO"} & set(empties or [])
 
 
 @pytest.mark.asyncio
@@ -1733,7 +1734,7 @@ async def test_run_unbinds_its_logging_context_even_when_the_run_fails():
 async def test_quality_summary_does_not_list_a_failed_agent_as_having_empty_fields():
     """A failed agent has empty fields because it never produced anything, not
     because its answer was thin. A real failed run (Ollama down) used to show
-    all five Pass 1 agents 'with empty key_factors', which read like a
+    all five Pass 1 agents 'with empty risks', which read like a
     data-quality problem instead of the failure it was."""
     session = await _make_session()
     run = await _make_run(session)
@@ -1741,9 +1742,9 @@ async def test_quality_summary_does_not_list_a_failed_agent_as_having_empty_fiel
     await _run_with(session, run, {"FundamentalAnalystRunner": _StubRunner(None, ["failed"])})
 
     summary = await _summary_for(session, run)
-    listed = set(summary.agents_with_empty_key_factors or [])
+    listed = set(summary.agents_with_empty_risks or [])
     assert "FUND" not in listed  # it failed: reported as a failure, not as "empty"
-    assert "RSRCH" in listed  # it completed without key_factors: still flagged
+    assert "RSRCH" in listed  # it completed without risks: still flagged
 
 
 @pytest.mark.asyncio

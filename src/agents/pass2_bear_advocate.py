@@ -26,6 +26,8 @@ def build_user_message(bundle: DataBundle, compressed_pass1: dict) -> str:
 
 
 class BearAdvocateRunner(BaseRunner):
+    GROUND_MODE = "log"  # figures not in this agent's input are recorded in validator_errors, never a retry (agents/grounding.py)
+
     async def run(
         self,
         bundle: DataBundle,

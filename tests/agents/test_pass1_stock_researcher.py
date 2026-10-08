@@ -283,12 +283,6 @@ def _valid_stock_researcher_output(**overrides) -> dict:
         "assessment_summary": "A solid mid-cap healthcare technology company with recurring revenue.",
         "analysis_confidence": "high",
         "caveats": ["Coverage limited to public filings and news."],
-        "key_factors": [
-            {"factor": "Recurring revenue", "importance": "high", "sentiment": "positive",
-             "evidence": "FILING:MD&A: subscription revenue mix"},
-            {"factor": "Roll-up integration risk", "importance": "medium", "sentiment": "negative",
-             "evidence": "N1: recent acquisition closed"},
-        ],
         "risks": [
             {"risk": "Integration execution risk", "severity": "medium", "evidence": "N1: recent acquisition closed"},
         ],
@@ -537,6 +531,18 @@ def _answer(**overrides):
     }
     out.update(overrides)
     return out
+
+
+def test_a_bare_peer_token_the_prompt_asks_for_is_replaced_in_the_merged_output():
+    """The prompt says to cite `PEER_{num}`; all three newest real runs sent "PEER_1 and PEER_2" on to Bull and Bear."""
+    from agents.pass1_stock_researcher import merge_researcher_output
+
+    answer = _answer()
+    answer["narrative"] = "Leads PEER_1 on scale (PEER_1)."
+
+    merged = merge_researcher_output(answer, _bundle())
+
+    assert merged["narrative"] == "Leads Peer One Inc. on scale (Peer One Inc.)."
 
 
 def test_the_real_names_replace_the_anonymization_tokens_everywhere():

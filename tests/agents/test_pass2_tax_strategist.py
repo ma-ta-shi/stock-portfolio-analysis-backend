@@ -365,7 +365,7 @@ def test_run_sends_the_reliability_warnings_once():
             "analysis_confidence": "low",
             "data_quality_assessment": "low",
             "assessment_summary": "x",
-            "narrative_truncated": "x",
+            "narrative": "x",
         }
     }
     system_prompt, user_message, _ = _capture_run(_bundle(), "tfsa", "DIVID: 1.0%", compressed)
@@ -409,21 +409,30 @@ def test_field_presence_room_stays_false_for_trading_even_though_the_registered_
         _, presence = build_user_message(bundle, {}, "trading")
     assert presence["room"] is False
 
-def test_user_message_holds_only_the_rsrch_and_fund_views():
+def test_user_message_holds_only_fundamentals_dividend_inputs():
+    """Tax cited the Researcher and Fundamental blocks 0.1 times a run; it keeps only the dividend inputs (confidence, quality
+    and the archetype are in the system prompt, the yield is in its own DIVID block)."""
     compressed = {
         agent: {
-            "pass2_view": {"x": 1},
+            "pass2_view": {"x": 1, "dividend_sustainability": "strong", "payout_ratio": 0.482, "dividend_growth_5yr": 0.065,
+                           "dividend_yield": 0.026, "roe": 0.127},
             "analysis_confidence": "high",
             "assessment_summary": f"{agent} summary",
-            "narrative_truncated": "n",
+            "narrative": "the narrative text",
         }
         for agent in ("RSRCH", "FUND", "TECH", "SENT", "MACRO")
     }
     with _mock_tax_metrics("DIVID: 1.0%"):
         msg, _ = build_user_message(_bundle(), compressed, "tfsa")
-    assert "(RSRCH)" in msg and "(FUND)" in msg
-    for dropped in ("(TECH)", "(SENT)", "(MACRO)"):
-        assert dropped not in msg
+    assert "dividend_sustainability: strong" in msg and "payout_ratio: 0.482" in msg and "dividend_growth_5yr: 0.065" in msg
+    for absent in ("(RSRCH)", "(TECH)", "(SENT)", "(MACRO)", "summary", "narrative", "dividend_yield", "roe"):
+        assert absent not in msg
+
+
+def test_a_failed_fundamental_agent_reads_not_available_in_the_tax_message():
+    with _mock_tax_metrics("DIVID: 1.0%"):
+        msg, _ = build_user_message(_bundle(), {"FUND": None}, "tfsa")
+    assert "NOT AVAILABLE" in msg
 
 
 def test_system_prompt_reliability_warnings_cover_only_the_agents_tax_receives():
@@ -433,7 +442,7 @@ def test_system_prompt_reliability_warnings_cover_only_the_agents_tax_receives()
             "analysis_confidence": "low",
             "data_quality_assessment": "low",
             "assessment_summary": "s",
-            "narrative_truncated": "n",
+            "narrative": "n",
         }
         for agent in ("RSRCH", "FUND", "TECH", "SENT", "MACRO")
     }

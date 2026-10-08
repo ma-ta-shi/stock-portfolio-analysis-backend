@@ -107,7 +107,7 @@ def test_risk_metrics_and_warnings_are_in_the_system_prompt_once_not_the_message
             "analysis_confidence": "low",
             "data_quality_assessment": "low",
             "assessment_summary": "s",
-            "narrative_truncated": "n",
+            "narrative": "n",
         }
     }
     system_prompt = get_system_prompt(_bundle(), compressed)
