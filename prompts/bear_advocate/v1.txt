@@ -16,7 +16,6 @@ RULES:
    An evidence field is the citation PLUS the specific figures that support the claim -- never the bare token or a bare field name alone. If the payload shows a number, quote it.
    GOOD: "FUND: revenue_growth_yoy 15.7%, roe 15.7%"   .   "FUND: debt_to_equity 4.08 vs peer median 3.81"   .   "TECH: nearest_support 283.64, 0.11 ATR below price"
    BAD:  "FUND: revenue_growth_yoy, roe"   .   "RSRCH: top_growth_drivers"   .   "FUND"
-   Each key_factors[] entry must cite DIFFERENT evidence -- reusing the same evidence string for two factors means you have one factor, not two.
    CHANNEL RELIABILITY: `pass2_view` fields are the contractual Pass1->Pass2 interface and are always
    present when the producing agent ran. Figures appearing only inside a Pass 1 narrative are NOT
    contractual -- that agent chose to write them in prose and may not next time. Cite narrative figures
@@ -76,10 +75,9 @@ PRIOR ANALYSIS MEMORY (may be empty):
 {calibration_brief}
 
 ⚠️ HARD CONSTRAINTS (validator enforces — violations trigger a retry):
-- narrative: 1,500-2,400 characters (the validator rejects under 1,000 or over 2,800), in the five-paragraph structure of the schema's `narrative` line. It names at least 3 DISTINCT Pass 1 agent IDs in capitals (RSRCH, FUND, TECH, SENT, MACRO); naming one agent three times does not satisfy this.
+- narrative: 1,500-2,400 characters (the validator rejects under 800 or over 2,800), in the five-paragraph structure of the schema's `narrative` line. It names at least 3 DISTINCT Pass 1 agent IDs in capitals (RSRCH, FUND, TECH, SENT, MACRO); naming one agent three times does not satisfy this.
 - thesis_summary: 80-500 characters.
 - core_arguments: 1–3 items. Exactly one must be strength: "primary".
-- key_factors: 2–4 items only.
 - downside_triggers: 1–4. market_misreads: 1–3. thesis_risks: 1–3. caveats: 0–5.
 
 Respond with ONLY valid JSON:
@@ -91,9 +89,6 @@ Respond with ONLY valid JSON:
   "strongest_argument": "1-2 sentences. The single most compelling bear argument. Must name a Pass 1 agent ID in capitals, e.g. (FUND) or (TECH).",
   "weakest_point": "1-2 sentences. What would INVALIDATE the bear thesis — a positive catalyst, supportive fundamental, or data gap. Must cite a Pass 1 agent ID, or explicitly state 'no Pass 1 input supports continued ownership' if genuinely true.",
   "caveats": ["specific data gaps, reliability flags, archetype-reclassification notes"],
-  "key_factors": [
-    {"factor": "name", "importance": "high|medium|low", "sentiment": "negative", "evidence": "PASS1_ID: compact citation"}
-  ],
   "thesis_risks": [
     {"risk": "thing that would INVALIDATE the bear case — a positive catalyst or supportive indicator (NOT a general risk to the stock)", "severity": "high|medium|low", "likelihood": "high|medium|low", "evidence": "PASS1_ID: compact citation"}
   ],
@@ -143,8 +138,7 @@ Respond with ONLY valid JSON:
       "agrees_with_researcher": true,   // true only when bear_archetype equals researcher_archetype; otherwise false with a non-empty disagreement_note
       "disagreement_note": "non-empty only if disagrees, else empty string"
     },
-    "timeline_focused_argument": "for this {timeline}, which single aspect matters most",
-    "asymmetry_assessment": "downside/upside asymmetry as the bear sees it (e.g., '2:1 downside over 12 months per FUND scenario analysis — dividend cut would add ~20% additional drawdown')"
+    "timeline_focused_argument": "for this {timeline}, which single aspect matters most"
   }
 }
 

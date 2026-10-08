@@ -1109,18 +1109,18 @@ async def test_run_quality_summary_written_on_happy_path():
     assert "bear" not in summary.agents_with_empty_risks
     assert "tax" not in summary.agents_with_empty_risks
     assert "risk" not in summary.agents_with_empty_risks
-    assert "cio_stage_a" not in summary.agents_with_empty_key_factors
-    assert "cio_stage_b" not in summary.agents_with_empty_key_factors
-    assert "shadow_cio" not in summary.agents_with_empty_key_factors
+    assert "cio_stage_a" not in (summary.agents_with_empty_key_factors or [])
+    assert "cio_stage_b" not in (summary.agents_with_empty_key_factors or [])
+    assert "shadow_cio" not in (summary.agents_with_empty_key_factors or [])
     assert "cio_stage_a" not in summary.agents_with_empty_narrative
     assert "shadow_cio" not in summary.agents_with_empty_narrative
     # The 5 Pass 1 agents genuinely have no risks or narrative in this fixture, and those ARE real, validated Pass 1 fields:
     # they must still show up. They no longer write key_factors (removed 2026-10-07), so an empty one is not flagged for them,
-    # while the Pass 2 agents that still write it are.
+    # and neither are the Pass 2 agents (removed 2026-10-07), so the list is empty.
     assert set(summary.agents_with_empty_risks) >= {"RSRCH", "FUND", "TECH", "SENT", "MACRO"}
     assert set(summary.agents_with_empty_narrative) >= {"RSRCH", "FUND", "TECH", "SENT", "MACRO"}
     assert not (set(summary.agents_with_empty_key_factors or []) & {"RSRCH", "FUND", "TECH", "SENT", "MACRO"})
-    assert set(summary.agents_with_empty_key_factors) >= {"bull", "bear", "tax", "risk"}
+    assert not summary.agents_with_empty_key_factors
 
 
 @pytest.mark.asyncio

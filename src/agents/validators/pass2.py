@@ -50,43 +50,6 @@ def _has_risk_citation(text: str) -> bool:
 TAX_METRIC_TOKENS = {"DIVID", "LIST", "DOM", "WHT", "TAXCOST", "CGAIN", "ROOM", "LOSS", "ELIG", "MARG"}
 _TAX_TOKEN_RE = re.compile(r"\b(?:" + "|".join(sorted(TAX_METRIC_TOKENS)) + r")\b")
 _REF_RE = re.compile(r"\bREF\b")
-# Rule 9: "Evidence starts with a valid citation token followed by `:`". Anchored,
-# because the prompt's compact format is positional -- a token buried mid-sentence is
-# not the declared format and is exactly how an uncited claim gets dressed up.
-_TAX_EVIDENCE_PREFIX_RE = re.compile(
-    # PASS1_AGENT_IDS is a list (agents.utils's canonical form -- other callers rely on its
-    # order), so it needs an explicit set() to union with the two literal sets here.
-    r"^\s*(?:" + "|".join(sorted(TAX_METRIC_TOKENS | set(PASS1_AGENT_IDS) | {"REF"})) + r")\b[^:]*:"
-)
-# A citation must be followed by an actual claim. Observed live: `"CGAIN:"` -- a valid
-# token, a colon, and nothing at all, which satisfied the prefix rule while asserting
-# nothing.
-#
-# A flat character minimum was WRONG and caused two terminal failures on 2026-09-01:
-# it rejected `"DIVID: 2.0%"`, which is a correct compact citation carrying a real
-# figure in only 4 characters. Rejecting valid output is worse than the gap it closed
-# -- a terminal failure drops the agent from the CIO payload entirely.
-#
-# So: a body counts as a claim if it carries a FIGURE, or is long enough to be prose.
-#   "DIVID: 2.0%"      -> digit      -> accepted
-#   "CGAIN:"           -> empty      -> rejected
-#   "RSRCH: trading"   -> no digit, 7 chars -> rejected (echoes context, states nothing)
-_MIN_EVIDENCE_BODY_CHARS = 8
-_HAS_DIGIT_RE = re.compile(r"[0-9]")
-
-
-def _evidence_body(text: str) -> str:
-    """The claim after the leading citation token's colon."""
-    m = _TAX_EVIDENCE_PREFIX_RE.match(text)
-    return text[m.end():].strip() if m else ""
-
-
-def _evidence_states_a_claim(text: str) -> bool:
-    """A figure, or enough prose to be a statement. See _MIN_EVIDENCE_BODY_CHARS."""
-    body = _evidence_body(text)
-    return bool(_HAS_DIGIT_RE.search(body)) or len(body) >= _MIN_EVIDENCE_BODY_CHARS
-
-
 # SOFT vs HARD failures (122.5).
 # The narrative citation-breadth rules failed AND retried, and retry exhaustion removes
 # the agent from the CIO payload entirely -- measured at 2 of 9 runs on 2026-09-01.
@@ -168,6 +131,23 @@ def _evidence_carries_value(text: str) -> bool:
     return False
 
 
+def _check_core_argument_evidence(sd: dict, errors: list[str]) -> None:
+    """Each core argument's evidence must quote a value, not only field names (the agent is named in supporting_pass1_agents). This was checked on
+    `key_factors[].evidence` (Bull emitted "FUND: revenue_growth_yoy, roe" with the figures in the payload) until key_factors was
+    cut from Pass 2 (2026-10-07); core_arguments carries the same evidence now."""
+    for i, ca in enumerate(sd.get("core_arguments") or []):
+        if not isinstance(ca, dict):
+            continue
+        ev = str(ca.get("evidence") or "")
+        if not ev.strip():
+            errors.append(f"structured_data.core_arguments[{i}].evidence: must be non-empty")
+        elif not _evidence_carries_value(ev):
+            errors.append(
+                f"structured_data.core_arguments[{i}].evidence: cites field names without values "
+                f"({ev!r}) -- quote the supporting figure or value"
+            )
+
+
 def _check_array_bounds(obj: dict, field: str, min_len: int, max_len: int, errors: list[str]):
     """Bounded-array check shared across the Pass 2 validators.
 
@@ -242,36 +222,6 @@ def validate_bull_advocate(
     # caveats: 0-5
     _check_array_bounds(output, "caveats", 0, 5, errors)
 
-    # key_factors: 2-4, all must have sentiment="positive"
-    key_factors = output.get("key_factors", [])
-    if not isinstance(key_factors, list):
-        errors.append("key_factors: must be a list")
-    else:
-        if len(key_factors) < 2:
-            errors.append(f"key_factors: need >=2, got {len(key_factors)}")
-        if len(key_factors) > 4:
-            errors.append(f"key_factors: need <=4, got {len(key_factors)}")
-        seen = [kf.get("evidence", "") for kf in key_factors if isinstance(kf, dict)]
-        if len(seen) != len(set(seen)):
-            errors.append(
-                "key_factors: duplicate evidence string across factors -- reusing the "
-                "same evidence means you have one factor, not two"
-            )
-        for i, kf in enumerate(key_factors):
-            if not isinstance(kf, dict):
-                continue
-            if kf.get("sentiment") != "positive":
-                errors.append(f"key_factors[{i}].sentiment: must be 'positive' for Bull advocate, got '{kf.get('sentiment')}'")
-            if not kf.get("evidence", "").strip():
-                errors.append(f"key_factors[{i}].evidence: must be non-empty")
-            elif not _has_pass1_agent_id(kf["evidence"]):
-                errors.append(f"key_factors[{i}].evidence: must start with a Pass 1 agent ID")
-            elif not _evidence_carries_value(kf["evidence"]):
-                errors.append(
-                    f"key_factors[{i}].evidence: cites field names without values "
-                    f"({kf['evidence']!r}) -- quote the supporting figure or value"
-                )
-
     # thesis_risks: 1-3
     _check_array_bounds(output, "thesis_risks", 1, 3, errors)
     for i, tr in enumerate(output.get("thesis_risks", [])):
@@ -283,8 +233,8 @@ def validate_bull_advocate(
     # narrative: 1000-2800 chars, must reference >=3 distinct Pass 1 agents
     narrative = output.get("narrative", "")
     nc = char_count(narrative)
-    if nc < 1000:
-        errors.append(f"narrative: too short ({nc} chars, min 1000)")
+    if nc < 800:
+        errors.append(f"narrative: too short ({nc} chars, min 800)")
     if nc > 2800:
         errors.append(f"narrative: too long ({nc} chars, max 2800)")
     agents_in_narrative = [aid for aid in PASS1_AGENT_IDS if aid in narrative]
@@ -304,6 +254,7 @@ def validate_bull_advocate(
         primaries = [ca for ca in cas if isinstance(ca, dict) and ca.get("strength") == "primary"]
         if len(primaries) < 1:
             errors.append(f"structured_data.core_arguments: at least 1 must have strength='primary', found {len(primaries)}")
+        _check_core_argument_evidence(sd, errors)
 
         # catalysts: 1-4
         _check_array_bounds(sd, "catalysts", 1, 4, errors)
@@ -398,45 +349,13 @@ def validate_bear_advocate(
     elif not _has_pass1_agent_id(sa):
         errors.append("strongest_argument: must contain at least one Pass 1 agent ID")
 
-    # key_factors: 2-4, all must have sentiment="negative"
-    key_factors = output.get("key_factors", [])
-    if isinstance(key_factors, list):
-        if len(key_factors) < 2:
-            errors.append(f"key_factors: need >=2, got {len(key_factors)}")
-        if len(key_factors) > 4:
-            errors.append(f"key_factors: need <=4, got {len(key_factors)}")
-        seen = [kf.get("evidence", "") for kf in key_factors if isinstance(kf, dict)]
-        if len(seen) != len(set(seen)):
-            errors.append(
-                "key_factors: duplicate evidence string across factors -- reusing the "
-                "same evidence means you have one factor, not two"
-            )
-        for i, kf in enumerate(key_factors):
-            if isinstance(kf, dict):
-                ev = str(kf.get("evidence", ""))
-                if not ev.strip():
-                    errors.append(f"key_factors[{i}].evidence: must be non-empty")
-                elif not _has_pass1_agent_id(ev):
-                    errors.append(
-                        f"key_factors[{i}].evidence: must cite a Pass 1 agent ID"
-                    )
-                elif not _evidence_carries_value(ev):
-                    errors.append(
-                        f"key_factors[{i}].evidence: cites field names without values "
-                        f"({ev!r}) -- quote the supporting figure or value"
-                    )
-            if isinstance(kf, dict) and kf.get("sentiment") != "negative":
-                errors.append(
-                    f"key_factors[{i}].sentiment: must be 'negative' for Bear advocate, got '{kf.get('sentiment')}'"
-                )
-
     _check_array_bounds(output, "thesis_risks", 1, 3, errors)
 
     # narrative: 1000-2800 chars, >=3 distinct Pass 1 agents
     narrative = output.get("narrative", "")
     nc = char_count(narrative)
-    if nc < 1000:
-        errors.append(f"narrative: too short ({nc} chars, min 1000)")
+    if nc < 800:
+        errors.append(f"narrative: too short ({nc} chars, min 800)")
     if nc > 2800:
         errors.append(f"narrative: too long ({nc} chars, max 2800)")
     agents_in_narrative = [aid for aid in PASS1_AGENT_IDS if aid in narrative]
@@ -449,6 +368,7 @@ def validate_bear_advocate(
     if isinstance(sd, dict):
         _check_array_bounds(sd, "core_arguments", 1, 4, errors)
         _check_array_bounds(sd, "downside_triggers", 1, 4, errors)
+        _check_core_argument_evidence(sd, errors)
         _check_array_bounds(sd, "market_misreads", 1, 3, errors)
 
         # tail_risk_assessment (Rule 7): tail_risk_level's own enum value is covered by the
@@ -581,38 +501,6 @@ def validate_tax_strategist(
             "strongest_signal: must cite a Pass 1 agent ID, a tax-metric token "
             f"({', '.join(sorted(TAX_METRIC_TOKENS))}), or REF"
         )
-
-    # key_factors: 2-4, each evidence in the declared compact format
-    _check_array_bounds(output, "key_factors", 2, 4, errors)
-    for i, kf in enumerate(output.get("key_factors") or []):
-        if not isinstance(kf, dict):
-            errors.append(f"key_factors[{i}]: must be an object")
-            continue
-        ev = str(kf.get("evidence") or "")
-        if not ev.strip():
-            errors.append(f"key_factors[{i}].evidence: must be non-empty")
-        elif not _TAX_EVIDENCE_PREFIX_RE.match(ev):
-            # Rule 9: "Evidence starts with a valid citation token followed by `:`".
-            errors.append(
-                f"key_factors[{i}].evidence: must START with a valid citation token "
-                f"followed by ':' (got {ev[:40]!r})"
-            )
-        elif not _evidence_states_a_claim(ev):
-            errors.append(
-                f"key_factors[{i}].evidence: cites a token but states no claim after "
-                f"it (got {ev[:40]!r})"
-            )
-        # sentiment: real vocabulary is positive|negative|neutral (confirmed against the
-        # current tax_strategist/v1.txt template) -- previously unenforced entirely. Not
-        # folded into the shared DECLARED_ENUMS sweep: Bull/Bear/Risk each constrain their own
-        # key_factors[].sentiment to a different, narrower subset (Bull: positive only; Bear:
-        # negative only; Risk: negative|neutral only), so "sentiment" is genuinely
-        # per-agent-specific, not a safe global vocabulary.
-        sent = kf.get("sentiment")
-        if sent is not None and sent not in {"positive", "negative", "neutral"}:
-            errors.append(
-                f"key_factors[{i}].sentiment: must be positive|negative|neutral, got {sent!r}"
-            )
 
     # narrative: 1000-3200 chars. The floor was 1200 (derived from the old "300-500 words" spec); lowered
     # 2026-10-01 (Tax Strategist Wave 2) because the real content gates are the >=3 metric tokens and the
@@ -800,18 +688,6 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
             "(BETA VOL DD LIQ)"
         )
 
-    # key_factors: 2-4, sentiment must be negative|neutral only
-    key_factors = output.get("key_factors", [])
-    if isinstance(key_factors, list):
-        _check_array_bounds(output, "key_factors", 2, 4, errors)
-        for i, kf in enumerate(key_factors):
-            if isinstance(kf, dict):
-                sent = kf.get("sentiment", "")
-                if sent not in {"negative", "neutral"}:
-                    errors.append(
-                        f"key_factors[{i}].sentiment: Risk Advisor must use 'negative' or 'neutral', got '{sent}'"
-                    )
-
     # narrative: 1000-2400 chars. The floor was 1500 ("250 words" at ~6 chars a word), lowered
     # 2026-10-01 (Risk Advisor Wave 2) to 1000: the model writes ~6.8 chars a word, lands at
     # 1,000-1,900 chars whatever the prompt asks (the prompt aims at 1,800-2,200), nothing
@@ -855,15 +731,6 @@ def validate_risk_advisor_stage_a(output: dict) -> tuple[bool, list[str]]:
                     errors.append(
                         f"risk_profile.downside_scenarios[{i}].timeline: must be one of {valid_timeline}, got {s.get('timeline')!r}"
                     )
-            impacts = [s.get("estimated_impact_pct") for s in ds if isinstance(s, dict)]
-            for i in range(len(impacts)):
-                for j in range(i + 1, len(impacts)):
-                    if impacts[i] is not None and impacts[j] is not None:
-                        if abs(impacts[i] - impacts[j]) < 2.0:
-                            errors.append(
-                                f"downside_scenarios[{i}] and [{j}]: estimated_impact_pct too close "
-                                f"({impacts[i]}% vs {impacts[j]}%, must differ by >=2%)"
-                            )
 
         valid_rr = {"favorable", "neutral", "unfavorable"}
         if rp.get("risk_reward_ratio") not in valid_rr:

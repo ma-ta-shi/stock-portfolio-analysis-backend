@@ -9,13 +9,14 @@ fixture dict and reads `bundle.context` for timeline/account_type instead of
 
 recommendation: hard-coded to "bullish".
 confidence: integer 0-100.
-key_factors: all sentiment must be "positive".
+key_factors was cut 2026-10-07 (no consumer; core_arguments carries the evidence).
 weakest_point_type: negative_catalyst|adverse_fundamental|data_gap|no_clear_invalidator.
 thesis_archetype: secular_grower|dividend_compounder|cyclical_recovery|quality_compounder|value_trap_candidate.
 """
 from agents.base import BaseRunner
 from agents.compression import build_pass2_user_message, extract_confidence_levels, extract_data_quality_levels
 from agents.prompts import fill, load_template
+from agents.reference_points import asymmetry_reference
 from agents.utils import build_pass1_reliability_warnings, researcher_thesis_archetype
 from agents.validators.pass2 import validate_bull_advocate
 from data.schemas.data_bundle import DataBundle
@@ -77,4 +78,7 @@ class BullAdvocateRunner(BaseRunner):
         # Hard-code recommendation (defense in depth)
         if result:
             result["recommendation"] = "bullish"
+            # Written by code from the data (agents/reference_points.py): the model invented these numbers when it wrote the field.
+            if isinstance(result.get("structured_data"), dict):
+                result["structured_data"]["asymmetry_assessment"] = asymmetry_reference(bundle)
         return result, errors

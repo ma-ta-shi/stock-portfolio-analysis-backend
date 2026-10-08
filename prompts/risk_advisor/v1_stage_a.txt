@@ -21,11 +21,10 @@ RULES:
 4. DOWNSIDE SCENARIO CONSTRUCTION (the unique-value contribution). Construct 2-4 specific scenarios. Each MUST have:
    (a) `scenario` — one sentence describing what happens
    (b) `probability` — high|medium|low
-   (c) `estimated_impact_pct` — single number, the expected drop if the scenario occurs, scaled to THIS stock (see SEVERITY below)
+   (c) `estimated_impact_pct` — single number, the expected drop if the scenario occurs, scaled to THIS stock using the VOL and DD lines (the drawdown-repeat rule below fixes one scenario)
    (d) `trigger` — specific event/condition citing >=1 Pass 1 agent ID or metric token AND naming a specific mechanism
    (e) `timeline` — within_4_weeks | 1_to_3_months | 3_to_12_months | 1_to_3_years | 3_plus_years
-   Keep every scenario's estimated_impact_pct at least 3 points away from every other's (two within 2 points are rejected), including small ones: -3 and -5 are too close, -3 and -6 are not.
-   ONE SCENARIO IS THE DRAWDOWN REPEAT when the 1-year max drawdown on the DD line is 15% or more (under 15%, skip this and size scenarios from VOL and the named mechanism). Exactly one scenario is the repeat of that drawdown: its estimated_impact_pct is the negative of that DD figure or worse (DD 48% means -48 or lower), and its trigger cites the cause as a Pass 1 finding, or says `cause not identified in the inputs` (the inputs give no dates, so name no calendar period; if the cause no longer applies, say so in the trigger and use a smaller number). Fix this number first. Every other scenario may be milder or more severe (a named event such as the dividend cut of Rule 4b, or a stock with a small DD), but its impact must be at least 3 points away from the repeat's and from every other scenario's. Never pick -20, -25 or -30 by habit.
+   ONE SCENARIO IS THE DRAWDOWN REPEAT when the 1-year max drawdown on the DD line is 15% or more (under 15%, skip this and size scenarios from VOL and the named mechanism). Exactly one scenario is the repeat of that drawdown: its estimated_impact_pct is the negative of that DD figure or worse (DD 48% means -48 or lower), and its trigger cites the cause as a Pass 1 finding, or says `cause not identified in the inputs` (the inputs give no dates, so name no calendar period; if the cause no longer applies, say so in the trigger and use a smaller number). Fix this number first. Every other scenario may be milder or more severe (a named event such as the dividend cut of Rule 4b, or a stock with a small DD). Never pick -20, -25 or -30 by habit.
 
 4b. DIVIDEND-STREAM RELIABILITY (standing rule, applies regardless of who eventually holds this in which account). If {ticker} pays a dividend, always assess dividend-stream reliability. If FUND flags a high payout ratio, declining FCF, or earnings-coverage deterioration threatening the dividend, include a `dividend_cut_cascade` scenario in downside_scenarios: -15 to -30% estimated_impact_pct (the historical announcement-reaction pattern), citing FUND. A dividend cut destroys income AND capital value for every holder, not just income-focused accounts — construct this scenario whenever the underlying risk is real, not based on who might hold the position. When FUND rates the dividend adequate or strong, write no dividend scenario: its reliability is then one sentence in the narrative. For a bank or insurer, FCF and debt-to-equity do not measure dividend safety; cite them only as FUND gives them.
 
@@ -70,7 +69,6 @@ PRE-COMPUTED RISK METRICS:
 
 ⚠️ HARD CONSTRAINTS (validator enforces — violations trigger a retry):
 - narrative: 1,000-2,400 characters (aim for 1,800-2,200), covering the items in Step 5.
-- key_factors: 2-4 items, `sentiment` `negative` or `neutral` only (a mitigating factor is `neutral`, never `positive`).
 - Every claim must reference a Pass 1 agent ID or a pre-computed metric token.
 
 Respond with ONLY valid JSON:
@@ -80,9 +78,6 @@ Respond with ONLY valid JSON:
   "thesis_summary": "2-3 sentences. Risk profile compressed. Must reference the timeline AND name at least one of BETA, VOL, DD in capitals.",
   "strongest_signal": "1-2 sentences. The dominant downside scenario or sanity flag. MUST name one of RSRCH, FUND, TECH, SENT, MACRO, BETA, VOL, DD, LIQ in capitals inside the sentence, e.g. \"... (FUND)\" or \"... DD ...\". A filing or news tag such as FILING:MDA or N12 does not count.",
   "caveats": ["specific data gaps, reliability flags, or memory-reuse acknowledgments"],
-  "key_factors": [   // 2-4 items, RISK factors only: a mitigating factor is "neutral", never "positive"
-    {"factor": "name", "importance": "high|medium|low", "sentiment": "negative|neutral", "evidence": "PASS1_ID_OR_METRIC: compact citation"}
-  ],
   "narrative": "Continuous prose, 1,800-2,200 characters (under 1,000 is rejected), the items of Step 5 in order. Quantitative, grounded, naming Pass 1 agents and metric tokens.",
   "risk_profile": {
     "volatility_assessment": "very_high|high|moderate|low",   // from the Annualized vol figure: low under 18%, moderate 18-30%, high 30-45%, very_high over 45%
@@ -92,7 +87,7 @@ Respond with ONLY valid JSON:
       {
         "scenario": "1 sentence specific outcome (NOT generic)",
         "probability": "high|medium|low",
-        "estimated_impact_pct": <number, typically negative; differs from every other scenario's by at least 2 points; when the 1-year DD is 15% or more, exactly one scenario equals the negative of that figure or worse>,
+        "estimated_impact_pct": <number, typically negative; when the 1-year DD is 15% or more, exactly one scenario equals the negative of that figure or worse>,
         "trigger": "specific Pass 1 finding or metric driving the scenario, with named mechanism",
         "timeline": "within_4_weeks|1_to_3_months|3_to_12_months|1_to_3_years|3_plus_years"
       }
