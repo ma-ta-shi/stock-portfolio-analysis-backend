@@ -371,43 +371,6 @@ def validate_bear_advocate(
         _check_core_argument_evidence(sd, errors)
         _check_array_bounds(sd, "market_misreads", 1, 3, errors)
 
-        # tail_risk_assessment (Rule 7): tail_risk_level's own enum value is covered by the
-        # shared sweep below. Content requirements are CONDITIONAL on the level, per the
-        # prompt's own rule 7 verbatim: "For elevated/moderate, provide a short
-        # triggering_event description and a Pass 1 citation. For negligible (the expected
-        # answer for most fundamentally sound stocks), leave scenario/triggering_event/evidence
-        # empty." Confirmed live: a real "negligible" call correctly returned all three empty --
-        # requiring them non-empty unconditionally would reject the documented, expected case.
-        tra = sd.get("tail_risk_assessment")
-        if not isinstance(tra, dict):
-            errors.append("structured_data.tail_risk_assessment: must be an object")
-        else:
-            level = tra.get("tail_risk_level")
-            if level in (None, ""):
-                errors.append("structured_data.tail_risk_assessment.tail_risk_level: missing")
-            elif level in ("elevated", "moderate"):
-                if not str(tra.get("scenario") or "").strip():
-                    errors.append(
-                        f"structured_data.tail_risk_assessment.scenario: must be non-empty when "
-                        f"tail_risk_level={level!r}"
-                    )
-                if not str(tra.get("triggering_event") or "").strip():
-                    errors.append(
-                        f"structured_data.tail_risk_assessment.triggering_event: must be "
-                        f"non-empty when tail_risk_level={level!r}"
-                    )
-                if not str(tra.get("evidence") or "").strip():
-                    errors.append(
-                        f"structured_data.tail_risk_assessment.evidence: must be non-empty "
-                        f"when tail_risk_level={level!r}"
-                    )
-                agents = tra.get("supporting_pass1_agents")
-                if not isinstance(agents, list) or not agents:
-                    errors.append(
-                        f"structured_data.tail_risk_assessment.supporting_pass1_agents: must "
-                        f"cite >=1 Pass 1 agent when tail_risk_level={level!r}"
-                    )
-
         # thesis_archetype_alignment -- completely unvalidated before this fix (86bbuhjup
         # finding 5). Mirrors Bull's equivalent block in validate_bull_advocate field-for-
         # field, except agrees_with_researcher is a BOOL here (Bull's alignment_with_

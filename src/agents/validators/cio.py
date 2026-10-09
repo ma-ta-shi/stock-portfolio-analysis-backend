@@ -49,47 +49,6 @@ _RETURN_TIER_ORDER = ["strong_underperform", "underperform", "market_perform",
 # agents.utils (the one canonical definition) rather than redefined locally.
 
 
-TAIL_RISK_IMPACT_THRESHOLD_PCT = -20.0
-# Not the audit's untested -15% figure. Derived from the real worst-case estimated_impact_pct
-# distribution across 26 captured Risk Advisor calls (sorted: -15, -18x6, -18.5x4, -25x4, -28,
-# -30x3, -35, -40, -45, -75, -80x3) -- -15% barely discriminates (all 26 real worst-cases are
-# already -15% or worse, so a -15% threshold puts nearly everything on one side) and sits
-# exactly on a recurring real value. -20% sits in an actual gap in the real distribution
-# (nothing observed between -18.5 and -25) and splits the historical set into two real-sized
-# groups. See the 86bbuhk82 plan for the full record -- still not a rigorously "correct" number,
-# just evidence-grounded rather than copied from an audit test that never exercised either
-# candidate boundary.
-
-
-def expected_tail_risk_class(bear_tail_risk_level: str | None, risk_worst_impact_pct: float | None) -> str:
-    """The one place the Bear-vs-Risk tail-risk classification is decided. The runner shows the
-    result to the model, which copies it; the validator checks the copy. The model used to be left to
-    derive it from a rule the prompt never stated, and got it wrong in 20 of 25 rejections."""
-    if bear_tail_risk_level is None or risk_worst_impact_pct is None:
-        return "insufficient_data"
-    if bear_tail_risk_level == "elevated" and risk_worst_impact_pct > TAIL_RISK_IMPACT_THRESHOLD_PCT:
-        return "bear_elevated_risk_advisor_mild"
-    if bear_tail_risk_level == "negligible" and risk_worst_impact_pct < TAIL_RISK_IMPACT_THRESHOLD_PCT:
-        return "bear_mild_risk_advisor_elevated"
-    return "aligned"
-
-
-def tail_risk_line(bear_tail_risk_level: str | None, risk_worst_impact_pct: float | None) -> str:
-    """The input line that tells the model the computed classification (see expected_tail_risk_class)."""
-    cls = expected_tail_risk_class(bear_tail_risk_level, risk_worst_impact_pct)
-    if cls == "insufficient_data":
-        basis = "Bear's tail-risk level or Risk Advisor's downside scenarios are missing"
-    else:
-        basis = (
-            f"Bear tail_risk_level={bear_tail_risk_level}; Risk Advisor's worst downside scenario "
-            f"{risk_worst_impact_pct}% (threshold {TAIL_RISK_IMPACT_THRESHOLD_PCT}%)"
-        )
-    return (
-        f"TAIL-RISK CROSS-CHECK (computed in code): {basis} -> tail_risk_cross_check = {cls}. "
-        f"Copy this value; your job is the tail_risk_note."
-    )
-
-
 _PASS1_TOKENS = {"rsrch", "fund", "tech", "sent", "macro", "pass1", "pass", "researcher", "fundamental", "technical", "sentiment"}
 
 
@@ -137,10 +96,7 @@ def normalise_stage_a_shapes(output: dict) -> None:
 def validate_cio_stage_a(
     output: dict,
     disagreement_category: str = "consensus",
-    tail_inputs_present: bool | None = None,
     risk_reward_source: str | None = None,
-    bear_tail_risk_level: str | None = None,
-    risk_worst_estimated_impact_pct: float | None = None,
 ) -> tuple[bool, list[str]]:
     """Validate CIO Stage A (account-neutral directional read) output.
 
@@ -150,16 +106,9 @@ def validate_cio_stage_a(
     Args:
         output: The CIO Stage A output dict.
         disagreement_category: consensus|mild_dissent|split_decision|high_conflict
-        tail_inputs_present: whether Bear's tail_risk_assessment and Risk's downside_scenarios
-            were both present in the payload -- supplied by the caller because it depends on the
-            payload, not on the CIO's own output (same shape as Tax's account_type parameter).
         risk_reward_source: Risk Advisor Stage A's own risk_reward_ratio value, for the
             cross-check that CIO's risk_reward_consumed_as must match it exactly (prompt rule 11).
-        bear_tail_risk_level: Bear's own `tail_risk_level` (elevated|moderate|negligible), and
-        risk_worst_estimated_impact_pct: the worst (most negative) `estimated_impact_pct` among
-            Risk Advisor's `downside_scenarios` -- together these drive the numeric tail-risk
-            cross-check (86bbuhk82 item 2). Both come from the payload, not the CIO's own
-            output, same reasoning as `tail_inputs_present`.
+            It comes from the payload, not the CIO's own output.
     """
     errors: list[str] = []
     normalise_stage_a_shapes(output)
@@ -167,7 +116,7 @@ def validate_cio_stage_a(
     for field in (
         "stock_outlook", "confidence", "expected_return_tier", "thesis_summary",
         "what_would_change_my_mind", "bull_case_assessment", "bear_case_assessment",
-        "risk_reward_consumed_as", "tail_risk_cross_check",
+        "risk_reward_consumed_as",
         "key_decision_factors", "parallel_predictions",
     ):
         if field not in output or output[field] is None:
@@ -230,10 +179,10 @@ def validate_cio_stage_a(
                 f"got {len(engagement.strip())}"
             )
 
-    # risk_reward_consumed_as / tail_risk_cross_check are TOP-LEVEL Stage A fields (confirmed
-    # via the real v1_stage_a.txt schema) -- not nested under a risk_profile_summary object,
-    # which Stage A's schema doesn't have at all (risk_profile_summary is a Stage B field with
-    # unrelated content, see validate_cio_stage_b).
+    # risk_reward_consumed_as is a TOP-LEVEL Stage A field (confirmed via the real v1_stage_a.txt
+    # schema) -- not nested under a risk_profile_summary object, which Stage A's schema doesn't have
+    # at all (risk_profile_summary is a Stage B field with unrelated content, see validate_cio_stage_b).
+    # (tail_risk_cross_check and tail_risk_note were removed 2026-10-09: ledger BB-111.)
     rrc = output.get("risk_reward_consumed_as")
     if rrc is not None and rrc not in {"favorable", "neutral", "unfavorable"}:
         errors.append(f"risk_reward_consumed_as: must be one of favorable|neutral|unfavorable, got {rrc!r}")
@@ -245,40 +194,6 @@ def validate_cio_stage_a(
             f"risk_reward_consumed_as: must match the Risk Advisor's risk_reward_ratio "
             f"{risk_reward_source!r}, got {rrc!r}"
         )
-
-    trc = output.get("tail_risk_cross_check")
-    valid_trc = {"aligned", "bear_elevated_risk_advisor_mild",
-                 "bear_mild_risk_advisor_elevated", "insufficient_data"}
-    if trc is not None and trc not in valid_trc:
-        errors.append(f"tail_risk_cross_check: must be one of {valid_trc}, got {trc!r}")
-    elif tail_inputs_present is False and trc not in (None, "insufficient_data"):
-        # H-b: tail_risk_cross_check must not assert agreement it could not verify.
-        # Observed live: the CIO emitted `aligned` when NEITHER Bear's tail_risk_assessment
-        # nor Risk's downside_scenarios was in the payload (§162.1).
-        errors.append(
-            f"tail_risk_cross_check: must be 'insufficient_data' when Bear's "
-            f"tail_risk_assessment and Risk's downside_scenarios are absent from the "
-            f"payload -- got {trc!r}, which asserts a comparison that could not be made"
-        )
-
-    # Numeric cross-check (item 2): the CIO's classification must match what the mapping
-    # actually derives from Bear's level and Risk's worst number, not just be a syntactically
-    # valid enum value -- E82's own finding was that the CIO gets this right when told the
-    # explicit mapping, and gets it wrong (defers to whichever side "argued its case") when
-    # not. Only checked when both real inputs are supplied by the caller.
-    if (
-        trc is not None
-        and bear_tail_risk_level is not None
-        and risk_worst_estimated_impact_pct is not None
-    ):
-        R = risk_worst_estimated_impact_pct
-        expected_trc = expected_tail_risk_class(bear_tail_risk_level, R)
-        if trc != expected_trc:
-            errors.append(
-                f"tail_risk_cross_check: given Bear tail_risk_level={bear_tail_risk_level!r} "
-                f"and Risk Advisor's worst downside scenario {R}% (threshold "
-                f"{TAIL_RISK_IMPACT_THRESHOLD_PCT}%), expected {expected_trc!r}, got {trc!r}"
-            )
 
     # The verdict must agree with the CIO's own weighing. The verdict used to be written first and the
     # assessments after it, and PLUG came out "somewhat_bullish" with the bear case accepted and the bull case

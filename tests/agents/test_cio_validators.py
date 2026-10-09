@@ -38,8 +38,6 @@ def _valid_stage_a_output() -> dict:
             "weight_reason": "Moderate confidence -- the risk is real but not yet materialized in the data.",
         },
         "risk_reward_consumed_as": "favorable",
-        "tail_risk_cross_check": "aligned",
-        "tail_risk_note": "",
         "key_decision_factors": [
             {"factor": "AI copilot adoption rate", "direction": "bullish", "source": "pass1", "evidence": "FUND: revenue +15.7% YoY"},
             {"factor": "SAP competitive threat", "direction": "bearish", "source": "bear", "evidence": "BEAR: P/B 45% above peers"},
@@ -296,82 +294,6 @@ class TestCIORiskRewardCrossCheck:
         assert passed, errors
 
 
-class TestCIOTailRiskNumericCrossCheck:
-    """The -20% mapping (86bbuhk82 item 2) -- confirmed live end-to-end (a real CIO call got
-    the direction backwards on attempt 1 and self-corrected on retry using this exact check's
-    error message), but that live run is non-deterministic and doesn't run in CI. These are
-    the deterministic unit tests for the same four branches."""
-
-    def test_elevated_with_mild_risk_numbers_expects_mild_classification(self):
-        out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "aligned"  # wrong on purpose
-        passed, errors = validate_cio_stage_a(
-            out, "split_decision",
-            bear_tail_risk_level="elevated", risk_worst_estimated_impact_pct=-10.0,
-        )
-        assert not passed
-        assert any("bear_elevated_risk_advisor_mild" in e for e in errors)
-
-        out["tail_risk_cross_check"] = "bear_elevated_risk_advisor_mild"
-        passed, errors = validate_cio_stage_a(
-            out, "split_decision",
-            bear_tail_risk_level="elevated", risk_worst_estimated_impact_pct=-10.0,
-        )
-        assert passed, errors
-
-    def test_negligible_with_severe_risk_numbers_expects_elevated_classification(self):
-        """The exact scenario a real live run hit: Bear said negligible, Risk Advisor's own
-        worst downside scenario was -22% (worse than -20%) -- the CIO got it backwards on
-        attempt 1 (said bear_elevated_risk_advisor_mild) and this check caught it."""
-        out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "bear_elevated_risk_advisor_mild"  # the real live mistake
-        passed, errors = validate_cio_stage_a(
-            out, "split_decision",
-            bear_tail_risk_level="negligible", risk_worst_estimated_impact_pct=-22.0,
-        )
-        assert not passed
-        assert any("bear_mild_risk_advisor_elevated" in e for e in errors)
-
-        out["tail_risk_cross_check"] = "bear_mild_risk_advisor_elevated"
-        passed, errors = validate_cio_stage_a(
-            out, "split_decision",
-            bear_tail_risk_level="negligible", risk_worst_estimated_impact_pct=-22.0,
-        )
-        assert passed, errors
-
-    def test_moderate_always_expects_aligned_regardless_of_risk_numbers(self):
-        """Inherited verbatim from the audit's own E82 mapping rule -- only elevated/negligible
-        trigger the numeric comparison; moderate always resolves to aligned by design, even
-        against an extreme risk number. Not a gap introduced here."""
-        out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "aligned"
-        passed, errors = validate_cio_stage_a(
-            out, "split_decision",
-            bear_tail_risk_level="moderate", risk_worst_estimated_impact_pct=-80.0,
-        )
-        assert passed, errors
-
-    def test_exact_threshold_boundary_resolves_to_aligned(self):
-        """R exactly at -20% doesn't satisfy either strict inequality (>/<), so it falls to
-        the default -- deliberate, not an off-by-one: -20% was chosen to sit in a real gap in
-        the historical data specifically so an exact-boundary hit is rare in practice."""
-        out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "aligned"
-        passed, errors = validate_cio_stage_a(
-            out, "split_decision",
-            bear_tail_risk_level="negligible", risk_worst_estimated_impact_pct=-20.0,
-        )
-        assert passed, errors
-
-    def test_mapping_not_checked_when_real_inputs_not_supplied(self):
-        """Backward compatible: callers that don't have Bear/Risk's real values (or tests
-        exercising other behavior) get no numeric cross-check at all, not a crash."""
-        out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "bear_elevated_risk_advisor_mild"  # would fail the mapping if checked
-        passed, errors = validate_cio_stage_a(out, "split_decision")
-        assert passed, errors
-
-
 class TestCIOMissingFundamental:
     def _valid_no_fund(self) -> dict:
         """validate_cio_handles_missing_fundamental reads synthesis_narrative, tax_summary,
@@ -418,36 +340,23 @@ class TestCIOMissingFundamental:
         assert not passed
 
 
-class TestCIOTailRiskAndCitation:
-    """H-b / H-c, added 2026-09-01.
+class TestCIOCitation:
+    """H-c, added 2026-09-01: the wwcmm check accepted the word "price" as "specific Pass 1 agent findings" (§158.3).
 
-    Both guard rules the CIO prompt states and the validator did not enforce:
-    `tail_risk_cross_check` was emitted as `aligned` on absent inputs (§162.1), and the
-    wwcmm check accepted the word "price" as "specific Pass 1 agent findings" (§158.3).
-
-    `tail_risk_cross_check` is a TOP-LEVEL Stage A field (confirmed via the real
-    v1_stage_a.txt schema), not nested under risk_profile_summary as the pre-split
-    validator assumed.
+    (The tail-risk cross-check rules that used to live here were removed 2026-10-09, ledger BB-111.)
     """
 
-    def test_tail_risk_must_be_insufficient_when_inputs_absent(self):
+    def test_stage_a_output_without_tail_risk_fields_passes(self):
         out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "aligned"
-        passed, errors = validate_cio_stage_a(out, "split_decision", tail_inputs_present=False)
-        assert not passed
-        assert any("insufficient_data" in e for e in errors)
-
-    def test_tail_risk_insufficient_data_accepted_when_inputs_absent(self):
-        out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "insufficient_data"
-        passed, errors = validate_cio_stage_a(out, "split_decision", tail_inputs_present=False)
+        assert "tail_risk_cross_check" not in out and "tail_risk_note" not in out
+        passed, errors = validate_cio_stage_a(out, "split_decision")
         assert passed, errors
 
-    def test_tail_risk_comparison_allowed_when_inputs_present(self):
-        out = _valid_stage_a_output()
-        out["tail_risk_cross_check"] = "aligned"
-        passed, errors = validate_cio_stage_a(out, "split_decision", tail_inputs_present=True)
-        assert passed, errors
+    def test_stage_a_prompt_and_schema_no_longer_mention_the_tail_risk_cross_check(self):
+        from agents.prompts import load_template
+
+        template = load_template("cio", stage="a")
+        assert "tail_risk" not in template and "TAIL-RISK" not in template
 
     def test_wwcmm_generic_term_no_longer_passes(self):
         """"price" and "growth" used to satisfy a rule demanding Pass 1 agent findings."""
@@ -484,25 +393,6 @@ class TestCIOTailRiskAndCitation:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-
-
-def test_expected_tail_risk_class_covers_every_branch():
-    from agents.validators.cio import expected_tail_risk_class as cls
-
-    assert cls("elevated", -10.0) == "bear_elevated_risk_advisor_mild"
-    assert cls("negligible", -30.0) == "bear_mild_risk_advisor_elevated"
-    assert cls("moderate", -30.0) == "aligned"
-    assert cls("elevated", -30.0) == "aligned"
-    assert cls("negligible", -10.0) == "aligned"
-    assert cls(None, -30.0) == "insufficient_data"
-    assert cls("elevated", None) == "insufficient_data"
-
-
-def test_tail_risk_line_names_the_value_the_validator_will_expect():
-    from agents.validators.cio import expected_tail_risk_class, tail_risk_line
-
-    for level, impact in (("negligible", -28.7), ("elevated", -5.0), ("moderate", -40.0), (None, None)):
-        assert f"tail_risk_cross_check = {expected_tail_risk_class(level, impact)}" in tail_risk_line(level, impact)
 
 
 class TestVerdictFollowsOwnAssessments:
