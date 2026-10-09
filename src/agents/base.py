@@ -194,8 +194,43 @@ def _parse_json_response(text: str) -> dict:
         if lines and lines[-1].strip() == "```":
             lines = lines[:-1]
         text = "\n".join(lines)
-    obj, _ = json.JSONDecoder().raw_decode(text)
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError as exc:
+        # A complete answer that only lacks its last closing brackets (Macro, 5 of 107 first attempts: the model closes
+        # `structured_data` and forgets the outer `}`): add them. Only when the text ends right where a comma or a closer
+        # was expected, so an answer cut off inside a string, after a key or after a comma is never "repaired".
+        closed = _with_closing_brackets(text) if exc.pos >= len(text) and exc.msg.startswith("Expecting ',' delimiter") else None
+        if closed is None:
+            raise
+        obj, _ = json.JSONDecoder().raw_decode(closed)
+        logger.warning("json_closing_brackets_added", added=len(closed) - len(text))
     return obj
+
+
+def _with_closing_brackets(text: str) -> str | None:
+    """`text` plus the closing brackets it lacks, or None when it is not simply missing closers (a string left open, a
+    mismatched closer, or nothing missing). Brackets inside strings are ignored; content is never changed."""
+    needed: list[str] = []
+    in_string = escaped = False
+    for ch in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+        elif ch in "{[":
+            needed.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not needed or needed.pop() != ch:
+                return None
+    if in_string or not needed:
+        return None
+    return text + "".join(reversed(needed))
 
 
 class BaseRunner:
