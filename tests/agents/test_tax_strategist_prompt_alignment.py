@@ -27,7 +27,7 @@ def _section(start: str, end: str) -> str:
     [
         "key_tax_risks: 1-4",
         "tax_optimization_actions: 0-3",
-        "1,000-3,200 characters",
+        "700-3,200 characters",
     ],
 )
 def test_validator_bounds_are_stated_in_the_prompt(stated):
@@ -35,7 +35,7 @@ def test_validator_bounds_are_stated_in_the_prompt(stated):
 
 
 def test_the_narrative_range_the_prompt_asks_for_is_inside_the_validators_bounds():
-    """The prompt asks for 1,800-2,500 characters (the model lands near the floor of whatever range it is given: aiming at 1,500 produced 1,050-1,220-character narratives); the validator hard-rejects below 1,000 and
+    """The prompt asks for 1,800-2,500 characters (the model lands near the floor of whatever range it is given: aiming at 1,500 produced 1,050-1,220-character narratives); the validator hard-rejects below 700 and
     above 3,200. The ask must sit wholly inside the hard limits."""
     assert "1,800-2,500 characters" in TEMPLATE
     narrative_tokens = " ".join(f"{tok}: claim." for tok in sorted(TAX_METRIC_TOKENS)[:3]) + " REF/TFSA: x."
@@ -45,7 +45,7 @@ def test_the_narrative_range_the_prompt_asks_for_is_inside_the_validators_bounds
         out = {"narrative": f"{narrative_tokens} {filler}"[:n_chars]}
         return [e for e in validate_tax_strategist(out)[1] if e.startswith("narrative: too")]
 
-    assert narrative_errors(1_000) == [] and narrative_errors(999) != []
+    assert narrative_errors(700) == [] and narrative_errors(699) != []
     assert narrative_errors(3_200) == [] and narrative_errors(3_201) != []
 
 

@@ -9,7 +9,7 @@ PROMPT = (Path(__file__).resolve().parents[2] / "prompts" / "stock_researcher" /
 
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
     """32 of 59 first attempts failed raw (22 wrote 5 key_factors, 20 overshot the narrative, 4 had no caveats)."""
-    for limit in ("risks 1-3", "caveats 0-4", "assessment_summary 80 words or fewer", "narrative 900-1,200 characters", "over 1500"):
+    for limit in ("risks 1-3", "caveats 0-4", "assessment_summary 80 words or fewer", "narrative 900-1,200 characters", "over 1,800"):
         assert limit in PROMPT
     assert "key_factors" not in PROMPT  # removed 2026-10-07 (ledger BB-107)
     assert "HARD FLOOR" not in PROMPT  # the repeated 900-character narrative warning is gone

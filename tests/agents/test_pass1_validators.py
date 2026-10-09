@@ -208,7 +208,7 @@ class TestStockResearcher:
 
     def test_narrative_too_long_fails(self):
         out = _stock_researcher_output()
-        out["narrative"] = "A" * 1600  # over the 1500 ceiling
+        out["narrative"] = "A" * 1801  # over the 1800 ceiling
         passed, errors = validate_stock_researcher(out)
         assert not passed
         assert any("narrative" in e and "long" in e for e in errors)
@@ -569,8 +569,8 @@ class TestOvershootIsAcceptedUncutNotTrimmed:
         out = _technical_analyst_output()
         out["narrative"] = "A" * 1178
         assert not any("narrative" in e for e in validate_technical_analyst(out)[1])
-        out["narrative"] = "A" * 1500  # the ceiling is 1500 since the agents stopped writing key_factors (2026-10-07)
+        out["narrative"] = "A" * 1800  # the ceiling went 1080 to 1500 (2026-10-07, key_factors cut) and to 1800 (2026-10-09: 1,526 and 1,550 repeated on every retry)
         assert not any("narrative" in e for e in validate_technical_analyst(out)[1])
-        out["narrative"] = "A" * 1501
+        out["narrative"] = "A" * 1801
         assert any("narrative: too long" in e for e in validate_technical_analyst(out)[1])
 

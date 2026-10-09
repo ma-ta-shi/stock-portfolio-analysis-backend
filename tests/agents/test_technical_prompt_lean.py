@@ -8,7 +8,7 @@ PROMPT = (Path(__file__).resolve().parents[2] / "prompts" / "technical_analyst" 
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
     """25 of 51 real runs retried; most wrote more list items than the cap because only the validator knew it."""
     assert "risks 1-3" in PROMPT and "at most 80 words" in PROMPT
-    assert "600-1500 characters" in PROMPT
+    assert "600-1,800 characters" in PROMPT
 
 
 def test_key_factors_are_not_asked_for_and_the_narrative_carries_the_evidence():
