@@ -224,8 +224,13 @@ def validate_stock_researcher(output: dict) -> tuple[bool, list[str]]:
             # declining moat, never "eroding" -- and the only real downstream consumer (Bull
             # Advocate) reads this as free text, not a branched value, so accepting both costs
             # nothing. See the 86bbuhk82 plan for the live-testing record.
-            if moat.get("moat_trend") not in {"strengthening", "stable", "eroding", "weakening"}:
-                errors.append("structured_data.moat_assessment.moat_trend: must be strengthening|stable|eroding")
+            # No moat has no trend: the durability decides it. With overall_moat_durability "none" the trend is "none"
+            # whatever the model wrote ("none" itself was rejected in 2 of 15 runs on 2026-10-09, both BAM.TO; a retry then wrote
+            # "stable", which would read as a stable moat that does not exist). With a moat, "none" is not a trend.
+            if moat.get("overall_moat_durability") == "none":
+                moat["moat_trend"] = "none"
+            elif moat.get("moat_trend") not in {"strengthening", "stable", "eroding", "weakening"}:
+                errors.append("structured_data.moat_assessment.moat_trend: must be strengthening|stable|eroding (none only when there is no moat)")
             # moats[].type -- declared in the real schema (9-value), unenforced until now.
             # "type" is deliberately not in the shared sweep: too generic a key name to sweep
             # globally without risking a future collision. Surfaced by the permanent

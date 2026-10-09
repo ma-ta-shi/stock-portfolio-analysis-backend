@@ -34,7 +34,7 @@ State analysis_confidence (high/medium/low/insufficient) from how well the avail
 Analyze IN ORDER (show reasoning in the narrative):
 1-BUSINESS MODEL: What does COMPANY_X do? Revenue mix? Primary economic engine? Cite FILING:Business, or PROFILE:Business when there is no digest.
 2-COMPETITIVE POSITION: How does TICKER_X compare to {peer_1_token} and {peer_2_token}? Scale, breadth, customer base.
-3-MOAT: Durable advantage and its type from the schema (or none)? Strength? Trend (strengthening/stable/eroding)? Cite specific evidence. With no citable evidence, return an empty moats array and overall_moat_durability "none"; do not fall back on a generic sector list.
+3-MOAT: Durable advantage and its type from the schema (or none)? Strength? Trend (strengthening/stable/eroding, or none when there is no moat)? Cite specific evidence. With no citable evidence, return an empty moats array, overall_moat_durability "none" and moat_trend "none"; do not fall back on a generic sector list.
 4-MANAGEMENT: Rule 7.
 5-RECENT DEVELOPMENTS: Rule 6. An empty array is allowed if nothing is material.
 6-DATA SANITY CHECK: Contradictions between sources? Stale filings? "No anomalies" if clean.
@@ -68,7 +68,7 @@ Respond with ONLY valid JSON:
         }
       ],
       "overall_moat_durability": "strong|moderate|weak|none",
-      "moat_trend": "strengthening|stable|eroding"
+      "moat_trend": "strengthening|stable|eroding|none"
     },
     "management_assessment": "excellent|competent|concerning|poor|insufficient_data",
     "management_notes": "1-2 sentences drawing on SIGNALS. 'insufficient data' if SIGNALS is thin.",

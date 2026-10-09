@@ -646,3 +646,20 @@ def test_a_missing_company_name_falls_back_to_the_ticker_not_a_gap():
     bundle = _bundle(company_info={"name": None, "sector": "Technology"})
 
     assert merge_researcher_output(_answer(), bundle)["narrative"].startswith("SHOP.TO (SHOP.TO) leads")
+
+
+def test_a_no_moat_answer_passes_the_runners_validator_and_is_stored_with_a_trend_of_none():
+    """BAM.TO 2026-10-09: durability 'none' with a trend the enum rejected; through the runner's own validator, and the same dict
+    is what the retry loop returns and stores."""
+    out = _valid_stock_researcher_output()
+    out["structured_data"]["moat_assessment"] = {"overall_moat_durability": "none", "moat_trend": "stable", "moats": []}
+    passed, errors = _validate(out, has_filing_digest=True)
+    assert passed, errors
+    assert out["structured_data"]["moat_assessment"]["moat_trend"] == "none"
+
+
+def test_a_trend_of_none_beside_a_real_moat_is_rejected_by_the_runners_validator():
+    out = _valid_stock_researcher_output()
+    out["structured_data"]["moat_assessment"] = {"overall_moat_durability": "moderate", "moat_trend": "none", "moats": []}
+    passed, errors = _validate(out, has_filing_digest=True)
+    assert not passed and any("moat_trend" in e for e in errors)

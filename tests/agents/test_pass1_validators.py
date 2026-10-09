@@ -178,6 +178,34 @@ class TestStockResearcher:
         passed, errors = validate_stock_researcher(out)
         assert passed, f"Valid output should pass: {errors}"
 
+    def test_no_moat_has_no_trend_and_whatever_the_model_wrote_becomes_none_without_a_retry(self):
+        """BAM.TO, twice on 2026-10-09: an empty moats list, durability 'none' and moat_trend 'none', which the enum rejected."""
+        out = _stock_researcher_output()
+        out["structured_data"]["moat_assessment"] = {"moats": [], "overall_moat_durability": "none", "moat_trend": "none"}
+        passed, errors = validate_stock_researcher(out)
+        assert passed, errors
+        assert out["structured_data"]["moat_assessment"]["moat_trend"] == "none"
+
+    def test_a_stable_moat_is_never_reported_for_no_moat(self):
+        """A retry on BAM.TO answered 'stable' beside durability 'none': a stable moat that does not exist."""
+        for trend in ("None", " N/A ", "", None, "stable", "eroding"):
+            out = _stock_researcher_output()
+            out["structured_data"]["moat_assessment"] = {"moats": [], "overall_moat_durability": "none", "moat_trend": trend}
+            passed, errors = validate_stock_researcher(out)
+            assert passed and out["structured_data"]["moat_assessment"]["moat_trend"] == "none", (trend, errors)
+
+    def test_a_trend_of_none_is_still_wrong_when_there_is_a_moat(self):
+        out = _stock_researcher_output()
+        out["structured_data"]["moat_assessment"] = {"moats": [], "overall_moat_durability": "strong", "moat_trend": "none"}
+        passed, errors = validate_stock_researcher(out)
+        assert not passed and any("moat_trend" in e for e in errors)
+
+    def test_the_researcher_prompt_says_what_the_trend_is_when_there_is_no_moat(self):
+        from agents.prompts import load_template
+
+        prompt = load_template("stock_researcher")
+        assert 'overall_moat_durability "none" and moat_trend "none"' in prompt and "strengthening|stable|eroding|none" in prompt
+
     def test_missing_thesis_archetype_fails(self):
         out = _stock_researcher_output()
         del out["structured_data"]["thesis_archetype"]
