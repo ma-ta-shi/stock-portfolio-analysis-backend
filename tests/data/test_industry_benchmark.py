@@ -141,3 +141,18 @@ def test_a_pe_from_near_zero_earnings_is_not_meaningful():
     bench = {"median_pe": 23.5, "p25_pe": 13.0, "p75_pe": 50.4}
     assert ib.pe_vs_industry(9001.0, bench) == (None, "not_meaningful")
     assert ib.pe_vs_industry(150.0, bench)[1] == "above_range"  # large but still a P/E
+
+
+async def test_an_industry_that_is_not_a_peer_group_gives_no_benchmark_and_never_calls_the_screener(monkeypatch):
+    """BAM.TO's TSX 'Asset Management' median was 3.9 (11 of 22 members are funds and trusts at P/E 1.5 to 4)."""
+    calls = []
+    monkeypatch.setattr(ib, "_screen", lambda i, e: calls.append(i) or ROWS)
+
+    class _Ticker:
+        info = {"industry": "Asset Management", "marketCap": 100e9}
+
+    monkeypatch.setattr("yfinance.Ticker", lambda t: _Ticker())
+    assert await ib.industry_benchmark("BAM.TO") is None
+    assert await ib.industry_benchmark("BX") is None
+    assert calls == []
+    assert ib.NON_COMPARABLE_INDUSTRIES == {"Asset Management"}

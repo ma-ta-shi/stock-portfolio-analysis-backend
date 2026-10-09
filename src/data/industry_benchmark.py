@@ -46,6 +46,15 @@ NEAR_MEDIAN = 0.10
 MIN_MARKET_CAP = 500e6
 # Above this a trailing P/E means earnings are near zero (CRWD 9,001), not a valuation: no comparison is made.
 MAX_MEANINGFUL_PE = 200
+# Yahoo industries whose members are not a peer group, so no median means anything. "Asset Management" holds alternative asset
+# managers, traditional managers, holding companies, business development companies, closed-end funds, split-share vehicles and
+# bullion trusts. Measured 2026-10-09: on the TSX 11 of 22 members with a P/E are non-operating vehicles (P/E 1.5 to 4), giving
+# BAM.TO a median of 3.9 and a "579% premium"; in the US 161 companies give a median of 10.4 against alternative managers at 25 to
+# 35. No filter made it coherent: excluding fund-like names left investment companies the names do not reveal, a $2B cap floor
+# left a fund (Canoe EIT Income), and the spread of the middle half cannot tell it from a healthy industry (MSFT's software is
+# 3.7, BAM.TO's raw universe 3.8). Every other industry sampled (banks, software, staples, utilities, energy, telecom, retail,
+# pharma) was untouched by every filter tried. No comparison is better than a wrong one: the agents say it is not available.
+NON_COMPARABLE_INDUSTRIES = frozenset({"Asset Management"})
 
 
 @dataclass(frozen=True)
@@ -144,7 +153,7 @@ def _benchmark_sync(ticker: str) -> IndustryBenchmark | None:
 
     info = yf.Ticker(ticker).info
     industry = screener_industry(info.get("industry"))
-    if industry is None:
+    if industry is None or industry in NON_COMPARABLE_INDUSTRIES:
         return None
     cap = info.get("marketCap")
     canadian = is_canadian(ticker)
