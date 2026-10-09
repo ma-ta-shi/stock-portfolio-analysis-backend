@@ -27,7 +27,7 @@ from data.precompute import fundamentals, risk_metrics, sentiment, technicals
 from data.precompute.canadian_data_flags import build_canadian_data_flags
 from data.precompute.macro_sources import compute_macro_sources
 from data.precompute.news_id_assignment import assign_news_ids
-from data.precompute.news_selection import select_news
+from data.precompute.news_selection import pick_shown, select_news
 from data.precompute.research_sources import build_research_sources, company_name_variants
 from data.industry_benchmark import industry_benchmark
 from data.precompute.currency import convert_insider_values
@@ -364,7 +364,9 @@ class DataPipeline:
             # Ollama call before Pass 1 begins (also 32768) -- no third
             # reload transitioning into Pass 1.
             sentiment_result, insider_transactions = await asyncio.gather(
-                sentiment.summarize_news(news_selection["scored"], capture=capture),
+                sentiment.summarize_news(
+                    news_selection["scored"], company=company_info.get("name") or ticker, ticker=ticker, capture=capture
+                ),
                 router.get_insider_trading(ticker),
             )
             # yfinance reports every Canadian insider trade value in USD (cross-listed or not), so Canadian rows are
@@ -382,7 +384,8 @@ class DataPipeline:
             )
             # The scored sample is kept whole (the Sentiment agent's tone figures and its
             # anomaly check use all of it); only the `shown` ones are listed in its prompt.
-            shown_ids = {article["id"] for article in news_selection["shown"]}
+            sentiment_by_id = {article["id"]: article.get("sentiment") for article in sentiment_result["articles"]}
+            shown_ids = {article["id"] for article in pick_shown(news_selection["scored_days"], sentiment_by_id)}
             news_with_sentiment = [
                 {**article, "shown": article["id"] in shown_ids}
                 for article in sentiment_result["articles"]

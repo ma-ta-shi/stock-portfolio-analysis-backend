@@ -1,0 +1,1418 @@
+{
+ "about": "Headlines labelled by hand (positive, negative, neutral, unrelated) without sight of the model's labels, 2026-10-09 (ledger BB-111). One labeller, so treat agreement below about 80% as the noise floor, not as model error. Sets: dev (used to write the rubric), fresh (seen once), third (never used for tuning). Source: saved sentiment scoring batches from real runs.",
+ "items": [
+  {
+   "id": "dev:KO#19",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Pepsi announces major shutdown as Coca-Cola plans $10B investment",
+   "text": "Shoppers are the reason, and the cuts now reach well past the soda aisle.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:KO#1",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Coca-Cola's CFO doesn't see AI as 'the path forward' for its labor force",
+   "text": "The Coca-Cola Company (KO) plans to invest $10 billion through 2030 in US infrastructure, including expanded production facilities, distribution, and offices. President and CFO John Murphy joins Yahoo Finance Senior Reporter Brooke DiPalma to talk about the company's future approach to the American ",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:LCID#3",
+   "set": "dev",
+   "company": "Lucid Group",
+   "ticker": "LCID",
+   "headline": "Lucid Faces A ‘Long And Difficult Journey,’ BNP Says After Q3 Delivery Miss",
+   "text": "BNP Paribas analyst said LCID’s “lackluster” delivery report supports his view of a long path to better operations and real demand.",
+   "label": "negative"
+  },
+  {
+   "id": "dev:BAM.TO#17",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "The Brookfield Moat Masterclass",
+   "text": "Brookfield (BN/BAM/BIP/BEP/BBUC): value discounts, 21.5% return target, AI infrastructure tailwinds & upside. Read the full analysis here.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:RDDT#7",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "45-Year-Old Was Planning To Work Another 10 Years — Then $5M Inheritance Changed Everything: ‘Why Am I Still Working?’",
+   "text": "A 45-year-old figured they would spend another 10 years working before retiring. Then the aunt who helped raise them died and left them a $5 million inheritance. \"Why am I still working?\" they wrote on Reddit. They Had Already Built...",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:LCID#2",
+   "set": "dev",
+   "company": "Lucid Group",
+   "ticker": "LCID",
+   "headline": "Rivian & Lucid After Q3 Deliveries: Is Either Stock a Buy Now?",
+   "text": "RIVN's record Q3 deliveries and R2 ramp give it an edge over LCID, but cash burn and weak margins keep both EV stocks from being clean buys.",
+   "label": "negative"
+  },
+  {
+   "id": "dev:ENB.TO#5",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Enbridge Inc. to Host Webcast to Discuss 2026 Third Quarter Results on November 6",
+   "text": "",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:BAM.TO#8",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "Brookfield to Invest Up to $600 Million in ACME’s Green Fuels Projects in India and Oman",
+   "text": "Brookfield Asset Management (NYSE:BAM) has agreed to invest up to $600 million in India’s ACME Cleantech Ventures to support the development and construction of green ammonia and green methanol projects, the companies announced on Thursday. The investment marks Brookfield’s entry into the region’s l",
+   "label": "positive"
+  },
+  {
+   "id": "dev:ENB.TO#8",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Why Enbridge (ENB) Outpaced the Stock Market Today",
+   "text": "In the most recent trading session, Enbridge (ENB) closed at $46.54, indicating a +1.09% shift from the previous trading day.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:ENB.TO#1",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Goldman Sachs Reinstates Neutral on Enbridge, Announces $50 Price Target",
+   "text": "Goldman Sachs  analyst John Mackay   reinstates Enbridge (NYSE:ENB) with a Neutral and announces $50 price target.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:RDDT#16",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "Reddit Inc. (RDDT) Stock Falls Amid Market Uptick: What Investors Need to Know",
+   "text": "In the closing of the recent trading day, Reddit Inc. (RDDT) stood at $147.86, denoting a -1.12% move from the preceding trading day.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:RDDT#25",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "My Husband, 57, Swears The Market Will Crash And Wants $200,000 From His 401(k) To Buy A Solar Battery And Pay Debt — Even With $70K Penalty",
+   "text": "Sometimes the internet convinces people to buy a solar battery. Other times, it convinces them the financial apocalypse is coming and their retirement account needs to be emptied before Tuesday. One Reddit user found herself dealing with the second scenario...",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:ENB.TO#3",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Why Jim Cramer Calls Chevron (CVX) the King and Enbridge (ENB) the Yield Play",
+   "text": "Jim Cramer highlighted Chevron Corporation (NYSE:CVX) and Enbridge Inc. (NYSE:ENB) as two energy stocks suited to different priorities, as he said during the September 28 episode of Mad Money: Let’s go back… to the idea of what can work in an environment when oil’s up, interest rates are up, and the",
+   "label": "positive"
+  },
+  {
+   "id": "dev:TLRY.TO#18",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "Tilray Brands Q1 2027 Earnings Call Transcript",
+   "text": "Tilray Brands (NASDAQ:TLRY) reported first-quarter financial results on Thursday. The transcript from the company's first-quarter earnings call has been provided below.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:RDDT#10",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "Zefr and Reddit Partner to Give Advertisers Deeper Insights and More Precise Suitability Controls",
+   "text": "LOS ANGELES, September 30, 2026--Zefr, the leading provider of AI-powered brand safety and suitability solutions for walled garden environments, today announced a partnership with Reddit to provide advertisers with advanced AI-powered content-level intelligence, insights, brand safety and suitabilit",
+   "label": "positive"
+  },
+  {
+   "id": "dev:RDDT#11",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "Snap Jumps 6% as Fundamentals Outweigh Regulatory Pressure; Reddit Gains 4%, Meta Platforms Dips",
+   "text": "Snap is surging while its biggest rival in digital advertising slides, and the split reveals a battle investors in social media stocks cannot ignore right now.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:TLRY.TO#13",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "PepsiCo Could Swing $6.46 Billion In Value After Earnings",
+   "text": "Earnings season is set to bring heightened volatility, with PepsiCo, Constellation Brands, Delta Air Lines, Applied Digital and Tilray Brands facing potentially sharp post-earnings moves as options markets price in reactions ranging from 3.76% to 12.24%.",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:TLRY.TO#19",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "Tilray Brands Delivers Record Q1 Fiscal 2027 Revenue and Record Q1 Gross Profit, Demonstrating the Power of Its Global Platform, Driven by Double-Digit Year-Over-Year Growth Across International Cannabis, Beverage and Pharmaceutical Distribution",
+   "text": "",
+   "label": "positive"
+  },
+  {
+   "id": "dev:JPM#1",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "TIGR or JPM: Which Is the Better Value Stock Right Now?",
+   "text": "TIGR vs. JPM: Which Stock Is the Better Value Option?",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:KO#15",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Coca-Cola’s $10B Buildout Fuels Industrial Demand",
+   "text": "Coca-Cola's $10B US buildout is adding major manufacturing, distribution, and utility projects across several industrial markets.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:KO#3",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "What Does Coca-Cola (KO) Gain From 14 African Markets And $10 Billion Spending?",
+   "text": "Coca-Cola (NYSE:KO) received conditional approval for Coca-Cola HBC to acquire a majority stake in Coca-Cola Beverages Africa, opening access to 14 additional African markets. Management also announced a US$10b commitment to invest in U.S. infrastructure across manufacturing and distribution over a ",
+   "label": "positive"
+  },
+  {
+   "id": "dev:LCID#1",
+   "set": "dev",
+   "company": "Lucid Group",
+   "ticker": "LCID",
+   "headline": "Lucid Group Misses Q3 Delivery Estimates While Slashing Vehicle Production",
+   "text": "Key Stats for Lucid Group StockPrice change for Lucid Group stock in last 6 months: -55%$LCID Stock Price as of Oct. 5: $452-Week High: $24$LCID Stock Price Target: $8What Happened?Lucid Group (LCID:NASDAQ) missed Wall Street estimates for Q3 deliveries on Monday.",
+   "label": "negative"
+  },
+  {
+   "id": "dev:LCID#7",
+   "set": "dev",
+   "company": "Lucid Group",
+   "ticker": "LCID",
+   "headline": "Lucid Builds Fewer EVs Than It Sells As CEO’s Cash-Preservation Reset Takes Hold",
+   "text": "Lucid Group Inc. said Monday that third-quarter production and deliveries fell from a year earlier as the electric vehicle maker continued to reduce inventory and align output with near-term demand. Lucid produced 2,954 vehicles and delivered 3,806 vehicles during the...",
+   "label": "negative"
+  },
+  {
+   "id": "dev:PLUG#9",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "Plug Power (PLUG) Stock Could Be Fully Priced Following Fresh E SAF Project News",
+   "text": "Plug Power has seen its share price fall sharply in recent years, which puts fresh focus on a basic question. Given where the business sits today, is the current valuation supported by its sales profile rather than just by hopes for future hydrogen demand? Over the past 5 years the stock has decline",
+   "label": "negative"
+  },
+  {
+   "id": "dev:RDDT#1",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "My Daughter Wants a 'Music Industry' Degree and I'm Refusing to Pay for It. Am I Wrong for Caring About Her Earning Potential?",
+   "text": "Paying for college is one thing. Paying tens of thousands of dollars for a degree you believe could leave your child struggling to find a well-paying job is another. That’s the dilemma one parent recently described on Reddit’s r/MiddleClassFinance. Their...",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:BAM.TO#23",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "Brookfield Asset Management (TSX:BAM) Expands Into UK Housing As Its Valuation Story Gets Tested",
+   "text": "Brookfield Asset Management (TSX:BAM) has been busy on two fronts: moving into UK affordable housing through its Ursa Affordable Housing platform and teaming up with Foxconn on Vietnamese renewable energy and storage projects. Those moves land at a tricky moment for the stock. Brookfield Asset Manag",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:BAM.TO#11",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "Brookfield Asset Management: 4.25% Yield With High Growth",
+   "text": "Brookfield Asset Management: rising dividends despite a falling stock.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:BAM.TO#4",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "Brookfield to Acquire a Minority Interest in American Real Estate Partners",
+   "text": "MCLEAN, Va. & NEW YORK, September 14, 2026--American Real Estate Partners (\"AREP\"), a leading institutional fund manager and real estate developer, and Brookfield Asset Management Ltd. (NYSE: BAM, TSX: BAM) (\"BAM\"), a leading global alternative asset manager headquartered in New York with over $1 tr",
+   "label": "positive"
+  },
+  {
+   "id": "dev:ENB.TO#7",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Enbridge: Why We Just Bought 1,000 More Shares",
+   "text": "Enbridge is executing $3.2B in accretive crude acquisitions while maintaining its 4.5x-5.0x debt/EBITDA target. Click for more on the bullish thesis for ENB.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:TLRY.TO#12",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "Tilray Brands, Inc. (TLRY) Declines More Than Market: Some Information for Investors",
+   "text": "The latest trading day saw Tilray Brands, Inc. (TLRY) settling at $4.02, representing a -2.66% change from its previous close.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:JPM#7",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan Stock Is Up Just 3% This Year as Its Multiple Shrank. Here’s What Doug Petno’s Q3 Guidance Says About the Gap",
+   "text": "Key Stats for JPMorgan StockCurrent Price: $332. 38Target Price (Mid): ~$447Street Target: ~$374Potential Total Return: ~35%Annualized IRR: ~7% / yearWhat Happened?JPMorgan Chase (JPM:NYSE) closed at $332.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:KO#8",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Coca-Cola Plans $10 Billion US Investment Through 2030 — Here's Where the Beverage Giant Will Build Out its Network",
+   "text": "Coca-Cola Co. plans to invest $10 billion in U.S. infrastructure from 2026 through 2030 as the beverage company expands its production and distribution network. The investment will cover new or expanded production, distribution and office facilities across the country, including...",
+   "label": "positive"
+  },
+  {
+   "id": "dev:JPM#11",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan Hires Former Goldman Sachs Executive Rob Sweeney for Top Banking Leadership Role",
+   "text": "Key Stats for JPMorgan StockPrice change for JPMorgan stock in the last 6 months: 11%$JPM Stock Price as of Oct. 6: $33152-Week High: $367$JPM Stock Price Target: $373What Happened?JPMorgan Chase (JPM:NYSE) has hired Rob Sweeney as a global chair of investment banking.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:PLUG#5",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "Why Plug Power (PLUG) Stock Is Up Today",
+   "text": "Shares of fuel cell technology Plug Power (NASDAQ:PLUG) jumped 4.3% in the pre-market session after the company announced a 280-megawatt GenEco electrolyzer supply agreement with Arcadia eFuels for Project ENDOR in Denmark alongside a strategic partnership covering future sustainable aviation fuel p",
+   "label": "positive"
+  },
+  {
+   "id": "dev:JPM#4",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan Dangles 11% Yield on Volta’s $5 Billion AI Loan Sale",
+   "text": "JPMorgan Chase & Co. is pitching a yield of about 11% on a $5 billion leveraged-loan sale on behalf of Volta Infrastructure Holdings Ltd., one of the highest borrowing costs seen in the market for risky debt that’s become popular for financing the AI boom.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:PLUG#11",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "Hydrogen Stocks Diverge: Bloom Energy and FuelCell Lead, Plug Power and Ballard Lag Into Earnings",
+   "text": "Hydrogen stocks are splitting: fuel cell leaders surge while pure-play laggards sink. See key performance, valuation, and earnings risks.",
+   "label": "negative"
+  },
+  {
+   "id": "dev:JPM#12",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan Tops AI Rankings Again: Can Its Spending Boost Returns?",
+   "text": "JPM leads the 2026 Evident AI Index as its $19.8 billion tech budget targets productivity gains, though near-term monetization remains uncertain.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:RDDT#15",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "I Sold NVIDIA, Google and Microsoft Over a $2 Trillion AI Gap. Was I Wrong?",
+   "text": "A Reddit investor walked away from three of the biggest AI trade names in the market, armed with math showing the economics simply do not add up. Whether his timing was brilliant or costly depends on a gap that Bain and Company puts even higher than he did.",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:TLRY.TO#9",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "Tilray Brands, Inc. (TLRY) Laps the Stock Market: Here's Why",
+   "text": "Tilray Brands, Inc. (TLRY) concluded the recent trading session at $4.08, signifying a +2.26% move from its prior day's close.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:PLUG#6",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "Plug Power Advances 4% on Electrolyzer Supply Agreement; Bloom Energy Sinks 3%, FuelCell Energy Treads Water",
+   "text": "A three-year engineering partnership just turned into a major contract win for one struggling hydrogen stock, while its closest rivals sat out the rally entirely.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:RDDT#4",
+   "set": "dev",
+   "company": "Reddit",
+   "ticker": "RDDT",
+   "headline": "I'm Told the Economy Isn't in a Recession, but Everyone Around Me Is Struggling. Almost Nobody I Know Feels Financially Secure",
+   "text": "If the economy isn’t in a recession, why does it feel like almost everyone is broke? That’s the question one person recently put to Reddit, saying nearly everyone they know is struggling just to pay their bills. The post clearly...",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:PLUG#12",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "FuelCell Energy Surges 11% on Fit Energy’s Pennsylvania Data Center Plan; Bloom Energy Climbs 4%, Plug Power Barely Budges",
+   "text": "A Pennsylvania data center announcement just sent one fuel cell stock soaring while leaving its closest rivals almost completely cold, and the reason behind that split reveals something important about how this industry actually makes money.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:JPM#8",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "Corteva Soars 11% on JPM Upgrade: “Undervalued at Current Price”",
+   "text": "Key TakeawaysCorteva shares jumped 11% after JPMorgan upgraded the stock to Overweight with a $19 price target. The sell-off after last week’s seed spin-off looks overdone, and JPMorgan calls the crop chemicals business left behind undervalued.",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:TLRY.TO#7",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "BrewDog distances itself from previous owners in first campaign since takeover",
+   "text": "The Scottish firm, which is now owned by Tilray Brands, has said there will be ‘a little less allegation’ and ‘no more cunning stunts’ in adverts.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:LCID#4",
+   "set": "dev",
+   "company": "Lucid Group",
+   "ticker": "LCID",
+   "headline": "Reflecting On Automobile Manufacturing Stocks’ Q2 Earnings: Lucid (NASDAQ:LCID)",
+   "text": "Looking back on automobile manufacturing stocks’ Q2 earnings, we examine this quarter’s best and worst performers, including Lucid (NASDAQ:LCID) and its peers.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:BAM.TO#16",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "Brookfield Asset Management (TSX:BAM) Nears $800 Million Oakbrook Center Refinancing",
+   "text": "Brookfield Asset Management Ulc (TSX:BAM) affiliates are finalizing an $800m refinancing of Oakbrook Center, a major U.S. mall. The GGP-affiliated venture is working with a lender group that includes Morgan Stanley, Goldman Sachs and Wells Fargo on the deal. The refinancing is expected to return cas",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:ENB.TO#2",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Top 3 Energy Stocks That May Rocket Higher This Quarter",
+   "text": "Energy stocks Enbridge, NESR and WaterBridge are oversold, with RSI near or below 30, potentially offering undervalued buying opportunities.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:ENB.TO#6",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Wall Street's Most Accurate Analysts Weigh In On 3 Energy Stocks With Over 6% Dividend Yields",
+   "text": "Analyst ratings cover three high-yield energy stocks: NAT (12.9%), NOG (7.49%) and ENB (6.08%), with mixed outlooks.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:KO#30",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Is Coca-Cola (KO) Outperforming Other Consumer Staples Stocks This Year?",
+   "text": "Here is how Coca-Cola (KO) and Philip Morris (PM) have performed compared to their sector so far this year.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:TLRY.TO#16",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "Tilray Brands Q1 Adj. EPS $(0.02) Beats $(0.20) Estimate, Sales $257.147M Miss $267.813M Estimate",
+   "text": "Tilray Brands (NASDAQ:TLRY) reported quarterly losses of $(0.02) per share which beat the analyst consensus estimate of $(0.20) by 90 percent.  The company reported quarterly sales of $257.147 million which missed the",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:TLRY.TO#17",
+   "set": "dev",
+   "company": "Tilray Brands",
+   "ticker": "TLRY.TO",
+   "headline": "Earnings Scheduled For October 8, 2026",
+   "text": "Companies Reporting Before The Bell",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:PLUG#3",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "Eos Energy Enterprises vs. Plug Power: Which Cutting Edge Energy Storage Stock Is a Better Buy in 2026?",
+   "text": "Both companies burn cash and face execution risks, but their valuation gap tells a starkly different story about which deserves your capital.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:ENB.TO#4",
+   "set": "dev",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "The Average Car Payment Is $765 a Month. How Much Enbridge Stock Do You Actually Need to Pay Your Car Payment Every Month?",
+   "text": "It's not a great idea, but it's an idea nonetheless.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:BAM.TO#14",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "Brookfield Asset Management Targets Doubling Fee-Bearing Capital by 2031",
+   "text": "Brookfield Asset Management (NYSE:BAM) used its 2026 Investor Day to outline plans to double fee-bearing capital by 2031, supported by fundraising across flagship funds, complementary strategies, insurance capital and private wealth products. Management also emphasized the July acquisition of the re",
+   "label": "positive"
+  },
+  {
+   "id": "dev:LCID#5",
+   "set": "dev",
+   "company": "Lucid Group",
+   "ticker": "LCID",
+   "headline": "What Does Lucid Group (LCID) Production Cut Under Its New CEO Mean?",
+   "text": "Lucid Group (NasdaqGS:LCID) announced a material reduction in vehicle production under its newly appointed chief executive officer. The business is cutting output to align manufacturing volumes with current order levels and to work down existing vehicle inventory. Management has begun restructuring ",
+   "label": "negative"
+  },
+  {
+   "id": "dev:PLUG#2",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "Bloom Energy Rallies 11% as Fuel Cell Selloff Reverses; FuelCell Surges 7%, Plug Power Rises 3%",
+   "text": "Fuel cell stocks are bouncing hard after a brutal selloff, but the same unanswered question that sparked the collapse is still hanging over the group, and one fresh headline could send everything into reverse again.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:LCID#6",
+   "set": "dev",
+   "company": "Lucid Group",
+   "ticker": "LCID",
+   "headline": "Lucid Group (LCID) Registers a Bigger Fall Than the Market: Important Facts to Note",
+   "text": "The latest trading day saw Lucid Group (LCID) settling at $3.89, representing a -6.49% change from its previous close.",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:BAM.TO#21",
+   "set": "dev",
+   "company": "Brookfield Asset Management",
+   "ticker": "BAM.TO",
+   "headline": "Brookfield (BAM) Upgraded to Buy: Here's What You Should Know",
+   "text": "Brookfield (BAM) has been upgraded to a Zacks Rank #2 (Buy), reflecting growing optimism about the company's earnings prospects. This might drive the stock higher in the near term.",
+   "label": "positive"
+  },
+  {
+   "id": "dev:JPM#9",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "Jamie Dimon Says AI Boom Is Competing With Government Borrowing for Capital: ‘Rates Are Going Up’",
+   "text": "JPMorgan Chase & Co. (NYSE:JPM) CEO Jamie Dimon says the AI spending boom is competing with heavy government borrowing for capital as interest rates rise. \"Rates are going up. A lot of demand for capital, a lot of government financing,\"...",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:KO#25",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "TEAMSTERS EXTEND PICKET LINES TO ADDITIONAL COCA-COLA FACILITIES",
+   "text": "Teamsters at Coca-Cola Consolidated Inc. in Anderson, Ind., have extended their unfair labor practice (ULP) strike to additional company operations. Over 300 Teamsters in Akron, Toledo, and Twinsburg, Ohio, exercised their individual legal and contractual right to refuse to cross the extended picket",
+   "label": "unrelated"
+  },
+  {
+   "id": "dev:JPM#2",
+   "set": "dev",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan (JPM) Reserves for Losses That Have Not Arrived. What Is the Buffer Really For?",
+   "text": "JPMorgan Chase & Co. (NYSE:JPM) charged less for expected credit losses in the first half of 2026 than it did a year earlier, and the reserve it holds against those losses grew anyway. Those two things do not usually happen together, and the combination is worth understanding before the third quarte",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:KO#20",
+   "set": "dev",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Coca-Cola and Zepto Turn Spain's FIFA World Cup Victory Into a collectible Piece of History",
+   "text": "Coca-Cola India is turning a defining FIFA World Cup moment into a keepsake for football fans, with limited-edition golden cans available across Delhi/NCR. Introduced through the 'Own a Piece of History' campaign, the collectible cans are being brought to consumers through Coca-Cola's partnership wi",
+   "label": "neutral"
+  },
+  {
+   "id": "dev:PLUG#13",
+   "set": "dev",
+   "company": "Plug Power",
+   "ticker": "PLUG",
+   "headline": "Plug Power (PLUG) Stock Sinks As Market Gains: What You Should Know",
+   "text": "Plug Power (PLUG) reached $1.86 at the closing of the latest trading day, reflecting a -1.59% change compared to its last close.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:SHOP.TO#5",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Why Shopify (SHOP) Stock Is Trading Up Today",
+   "text": "Shares of e-commerce platform Shopify (NASDAQ:SHOP) jumped 3.9% in the pre-market session after the stock extended gains from the previous session as cooling labor market data tempered expectations for an October Federal Reserve interest rate increase amid positive Wall Street updates.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:WEED.TO#19",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Why Canopy Growth Corporation (CGC) Dipped More Than Broader Market Today",
+   "text": "Canopy Growth Corporation (CGC) concluded the recent trading session at $0.87, signifying a -1.87% move from its prior day's close.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:SHOP.TO#2",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Deposco Invented a Streetwear Brand, Made It Go Viral, and Killed It in Six Weeks",
+   "text": "\"Supply Chain Nightmares: Loose Threads,\" Produced with Shopify, Shows What Happens When Demand Outruns FulfillmentALPHARETTA, Ga., Oct. 06, 2026 (GLOBE NEWSWIRE) -- Deposco, a leading provider of AI-based supply chain software solutions, today launched Supply Chain Nightmares: Loose Threads, a mark",
+   "label": "unrelated"
+  },
+  {
+   "id": "fresh:WEED.TO#17",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Canopy Growth Corporation (CGC) Stock Declines While Market Improves: Some Information for Investors",
+   "text": "Canopy Growth Corporation (CGC) reached $0.88 at the closing of the latest trading day, reflecting a -1.54% change compared to its last close.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:SHOP.TO#9",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Shopify Draws a Hard Line at the Checkout Gate",
+   "text": "Restricting the Autonomous Transaction Shopify has formalized its stance on agentic commerce by updating the robots.txt policy for its storefronts to explicitly prohibit autonomous agents from finalizing purchases. Effective July 15, 2025, the platform mandates that “Checkouts are for humans. Do NOT",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:WOLF#11",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "Wolfspeed Stock Soars on Financing Deal with Pentagon",
+   "text": "The Pentagon is providing more capital to ensure strong domestic supply of key materials.",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:BYND#6",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "A Look Back at Perishable Food Stocks’ Q2 Earnings: Beyond Meat (NASDAQ:BYND) Vs The Rest Of The Pack",
+   "text": "Looking back on perishable food stocks’ Q2 earnings, we examine this quarter’s best and worst performers, including Beyond Meat (NASDAQ:BYND) and its peers.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:WOLF#3",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "Is Wolfspeed (WOLF) Expensive As Its 3 Month Slide Meets Execution Questions?",
+   "text": "Wolfspeed (WOLF) has drawn fresh attention after recent price moves left the stock roughly flat over the past month but down close to 30% over the past 3 months, sharpening questions about valuation and execution. Viewed over a longer stretch, Wolfspeed’s recent bounce, with a 7 day share price retu",
+   "label": "negative"
+  },
+  {
+   "id": "fresh:WOLF#9",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "Wolfspeed stock surges 20% on $1.5 billion defense loan",
+   "text": "Investing.com -- Shares of Wolfspeed Inc. (NYSE: WOLF) jumped 20% in after-hours trading Wednesday after the Department of War announced a conditional $1.5 billion loan to the semiconductor manufacturer.",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:BYND#4",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "He’s lost hundreds of thousands in stocks like SpaceX and Beyond Meat — and he’s not stopping. Is the ‘high’ worth it?",
+   "text": "Akshay Sapra turned Uber earnings and borrowed money into nearly CA$2 million day-trading stocks like Nvidia and AMD. Then he lost it all — including a recent CA$250,000 SpaceX bet gone wrong.",
+   "label": "unrelated"
+  },
+  {
+   "id": "fresh:WEED.TO#14",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Canopy Growth Appoints Sebastian Blöte as Country Manager for Germany",
+   "text": "SMITHS FALLS, Ontario, September 28, 2026--Canopy Growth Corporation (\"Canopy Growth\", \"our\", \"we\" or the \"Company\") (TSX: WEED) (Nasdaq: CGC), a leading global company committed to bettering lives through cannabis, today announced the appointment of Sebastian Blöte as Country Manager for Germany, e",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:WOLF#8",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "Wolfspeed Announces Conditional 30-Year, $1.5 Billion Loan Commitment from U.S. Department of War to Advance Domestic Wide Bandgap Supply Chain",
+   "text": "DURHAM, N.C., October 07, 2026--Wolfspeed, Inc. (NYSE: WOLF) today announced it has received a conditional loan commitment letter from the U.S. Department of War (\"DoW\"), through its Office of Strategic Capital (\"OSC\"), for up to $1.5 billion of long-term financing to support the domestic developmen",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:SHOP.TO#6",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Shopify (SHOP) Laps the Stock Market: Here's Why",
+   "text": "In the latest trading session, Shopify (SHOP) closed at $164.14, marking a +2.52% move from the previous day.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:PG#19",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Procter & Gamble (PG) Debuts New Leave In Hair Treatment",
+   "text": "Pantene, a Procter & Gamble (NYSE:PG) brand, has introduced a new leave-in treatment called Cream to Mist in partnership with Abbey Yung. The Cream to Mist product was co-created with Yung in her role as a certified trichologist and viral hair advocate. Cream to Mist targets consumers who want hairc",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:PG#7",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Would You Buy P&G at this Valuation?",
+   "text": "The Procter & Gamble Company (NYSE:PG) is the kind of business investors usually look at when they want stability rather than rapid growth. The company sells products people use every day across beauty, grooming, health care, fabric and home care, and baby, feminine, and family care. Its brands incl",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:BYND#1",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "Beyond Meat® Debuts Phytosphere™ Portfolio",
+   "text": "Company launches new, comprehensive nutrition platform featuring powders, bars, beverages, and center-of-plate offerings Beyond Meat Debuts Phytosphere Portfolio Company launches new, comprehensive nutrition platform featuring powders, bars, beverages, and center-of-plate offerings EL SEGUNDO, Calif",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:PG#6",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Procter & Gamble Company (The) (PG) Is a Trending Stock: Facts to Know Before Betting on It",
+   "text": "Zacks.com users have recently been watching P&G (PG) quite a bit. Thus, it is worth knowing the facts that could determine the stock's prospects.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:WOLF#10",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "US Agrees to Loan for Chipmaker That Went Bankrupt Last Year",
+   "text": "The US Defense Department pledged to issue a conditional loan to Wolfspeed Inc., the chipmaker that filed for bankruptcy last year, for as much as $1.5 billion to support the development of materials that the firm described as key to national security.",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:WEED.TO#18",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Can Canopy Growth Survive Another 5 Years?",
+   "text": "The company is still burning through cash, and its outlook doesn't look all that great.",
+   "label": "negative"
+  },
+  {
+   "id": "fresh:WEED.TO#7",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Canopy Growth Agrees UK Supply Deal for Four Medical Cannabis Strains",
+   "text": "Canopy Growth Corporation (NASDAQ:CGC) has announced an agreement with GROW Group U. K.",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:BYND#3",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "Beyond Meat expands into powders, bars with “phytosphere” platform",
+   "text": "The new “integrated nutrition platform” comprises powders, snack bars, beverages and \"centre-of-plate\" products.",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:WOLF#2",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "Wolfspeed Expands 200 mm Silicon Carbide Portfolio with New Premium Power Substrates",
+   "text": "DURHAM, N.C., September 27, 2026--Wolfspeed, Inc. (NYSE: WOLF), a global leader in silicon carbide (SiC) technology, today announced the commercial availability of its new Premium 200 mm n-type silicon carbide substrate, expanding its 200 mm SiC materials portfolio with a higher-quality starting mat",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:BYND#9",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "Why Beyond Meat (BYND) Shares Are Getting Obliterated Today",
+   "text": "Shares of plant-based protein company Beyond Meat (NASDAQ:BYND) fell 14.1% in the afternoon session after the company agreed to retire about $15 million of convertible notes in exchange for stock.",
+   "label": "negative"
+  },
+  {
+   "id": "fresh:BYND#11",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "US judge cuts Beyond Meat trademark penalty",
+   "text": "The case dates to 2022, with Sonate alleging Beyond Meat’s ad campaign with Dunkin’ Donuts was likely to confuse consumers.",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:WEED.TO#11",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Canopy Growth Announces Adjournment of 2026 Annual General and Special Meeting Due to Lack of Quorum",
+   "text": "",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:PG#3",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "3 CPGs discuss automation, sourcing and logistics risks",
+   "text": "At a Barclays conference this month, Colgate-Palmolive and Kimberly-Clark flagged rising material and freight costs, while Procter & Gamble gave a Supply Chain 3.0 update.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:PG#8",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "This Dividend King Is 18.5% Below Its All-Time High and Yields 3%. Is This a Real Opportunity or a Value Trap?",
+   "text": "Procter & Gamble is trading at one of its highest dividend yields in years.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:SHOP.TO#4",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "3 Reasons Growth Investors Will Love Shopify (SHOP)",
+   "text": "Shopify (SHOP) is well positioned to outperform the market, as it exhibits above-average growth in financials.",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:PG#20",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "P&G AND THE McLAREN MASTERCARD FORMULA 1 TEAM ANNOUNCE PARTNERSHIP TO DRIVE CONSUMER ENGAGEMENT ACROSS ASIA PACIFIC",
+   "text": "The Procter & Gamble Company (NYSE: PG) today announced a partnership with McLaren Racing to engage Formula 1 fans across Asia Pacific. Unveiled ahead of the Singapore Grand Prix, the collaboration brings together two organisations committed to innovation, performance and creating meaningful connect",
+   "label": "positive"
+  },
+  {
+   "id": "fresh:SHOP.TO#3",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Shopify vs. Uber Technologies: Which Technology Stock Is a Better Buy in 2026?",
+   "text": "Shopify trades at an 80x forward P/E versus Uber's 20x, but their paths to profitability, software versus logistics, tell a different story about risk and growth.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:WEED.TO#12",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Canopy Growth Corporation (CGC) Rises Higher Than Market: Key Facts",
+   "text": "Canopy Growth Corporation (CGC) closed at $0.94 in the latest trading session, marking a +1.45% move from the prior day.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:SHOP.TO#8",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Croissant Pay Expands to Shopify Checkout and In-Store, With SIMKHAI Among the First Brands Live",
+   "text": "NEW YORK & NASHVILLE, Tenn., October 07, 2026--Croissant, a shopping and rewards app for luxury fashion, today announced that Croissant Pay is now available in Shopify Checkout and at the register through Shopify POS and all other POS systems. Fashion brand SIMKHAI is among the first to offer it thr",
+   "label": "unrelated"
+  },
+  {
+   "id": "fresh:WOLF#6",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "These 3 Short-Squeeze Candidates Have Catalysts, But Their Risks Are Just as Large",
+   "text": "Ondas Holdings, Wolfspeed and Xponential Fitness carry heavy short interest and bearish analyst sentiment, but each shows potential catalysts that could trigger a short squeeze for contrarian investors.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:PG#4",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Procter & Gamble (PG) Launches Its First Trichologist Co Created Hair Product",
+   "text": "Procter & Gamble (NYSE:PG) brand Pantene has introduced a new Cream to Mist hair product co-created with a certified trichologist and viral hair influencer. The launch centers on a cream formula that transforms into a fine mist designed to deliver intense hydration across a wide range of hair types.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:BYND#2",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "If You Invested $10,000 in Beyond Meat Stock During Its IPO, You’d Have Just $150 Today",
+   "text": "When Beyond Meat went public in 2019, investors gobbled up shares. But the company's been struggling ever since. So, what went wrong?",
+   "label": "negative"
+  },
+  {
+   "id": "fresh:WEED.TO#4",
+   "set": "fresh",
+   "company": "Canopy Growth",
+   "ticker": "WEED.TO",
+   "headline": "Here is What to Know Beyond Why Canopy Growth Corporation (CGC) is a Trending Stock",
+   "text": "Canopy Growth (CGC) has received quite a bit of attention from Zacks.com users lately. Therefore, it is wise to be aware of the facts that can impact the stock's prospects.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:SHOP.TO#1",
+   "set": "fresh",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Shopify to Announce Third-Quarter 2026 Financial Results",
+   "text": "",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:WOLF#14",
+   "set": "fresh",
+   "company": "Wolfspeed",
+   "ticker": "WOLF",
+   "headline": "Helen Of Troy Posts Upbeat Q2 Earnings, Joins Pacira Biosciences, Wolfspeed And Other Big Stocks Moving Higher On Thursday",
+   "text": "U.S. stocks fell, while Helen of Troy jumped 15.5% on strong earnings and raised guidance. Pacira soared 44.1% on Viatris acquisition news.",
+   "label": "unrelated"
+  },
+  {
+   "id": "fresh:PG#13",
+   "set": "fresh",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Johnson & Johnson or Procter & Gamble: If I Could Only Own 1 Dividend King for 20 Years, This Is It",
+   "text": "Both Dividend Kings trade at nearly identical valuations, so the real question becomes which one can actually keep raising its payout for two decades without flinching. The answer comes down to three factors most investors overlook entirely.",
+   "label": "neutral"
+  },
+  {
+   "id": "fresh:BYND#8",
+   "set": "fresh",
+   "company": "Beyond Meat",
+   "ticker": "BYND",
+   "headline": "Beyond Meat Says Court Cut Trademark Damages Award To $37,500 From $23.5M, Entered $15,437,500 Judgment Including $15.4M Profit Disgorgement",
+   "text": "https://www.sec.gov/ix?doc=/Archives/edgar/data/0001655210/000165521026000064/bynd-20260918.htm",
+   "label": "positive"
+  },
+  {
+   "id": "third:T00",
+   "set": "third",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "Jamie Dimon Warns AI Cyber Risks Are ‘Real’ As JPMorgan Banks Anthropic And The AI Boom",
+   "text": "Jamie Dimon worries about escalating cyber risks from artificial intelligence, even as the bank he oversees, JPMorgan Chase & Co., continues to finance the burgeoning tech. The bank boss pointed to Anthropic and its Mythos AI model, emphasizing growing concerns...",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T01",
+   "set": "third",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Morgan Stanley Bullish on Shopify Stock as Agentic AI Shopping Trend Gains Momentum",
+   "text": "Key Stats for Shopify StockPrice change for Shopify stock in the last 6 months: 25%$SHOP Stock Price as of Sep. 29: $14852-Week High: $182$SHOP Stock Price Target: $173What Happened?Shopify (NASDAQ: SHOP:NASDAQ) shares rose almost 3% after Morgan Stanley analyst Adam Wood reiterated his positive vie",
+   "label": "positive"
+  },
+  {
+   "id": "third:T02",
+   "set": "third",
+   "company": "Microsoft",
+   "ticker": "MSFT",
+   "headline": "Microsoft (MSFT) Could Be 21% Above Fair Value After ClickHouse Expansion",
+   "text": "Microsoft (MSFT) just deepened its ties with ClickHouse, extending the analytics partner’s presence across Microsoft Fabric, OneLake, Azure and the Microsoft Marketplace. For anyone tracking Microsoft stock, this alliance sharpens the firm’s broader data and AI story. Recent price action has been ch",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T03",
+   "set": "third",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Winners And Losers Of Q2: Procter & Gamble (NYSE:PG) Vs The Rest Of The Household Products Stocks",
+   "text": "Looking back on household products stocks’ Q2 earnings, we examine this quarter’s best and worst performers, including Procter & Gamble (NYSE:PG) and its peers.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T04",
+   "set": "third",
+   "company": "Microsoft",
+   "ticker": "MSFT",
+   "headline": "Microsoft's \"Muse\" Moment Is Here (Rating Upgrade)",
+   "text": "",
+   "label": "positive"
+  },
+  {
+   "id": "third:T05",
+   "set": "third",
+   "company": "Toronto-Dominion Bank",
+   "ticker": "TD.TO",
+   "headline": "DigitalBridge, L&G and TD Asset Management Inc. acquire VodafoneZiggo Towers to Create Independent European Tower Platform",
+   "text": "",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T06",
+   "set": "third",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "MoEngage Launches New Customer Engagement Platform for Shopify: Revolutionizing User Experience with Real-time Integration",
+   "text": "MoEngage, the agentic engagement platform trusted by more than 1,350 brands including Loblaws, Poshmark, Nestlé, and Farfetch, today announced MoEngage for Shopify, a native integration that unifies a merchant's Shopify data across 16+ channels including email, SMS, app and web push, WhatsApp, and o",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T07",
+   "set": "third",
+   "company": "Microsoft",
+   "ticker": "MSFT",
+   "headline": "Alphabet Slips After Gemini 4 Argon Launch as Tech Sector Rises; Microsoft Holds Steady, Amazon Dips",
+   "text": "On Wednesday, Alphabet‘s (NASDAQ:GOOGL) Google unit unveiled Gemini 4 Argon, a frontier AI model aimed directly at enterprise work, and the market is declining to pay up for the announcement. Shares of Alphabet are slipping 2% to $338.85 as the session unfolds, a move that runs against a stronger te",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T08",
+   "set": "third",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan Chase Has One of Banking’s Best Moats. Here’s What the Stock is Worth",
+   "text": "JPMorgan Chase & Co. (NYSE:JPM) has something most banks would love to have: scale, but also the ability to actually use that scale to its advantage. The bank is involved in almost every corner of financial services. It has consumer banking, credit cards, payments, commercial banking, investment ban",
+   "label": "positive"
+  },
+  {
+   "id": "third:T09",
+   "set": "third",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Meta's Muse AI: Good or Bad for E-Commerce? Shopify and Amazon Are Taking Opposite Approaches.",
+   "text": "The popular AI agent can do your shopping for you as long as you don't shop on Amazon.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T10",
+   "set": "third",
+   "company": "Microsoft",
+   "ticker": "MSFT",
+   "headline": "Microsoft Just Hiked Its Dividend by 8%. How to Play the Stock Here.",
+   "text": "Microsoft raised its quarterly dividend by 8% to $0.98 per share on Sept. 15, marking its 24th straight year of increases.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T11",
+   "set": "third",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "2 Retirement Income Picks I'm Accumulating On The Pullback",
+   "text": "2 Retirement Income Picks I'm Accumulating On The Pullback, in the article, I flesh out these two opportunities in more detail. Read now.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T12",
+   "set": "third",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Enbridge (TSX:ENB) Stock Looks About Right Following Its 83% Run",
+   "text": "Enbridge has delivered a powerful 83.4% share price gain over the past three years, which naturally puts the spotlight on what investors are paying for its earnings today. With that kind of run in the rear-view mirror, the live question is whether the current price still lines up with the profit eng",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T13",
+   "set": "third",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan Chase & Co. (JPM) Reports Next Week: Wall Street Expects Earnings Growth",
+   "text": "JPMorgan Chase & Co. (JPM) possesses the right combination of the two key ingredients for a likely earnings beat in its upcoming report. Get prepared with the key expectations.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T14",
+   "set": "third",
+   "company": "Royal Bank of Canada",
+   "ticker": "RY.TO",
+   "headline": "Royal Bank of Canada Highlights 18% ROE, HSBC Synergies and U.S. Growth",
+   "text": "Royal Bank Of Canada (NYSE:RY) Chief Financial Officer Katherine Gibson said the bank has made progress toward the strategic and financial objectives outlined at its Investor Day, citing growth across Canadian and global businesses, improved profitability and cost discipline. Speaking at a Barclays",
+   "label": "positive"
+  },
+  {
+   "id": "third:T15",
+   "set": "third",
+   "company": "Royal Bank of Canada",
+   "ticker": "RY.TO",
+   "headline": "Is Royal Bank Of Canada (TSX:RY) Fully Priced After A 168% Run?",
+   "text": "Royal Bank of Canada has delivered a powerful multiyear run, and the stock now sits at a level where every dollar of investor capital is being asked to trust how efficiently the bank can keep compounding its own. With that backdrop, the key issue is whether the current share price is properly aligne",
+   "label": "negative"
+  },
+  {
+   "id": "third:T16",
+   "set": "third",
+   "company": "Royal Bank of Canada",
+   "ticker": "RY.TO",
+   "headline": "Here’s How Much You Would Have Made Owning Royal Bank of Canada Stock In The Last 5 Years",
+   "text": "Royal Bank of Canada (NYSE:RY) has outperformed the market over the past 5 years by 3.97% on an annualized basis producing an average annual return of 15.75%. Currently, Royal Bank of Canada has a market capitalization",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T17",
+   "set": "third",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Why Wall Street is choosing Coca-Cola stock over PepsiCo ahead of earnings",
+   "text": "Yahoo Finance Executive Editor Brian Sozzi breaks down the growing market divergence between Coca-Cola (KO) and PepsiCo (PEP), highlighting how surging Diet Coke sales, GLP-1 weight-loss drugs, and rising competition from brands like OLIPOP are impacting PepsiCo's snack and beverage business.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T18",
+   "set": "third",
+   "company": "Toronto-Dominion Bank",
+   "ticker": "TD.TO",
+   "headline": "TD Bank unveils new $10B share buyback",
+   "text": "Toronto-Dominion Bank (TSX:TD) plans to buy back up to $10 billion worth of its shares in a new program expected to wrap up by July 2027. The bank will repurchase up to 61 million shares, representing up to 3.74% of its nearly 1.63 million common shares issued and outstanding as of August...",
+   "label": "positive"
+  },
+  {
+   "id": "third:T19",
+   "set": "third",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "JPMorgan Chase: Expect Q3 Earnings To Reinforce Buy Thesis",
+   "text": "JPMorgan (JPM) rated a buy: durable NII growth, resilient credit, 23% ROTCE and $50B buybacks.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T20",
+   "set": "third",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "This Analyst Just Upgraded Procter & Gamble Stock. Here's Why.",
+   "text": "Evercore ISI issues a bullish research note on Procter & Gamble stock. Here’s why the firm sees PG shares rallying through the remainder of 2026.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T21",
+   "set": "third",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "History Says This Is the Amount of Yearly Dividend Income a $25,000 Investment in Coca-Cola Stock Could Generate By 2036.",
+   "text": "Coca-Cola has a multi-decade history of growing its dividend.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T22",
+   "set": "third",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Energy Transfer: The Bastion Of Consistency",
+   "text": "Energy Transfer is a Strong Buy: 6.66% yield, 19 straight hikes, fee-based growth, and EV/EBITDA discount. Click for more on ET stock.",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T23",
+   "set": "third",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Shopify's money transmitter licences could lift 2028 operating income, Jefferies says",
+   "text": "Shopify Inc (TSX:SH., NYSE:SHOP)'s pursuit of nationwide money transmitter licensure could add roughly 2% to gross profit and 5% to operating income in 2028, according to an analysis from Jefferies. In a research note, the firm called the licences a “logical next step” in the evolution of...",
+   "label": "positive"
+  },
+  {
+   "id": "third:T24",
+   "set": "third",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "How Much Do You Really Need Invested in Dividend Stocks to Replace a $25,000 Income?",
+   "text": "The math behind living off dividends exposes a brutal tradeoff: every percentage point of extra yield you chase to shrink your required capital brings a hidden cost that most income investors never price in before sizing their positions.",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T25",
+   "set": "third",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "P&G to Webcast the Procter & Gamble 2026 Virtual Annual Meeting of Shareholders October 13",
+   "text": "CINCINNATI, October 06, 2026--The Procter & Gamble Company (NYSE: PG) will webcast its 2026 Annual Meeting of Shareholders, held virtually via a live audio webcast on Tuesday, October 13, 2026, at 9:00 a.m. Eastern Time at: www.virtualshareholdermeeting.com/PG2026.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T26",
+   "set": "third",
+   "company": "Toronto-Dominion Bank",
+   "ticker": "TD.TO",
+   "headline": "TD Bank Targets 100 U.S. Branches as AML Remediation Continues",
+   "text": "Toronto Dominion Bank (NYSE:TD) plans to open 100 new U.S. branches by the end of calendar 2028, subject to regulatory approval, as the bank resumes an expansion strategy that was paused during its anti-money-laundering remediation efforts. Leo Salom, TD Bank’s Head of U.S. Banking, said the expans",
+   "label": "positive"
+  },
+  {
+   "id": "third:T27",
+   "set": "third",
+   "company": "JPMorgan Chase",
+   "ticker": "JPM",
+   "headline": "This Senator Just Sold Up To $145K In JPMorgan Chase Stock",
+   "text": "October 1, 2026 records indicate that Senator Sheldon Whitehouse filed a sale of JPMorgan Chase (NYSE:JPM), valued between $33,005 and $145,000. According to the October filing, the transaction occurred on September 4,",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T28",
+   "set": "third",
+   "company": "Royal Bank of Canada",
+   "ticker": "RY.TO",
+   "headline": "Royal Bank of Canada announces NVCC subordinated debenture issue",
+   "text": "",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T29",
+   "set": "third",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Wall Street Lunch: Yields Hit Financial Crisis Highs As Inflation Raises Fed Hike Odds",
+   "text": "Our top story so far, treasury yields are on the march higher, hitting levels not seen since the Financial Crisis.",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T30",
+   "set": "third",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Trump's Surgeon General Pick Has Tobacco, Cola Stocks In Portfolio Even as Robert Kennedy Jr. Wages War On Sugary Drinks, Processed Food",
+   "text": "President Trump's Surgeon General nominee Dr. Nicole Saphier disclosed investments in Philip Morris and other companies, agreeing to divest if confirmed.",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T31",
+   "set": "third",
+   "company": "Royal Bank of Canada",
+   "ticker": "RY.TO",
+   "headline": "Royal Bank Of Canada And 2 More Canadian Dividend Stocks",
+   "text": "Global bond markets recently steadied after a sharp sell off that pushed borrowing costs to levels not seen since 2002. Higher yields make guaranteed income from bonds more tempting, which means Canadian investors now need a clearer reason to own equities for cash flow. That is where solid dividend ",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T32",
+   "set": "third",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Enbridge Inc (ENB) is Attracting Investor Attention: Here is What You Should Know",
+   "text": "Recently, Zacks.com users have been paying close attention to Enbridge (ENB). This makes it worthwhile to examine what the stock has in store.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T33",
+   "set": "third",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Here Are Tuesday’s Top Wall Street Analyst Research Calls: Borg Warner, Boyd Gaming, JetBlue, Lattice Semiconductor, Lockheed Martin, Nike, Northrop Grumman, Procter & Gamble, SPX Technologies, and More",
+   "text": "Pre-Market Stock Futures: Futures are trading higher after we started off the first full trading week of the 4th quarter in solid style, as all major indices finished the day higher despite interest rates continuing to tick higher. Technology led the way, and the tech-heavy Nasdaq responded, closing",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T34",
+   "set": "third",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "Jim Cramer Flags PepsiCo’s (PEP) Frito-Lay Problem While Pointing to Procter & Gamble (PG)",
+   "text": "Answering a caller’s query about PepsiCo, Inc. (NASDAQ:PEP) during the September 28 episode of Mad Money, Jim Cramer remarked: I actually had a conversation with Jeff Marks, who runs the Charitable Trust with me, about PepsiCo. I felt that it would be beneficial to, when it got to 5%, maybe take a p",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T35",
+   "set": "third",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "PG's Baby Care Regains China Lead on Premium Innovation Momentum",
+   "text": "Procter & Gamble's China Baby Care regains as premium innovation drives double-digit organic sales growth, share gains and a return to the No. 1 position.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T36",
+   "set": "third",
+   "company": "Toronto-Dominion Bank",
+   "ticker": "TD.TO",
+   "headline": "TD Bank (TSX:TD) Stock May Be 19% Undervalued After Record Earnings",
+   "text": "Toronto-Dominion Bank has delivered a 147.6% share price gain over the past 5 years, which puts a spotlight on whether the current valuation lines up with the returns it earns on its capital. With fresh headlines around record profitability, large capital commitments and new technology partnerships,",
+   "label": "positive"
+  },
+  {
+   "id": "third:T37",
+   "set": "third",
+   "company": "Microsoft",
+   "ticker": "MSFT",
+   "headline": "Is Microsoft Stock Paying You Enough For The Swings?",
+   "text": "You may hold Microsoft (MSFT) stock, or be about to, after its shares jumped more than a third from July through September. If you also hold funds that follow the market, you feel every Microsoft swing on top of theirs. Did five years of holding Microsoft beat simply owning the S&P 500 index.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T38",
+   "set": "third",
+   "company": "Royal Bank of Canada",
+   "ticker": "RY.TO",
+   "headline": "Royal Bank of Canada announces NVCC AT1 Limited Recourse Capital Notes issue",
+   "text": "",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T39",
+   "set": "third",
+   "company": "Toronto-Dominion Bank",
+   "ticker": "TD.TO",
+   "headline": "Toronto Dominion Bank (TSX:TD) Could Be 20% Undervalued On Its $150b Canada Push",
+   "text": "Toronto-Dominion Bank (TSX:TD) just put a CA$150b commitment on the table for new lending and financing across energy, critical minerals, defence, digital and AI, and infrastructure projects in Canada. Toronto-Dominion Bank’s CA$167.72 share price sits on top of a strong year-to-date share price ret",
+   "label": "positive"
+  },
+  {
+   "id": "third:T40",
+   "set": "third",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "My Biggest Bet: 3 Dividend Investments Boosted By 2 Major Macro Tailwinds",
+   "text": "This article discusses 3 high-conviction investments, overweighting one portfolio to capture two major macro tailwinds, with key risks outlined. Click for more.",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T41",
+   "set": "third",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "Coca-Cola refreshes soda lineup amid GLP-1 consumer shift",
+   "text": "A familiar drinks giant is betting on changing appetites.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T42",
+   "set": "third",
+   "company": "Microsoft",
+   "ticker": "MSFT",
+   "headline": "Microsoft President Brad Smith: AI Systems Need an ‘Emergency Brake’",
+   "text": "Microsoft Vice Chair and President Brad Smith says some AI regulation is inevitable and argues that advanced AI systems should have an “emergency brake” that allows them to be slowed or shut down. In a conversation with WSJ Leadership Institute President Alan Murray, Smith explains why AI developers",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T43",
+   "set": "third",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "Enbridge: Growth Mode, Stable EBITDA Expansion, 6% Yield",
+   "text": "Enbridge (ENB) outlook: dividend growth, 1.39x coverage, Permian pipeline upside & renewables expansion.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T44",
+   "set": "third",
+   "company": "Enbridge",
+   "ticker": "ENB.TO",
+   "headline": "UGP or ENB: Which Is the Better Value Stock Right Now?",
+   "text": "UGP vs. ENB: Which Stock Is the Better Value Option?",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T45",
+   "set": "third",
+   "company": "Microsoft",
+   "ticker": "MSFT",
+   "headline": "OpenAI’s Future IPO Keeps Me Buying Microsoft",
+   "text": "Microsoft holds a stake in OpenAI that no public market has ever priced, and one investor argues that gap between the stock and the business is exactly where the opportunity lives.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T46",
+   "set": "third",
+   "company": "Coca-Cola",
+   "ticker": "KO",
+   "headline": "KO vs. PEP: 64 and 54 Straight Years of Raises. Which Dividend King Will Crush the Other Over the Next Decade?",
+   "text": "Key TakeawaysPepsiCo yields 4. 6% compared with Coca-Cola’s 2.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T47",
+   "set": "third",
+   "company": "Procter & Gamble",
+   "ticker": "PG",
+   "headline": "KMB vs. PG: 54 and 70 Straight Years of Raises. Only One Covers Its Dividend Comfortably",
+   "text": "Key TakeawaysKimberly-Clark and Procter & Gamble have raised their dividends for 54 and 70 straight years, and yield about 5. 3% and 3.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T48",
+   "set": "third",
+   "company": "Toronto-Dominion Bank",
+   "ticker": "TD.TO",
+   "headline": "/R E P E A T -- MEDIA ADVISORY - TD Bank Group Executive to Present at the Barclays Global Financial Services Conference/",
+   "text": "",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T49",
+   "set": "third",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Apple Could Keep Selling iPhones and Still Lose a Key AI Battle",
+   "text": "Bank of America says AI agents such as Meta's Muse could weaken Apple's grip on the valuable transactions that begin on the iPhone.",
+   "label": "unrelated"
+  },
+  {
+   "id": "third:T50",
+   "set": "third",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Shopify's Merchant Solutions Growth Accelerates: More Upside Ahead?",
+   "text": "SHOP's Merchant Solutions revenues surge 37% as higher GMV, deeper payments penetration and global expansion strengthen its transaction base.",
+   "label": "positive"
+  },
+  {
+   "id": "third:T51",
+   "set": "third",
+   "company": "Shopify",
+   "ticker": "SHOP.TO",
+   "headline": "Stock Market Today: Dow Gains, Nasdaq Hits New High; Shopify, Brazil Plays Offer Entries",
+   "text": "The Dow Jones index rises Monday. Brazil stocks soar on election results, with some clearing entries. SpaceX shines on the stock market today.",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T52",
+   "set": "third",
+   "company": "Royal Bank of Canada",
+   "ticker": "RY.TO",
+   "headline": "How Investors Are Reacting To Royal Bank of Canada (TSX:RY) Balancing New Debt Issuance With Dividend Hike",
+   "text": "Royal Bank of Canada recently completed several fixed-income deals, including CA$1.50 billion in fixed-to-floating subordinated NVCC notes due 2036 and CA$1.10 billion in fixed-to-floating Limited Recourse Capital Notes due 2086, while also lifting its quarterly dividend to CA$1.76 per share. Togeth",
+   "label": "neutral"
+  },
+  {
+   "id": "third:T53",
+   "set": "third",
+   "company": "Toronto-Dominion Bank",
+   "ticker": "TD.TO",
+   "headline": "TD LAUNCHES $150 BILLION FIVE-YEAR COMMITMENT TO ACCELERATE CANADA'S INVESTMENT SUPERCYCLE",
+   "text": "",
+   "label": "positive"
+  }
+ ]
+}
