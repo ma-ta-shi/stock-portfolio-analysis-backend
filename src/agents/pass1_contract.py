@@ -17,7 +17,7 @@ COMMON = {
     "assessment_summary": ("The agent's most important finding in 80 words", "Bu, Be, Ri, Tx (RSRCH, FUND), CA and Sh (the only Pass 1 text they see), API"),
     "analysis_confidence": ("The agent's own confidence in its conclusion", "Bu, Be, Ri, Tx, CA, Sh (reliability warnings and summary line); validators (confidence needs a caveat when data is flagged)"),
     "caveats": ("Specific data gaps and concerns", "Bu, Be, Ri, Tx (RSRCH, FUND); validators (confidence must be justified)"),
-    "risks": ("Evidence-cited risks, one to three", "Bu thesis_risks, Be downside_triggers and tail risk, Ri downside_scenarios (delivered 2026-10-07)"),
+    "risks": ("Evidence-cited risks, one to three", "Bu thesis_risks, Be downside_triggers, Ri downside_scenarios (delivered 2026-10-07)"),
     "narrative": ("The reasoning and synthesis, carrying the figures behind each claim", "Bu, Be, Ri, Tx (RSRCH, FUND), API"),
 }
 
@@ -56,9 +56,8 @@ PASS1_OUTPUT_CONTRACT: dict[str, dict[str, tuple[str, str]]] = {
         **COMMON,
         "structured_data.news_sentiment.overall": ("Overall tone of the news", _ALL_BUR),
         "structured_data.news_sentiment.sentiment_trend": ("Direction of the tone", _ALL_BUR),
-        "structured_data.news_sentiment.dominant_themes": ("The stories driving the news, each tied to a news ID the validator checks; kept after cutting it flipped labels in 3 of 15 runs (BB-107)", "none directly; the agent's own trend and tone judgements"),
         "structured_data.insider_activity_interpretation": ("What the insider net direction signals", _ALL_BUR),
-        "structured_data.contrarian_signals": ("Positioning or mood that cuts against the crowd (non-empty in 15 of 40 rows)", "none directly; kept with themes pending more evidence"),
+        "structured_data.contrarian_signals": ("Positioning or mood that cuts against the crowd (non-empty in 15 of 40 rows)", "none directly; kept as part of the agent's own tone and trend judgement"),
     },
     "macro_economist": {
         **COMMON,

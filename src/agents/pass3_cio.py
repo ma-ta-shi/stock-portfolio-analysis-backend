@@ -29,7 +29,7 @@ import json
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import compute_disagreement_score
-from agents.validators.cio import tail_risk_line, validate_cio_stage_a, validate_cio_stage_b
+from agents.validators.cio import validate_cio_stage_a, validate_cio_stage_b
 from data.schemas.data_bundle import DataBundle
 
 # The old embedded system_prompt (independently authored, diverged from the
@@ -119,7 +119,7 @@ def _advocate_entries(output: dict, label: str) -> list[tuple[str, list[str]]]:
     """One advocate's (Bull or Bear) Stage A content as (field, lines) entries, the first line being the
     value and any further lines its continuation. `label` must be "BULL" or "BEAR"; the two share almost
     everything but differ in a few field names/shapes (Bull's catalysts/valuation_argument vs Bear's
-    downside_triggers/tail_risk_assessment; Bull's alignment_with_researcher is a string, Bear's
+    downside_triggers; Bull's alignment_with_researcher is a string, Bear's
     agrees_with_researcher is a bool), matching the branching the reference pseudocode
     (format_advocate_for_cio) already uses for the same reason -- one shared function, not two
     near-duplicates. Rendered either one advocate at a time (build_advocate_summary) or both side by side
@@ -182,22 +182,6 @@ def _advocate_entries(output: dict, label: str) -> list[tuple[str, list[str]]]:
     else:
         if sd.get("downside_triggers"):
             entries.append(("downside_triggers", [json.dumps([t["trigger"] for t in sd["downside_triggers"]])]))
-        # 86bbt1k1p: Stage A's "Tail-risk cross-check" step explicitly requires comparing
-        # this against Risk Advisor's downside_scenarios -- the validator already
-        # numerically checks the CIO's answer against this same data (see run()'s
-        # tail_inputs_present/bear_tail_risk_level), but the model itself was never
-        # shown it to reason from.
-        tra = sd.get("tail_risk_assessment")
-        if isinstance(tra, dict):
-            entries.append((
-                "tail_risk_assessment",
-                [
-                    f"level={tra.get('tail_risk_level', 'N/A')} | "
-                    f"scenario: {tra.get('scenario', '')} | trigger: {tra.get('triggering_event', '')} | "
-                    f"evidence: {tra.get('evidence', '')} | supporting_pass1_agents: "
-                    f"{json.dumps(tra.get('supporting_pass1_agents', []))}"
-                ],
-            ))
         # 86bbt1k1p: Stage A's "Archetype check" step names this field directly. Bear's
         # schema uses agrees_with_researcher as a BOOL (Bull's equivalent is a string) --
         # normalized to the same agrees/disagrees vocabulary so the CIO doesn't have to
@@ -312,20 +296,6 @@ def build_risk_advisor_stage_a_summary(risk_output: dict | None) -> str:
     return "\n".join(lines)
 
 
-def tail_risk_inputs(pass2_outputs: dict) -> tuple[str | None, float | None]:
-    """(Bear's tail_risk_level, Risk Advisor's worst estimated_impact_pct), both from the payload rather
-    than from the CIO's own output. Shared by the user message (which shows the computed classification)
-    and the validator (which checks it)."""
-    bear_tra = (pass2_outputs.get("bear") or {}).get("structured_data", {}).get("tail_risk_assessment")
-    level = bear_tra.get("tail_risk_level") if isinstance(bear_tra, dict) else None
-    scenarios = (pass2_outputs.get("risk") or {}).get("risk_profile", {}).get("downside_scenarios") or []
-    impacts = [
-        s.get("estimated_impact_pct") for s in scenarios
-        if isinstance(s, dict) and isinstance(s.get("estimated_impact_pct"), (int, float))
-    ]
-    return level, (min(impacts) if impacts else None)
-
-
 def build_user_message(
     bundle: DataBundle,
     compressed_pass1: dict,
@@ -359,7 +329,6 @@ def build_user_message(
     # back here, even a "NOT AVAILABLE" placeholder -- Stage A shouldn't
     # reference Tax Strategist's existence at all, not just its content.
     lines.append(build_risk_advisor_stage_a_summary(pass2_outputs.get("risk")))
-    lines.append("\n" + tail_risk_line(*tail_risk_inputs(pass2_outputs)))
 
     if disagreement_category in ("split_decision", "high_conflict"):
         lines.append(f"\n⚠️ DISAGREEMENT CAP: category={disagreement_category}")
@@ -403,7 +372,6 @@ def _build_general_outlook_summary(stage_a_result: dict | None) -> str:
         f"bull_case_assessment: verdict={bull_a.get('verdict', 'N/A')} | {bull_a.get('engagement', '')}\n"
         f"bear_case_assessment: verdict={bear_a.get('verdict', 'N/A')} | {bear_a.get('engagement', '')}\n"
         f"risk_reward_consumed_as: {r.get('risk_reward_consumed_as', 'N/A')}\n"
-        f"tail_risk_cross_check: {r.get('tail_risk_cross_check', 'N/A')} | note: {r.get('tail_risk_note', '')}\n"
         f"key_decision_factors:\n{kdf_lines}\n"
         f"disagreement_score: {r.get('disagreement_score', 'N/A')} | "
         f"category: {r.get('disagreement_category', 'N/A')}"
@@ -538,17 +506,10 @@ class CIORunner(BaseRunner):
         bear_conf = pass2_outputs.get("bear", {}).get("confidence", 0) if pass2_outputs.get("bear") else 0
         disagreement_score, disagreement_category = compute_disagreement_score(bull_conf, bear_conf)
 
-        # Real inputs for the tail-risk cross-check (86bbuhk82 item 2) -- both
-        # tail_inputs_present and the numeric mapping's two values come from the actual
-        # payload, not the CIO's own output, so they're computed here and handed to the
-        # validator rather than inferred from what the CIO claims.
-        bear_tail_risk_level, risk_worst_impact = tail_risk_inputs(pass2_outputs)
-        tail_inputs_present = bear_tail_risk_level is not None and risk_worst_impact is not None
-
         # Risk Advisor Stage A's own risk_reward_ratio, for the risk_reward_consumed_as
         # cross-check (prompt rule 11) -- the validator param existed but was never wired here,
-        # so that rule never fired against real output. Same shape as tail_inputs_present above:
-        # the comparison value lives in the payload, not the CIO's own output.
+        # so that rule never fired against real output. The comparison value lives in the
+        # payload, not the CIO's own output.
         risk_reward_source = (pass2_outputs.get("risk") or {}).get("risk_profile", {}).get("risk_reward_ratio")
 
         user_msg = build_user_message(
@@ -578,10 +539,7 @@ class CIORunner(BaseRunner):
             lambda out: validate_cio_stage_a(
                 out,
                 disagreement_category,
-                tail_inputs_present=tail_inputs_present,
                 risk_reward_source=risk_reward_source,
-                bear_tail_risk_level=bear_tail_risk_level,
-                risk_worst_estimated_impact_pct=risk_worst_impact,
             ),
             max_tokens=5000,
             temperature=0.0,

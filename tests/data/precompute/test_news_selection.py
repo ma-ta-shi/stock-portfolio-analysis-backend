@@ -119,7 +119,7 @@ def test_the_selection_is_deterministic():
 
 
 def test_no_articles_gives_empty_lists():
-    assert select_news([]) == {"scored": [], "shown": [], "researcher": [], "fetched": 0}
+    assert select_news([]) == {"scored": [], "shown": [], "scored_days": [], "researcher": [], "fetched": 0}
 
 
 def test_items_naming_the_company_rank_before_round_ups_that_only_list_the_ticker():
@@ -218,3 +218,31 @@ def test_shown_is_never_larger_than_scored_even_if_the_sizes_are_set_the_wrong_w
 
     scored_ids = {id(a) for a in result["scored"]}
     assert len(result["shown"]) == 2 and all(id(a) in scored_ids for a in result["shown"])
+
+
+# ---------- the listed headlines are chosen after scoring (ledger BB-111) ----------
+
+
+def test_pick_shown_skips_articles_scored_as_unrelated_and_takes_the_next_best_of_the_day():
+    from data.precompute.news_selection import pick_shown
+
+    day = [{"id": f"N{i}", "date": datetime(2026, 9, 10, 12 - i)} for i in range(5)]
+    labels = {"N0": "unrelated", "N1": "positive", "N2": "unrelated", "N3": "neutral", "N4": "negative"}
+    assert [a["id"] for a in pick_shown([day], labels, shown_per_day=2)] == ["N3", "N1"]  # oldest first
+
+
+def test_pick_shown_without_labels_is_the_same_as_choosing_before_scoring_and_a_day_of_only_unrelated_shows_nothing():
+    from data.precompute.news_selection import pick_shown
+
+    day1 = [{"id": "A", "date": datetime(2026, 9, 1)}, {"id": "B", "date": datetime(2026, 9, 1, 1)}, {"id": "C", "date": datetime(2026, 9, 1, 2)}]
+    day2 = [{"id": "D", "date": datetime(2026, 9, 2)}]
+    assert [a["id"] for a in pick_shown([day1, day2], {})] == ["A", "B", "D"]
+    assert [a["id"] for a in pick_shown([day1, day2], {"D": "unrelated"})] == ["A", "B"]
+
+
+def test_select_news_returns_the_scored_articles_grouped_by_day_in_rank_order():
+    articles = _busy_day(1, 20) + _busy_day(2, 20)
+    result = select_news(articles, scored_per_day=6, shown_per_day=2)
+    assert [len(d) for d in result["scored_days"]] == [6, 6]
+    assert {id(a) for a in result["shown"]} <= {id(a) for d in result["scored_days"] for a in d[:2]}  # shown is each day's first two
+    assert {id(a) for d in result["scored_days"] for a in d} == {id(a) for a in result["scored"]}

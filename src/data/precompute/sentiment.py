@@ -47,6 +47,7 @@ import structlog
 # an accidental crossing of the boundary the comment below is about.
 from agents.capture import CaptureContext, record_call
 from data.degradation import LLM_REQUEST_FAILED, SENTIMENT_UNSCORED
+from data.precompute.headline_rules import rule_label
 from data.degradation import report as report_degradation
 
 logger = structlog.get_logger(__name__)
@@ -89,7 +90,19 @@ _NUM_CTX = 8192  # Ollama silently truncates context to its own small default if
 # is headroom, not a tight fit, and stays on the flat part of the latency-vs-num_ctx
 # curve (confirmed live: cost is flat from 2048 through 32768, only jumps at the
 # model's full 131072).
-_VALID_LABELS = ("positive", "negative", "neutral")
+_VALID_LABELS = ("positive", "negative", "neutral", "unrelated")
+# Measured 2026-10-09 against 63 headlines labelled by hand without sight of the model's labels (ledger BB-111): the old prompt (no
+# company named, no label definitions, sampling at the model's default temperature of 1) matched 54 to 60% (3 repeats); naming the
+# company, defining the four labels and scoring at temperature 0 matched 71%, and 78% against 40 fresh headlines (old prompt 57 to 62%).
+# The errors that remained were borderline items (a routine product launch, a refinancing), not reversals of direction.
+_COMPANY_FALLBACK = "the company these items are about"
+_RUBRIC = """say how it affects the stock of {company}. Choose exactly one label:
+- positive: favourable for {company}'s business or share price on the facts reported, such as results or guidance ahead of expectations, a contract or customer win, an investment or expansion, a new partnership, a rating or price-target upgrade or raise, a buyback or dividend increase.
+- negative: unfavourable for {company} on the facts reported, such as results or guidance below expectations, a production cut, a rating or price-target downgrade or cut, a strike, a lawsuit or fine, a lost customer, a warning.
+- neutral: no clear effect on {company}: a scheduled event (earnings date, webcast, transcript), a routine daily price recap ("closed at $X, up 1%"), a hold or reiterated rating, commentary, a comparison or a stock list with no new facts, or news that is truly mixed (one measure ahead, another behind).
+- unrelated: the item is not about {company}; its name appears only in passing (a story from a forum or a customer, another company's news, a rival's or a partner's story, or a general list).
+Judge the facts, not the mood of words like "falls", "soars" or "struggles". Judge each item on its own."""
+_TEMPERATURE = 0  # the model's default (1) made labels move between runs of the same input
 
 # Headlines scored per model call. One call per article was ~250 calls (~16 minutes of model
 # time, about 65% of ALL model time in a run) for a busy ticker; the scored sample is now
@@ -111,14 +124,15 @@ _FORMAT_SCHEMA = {
 }
 
 
-def _batch_prompt(items: list[dict]) -> str:
+def _batch_prompt(items: list[dict], company: str | None = None) -> str:
     lines = []
     for number, item in enumerate(items, start=1):
         text = (item.get("text") or "")[:_BATCH_TEXT_CHARS]
         lines.append(f"{number}. {item['headline']}" + (f" | {text}" if text else ""))
     return (
-        "Classify the sentiment of each news item below as positive, negative, or neutral "
-        f"(judge each item on its own). Return exactly {len(items)} labels, in the order of the items.\n\n"
+        "For each news item below, "
+        + _RUBRIC.format(company=company or _COMPANY_FALLBACK)
+        + f" Return exactly {len(items)} labels, in the order of the items.\n\n"
         + "\n".join(lines)
     )
 
@@ -138,11 +152,11 @@ def _batch_format_schema(count: int) -> dict:
     }
 
 
-def _prompt(headline: str, text: str) -> str:
+def _prompt(headline: str, text: str, company: str | None = None) -> str:
     body = f"\n\n{text}" if text else ""
     return (
-        "Classify the sentiment of this news headline as positive, negative, or neutral."
-        f"\n\nHeadline: {headline}{body}"
+        "For the news item below, " + _RUBRIC.format(company=company or _COMPANY_FALLBACK)
+        + f"\n\nHeadline: {headline}{body}"
     )
 
 
@@ -151,6 +165,7 @@ async def _score_article(
     headline: str,
     text: str,
     *,
+    company: str | None = None,
     capture: CaptureContext | None = None,
 ) -> str | None:
     """Returns "positive"|"negative"|"neutral", or None on any failure - no
@@ -162,14 +177,14 @@ async def _score_article(
     agents/base.py's own "gated on ticker being set" precedent. Only
     summarize_news's own real caller (DataPipeline.prepare(), when it has
     a real run_id from the orchestrator) passes one."""
-    prompt_text = _prompt(headline, text)
+    prompt_text = _prompt(headline, text, company)
     payload = {
         "model": _MODEL,
         "messages": [{"role": "user", "content": prompt_text}],
         "stream": False,
         "think": _THINK,
         "format": _FORMAT_SCHEMA,
-        "options": {"num_ctx": _NUM_CTX},
+        "options": {"num_ctx": _NUM_CTX, "temperature": _TEMPERATURE},
     }
     try:
         async with session.post(_OLLAMA_URL, json=payload, timeout=_TIMEOUT) as response:
@@ -255,20 +270,21 @@ async def _score_batch(
     session: aiohttp.ClientSession,
     items: list[dict],
     *,
+    company: str | None = None,
     capture: CaptureContext | None = None,
 ) -> list[str | None]:
     """One model call for up to `_BATCH_SIZE` headlines. Returns one label (or None) per
     item, in order; None for every item on any request or parse failure, and for any item
     the model skipped or labelled with something that is not a valid label. Same
     no-fallback posture as `_score_article`: a failure is missing data, never a guess."""
-    prompt_text = _batch_prompt(items)
+    prompt_text = _batch_prompt(items, company)
     payload = {
         "model": _MODEL,
         "messages": [{"role": "user", "content": prompt_text}],
         "stream": False,
         "think": _THINK,
         "format": _batch_format_schema(len(items)),
-        "options": {"num_ctx": _NUM_CTX},
+        "options": {"num_ctx": _NUM_CTX, "temperature": _TEMPERATURE},
     }
     try:
         async with session.post(_OLLAMA_URL, json=payload, timeout=_BATCH_TIMEOUT) as response:
@@ -323,19 +339,20 @@ async def _score_chunk(
     session: aiohttp.ClientSession,
     chunk: list[dict],
     *,
+    company: str | None,
     capture: CaptureContext | None,
 ) -> list[str | None]:
     """A batch, asked again once if it produced nothing usable; whatever is still
     unlabelled after that is scored one article at a time (a rare path: at most the
     chunk's size in extra calls, none when the batch was fine)."""
-    labels = await _score_batch(session, chunk, capture=capture)
+    labels = await _score_batch(session, chunk, company=company, capture=capture)
     if not any(label is not None for label in labels):
-        labels = await _score_batch(session, chunk, capture=capture)
+        labels = await _score_batch(session, chunk, company=company, capture=capture)
     missing = [i for i, label in enumerate(labels) if label is None]
     if missing:
         singles = await asyncio.gather(
             *(
-                _score_article(session, chunk[i]["headline"], chunk[i]["text"], capture=capture)
+                _score_article(session, chunk[i]["headline"], chunk[i]["text"], company=company, capture=capture)
                 for i in missing
             )
         )
@@ -345,11 +362,17 @@ async def _score_chunk(
 
 
 async def summarize_news(
-    id_assigned_articles: list[dict], *, capture: CaptureContext | None = None
+    id_assigned_articles: list[dict],
+    *,
+    company: str | None = None,
+    ticker: str | None = None,
+    capture: CaptureContext | None = None,
 ) -> dict:
-    """Scores each already-ID-assigned article's sentiment via a local LLM,
-    ~30 articles per call (the caller passes the bounded SAMPLE to score, not everything
-    fetched). Returns {"articles": [...], "sentiment_source": ...} - the
+    """Labels each already-ID-assigned article positive, negative, neutral or unrelated (not about
+    `company`). Headlines whose wording fixes the label are labelled by pattern
+    (headline_rules.py, which needs `company`/`ticker` to know the item names the company); the
+    rest go to a local LLM, ~30 articles per call at temperature 0 (the caller passes the bounded
+    SAMPLE to score, not everything fetched). Returns {"articles": [...], "sentiment_source": ...} - the
     caller distributes these two keys across DataBundle.news_with_sentiment
     and DataBundle.sentiment_source respectively.
 
@@ -360,19 +383,21 @@ async def summarize_news(
     if not id_assigned_articles:
         return {"articles": [], "sentiment_source": None}
 
+    # Headlines whose label their wording fixes (price recaps, webcasts, rating changes) are labelled by pattern and
+    # never reach the model (data/precompute/headline_rules.py).
+    rule_labels = [rule_label(a["headline"], a.get("text"), company, ticker) for a in id_assigned_articles]
+    to_model = [a for a, label in zip(id_assigned_articles, rule_labels, strict=True) if label is None]
     semaphore = asyncio.Semaphore(_MAX_CONCURRENT)
-    chunks = [
-        id_assigned_articles[start : start + _BATCH_SIZE]
-        for start in range(0, len(id_assigned_articles), _BATCH_SIZE)
-    ]
+    chunks = [to_model[start : start + _BATCH_SIZE] for start in range(0, len(to_model), _BATCH_SIZE)]
 
     async def _score_bounded(session: aiohttp.ClientSession, chunk: list[dict]):
         async with semaphore:
-            return await _score_chunk(session, chunk, capture=capture)
+            return await _score_chunk(session, chunk, company=company, capture=capture)
 
     async with aiohttp.ClientSession() as session:
         chunk_labels = await asyncio.gather(*(_score_bounded(session, chunk) for chunk in chunks))
-    sentiments = [label for labels in chunk_labels for label in labels]
+    from_model = iter(label for labels in chunk_labels for label in labels)
+    sentiments = [label if label is not None else next(from_model) for label in rule_labels]
 
     articles = [
         {

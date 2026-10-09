@@ -192,13 +192,6 @@ def _valid_bear_output() -> dict:
             "market_misreads": [
                 {"misread": "Market overweights AI copilot NTM revenue without pricing execution risk", "why_this_persists": "AI narrative creates sentiment premium that delays multiple compression.", "supporting_pass1_agents": ["SENT", "RSRCH"], "evidence": "SENT: 3 upgrades on AI narrative; RSRCH: attach rates impressive but base is small at 2,400 customers"},
             ],
-            "tail_risk_assessment": {
-                "tail_risk_level": "moderate",
-                "scenario": "DataStream integration fails AND SAP wins 3+ customers within 6 months, triggering multiple compression on top of margin pressure.",
-                "triggering_event": "DataStream integration cost overrun disclosed alongside a named SAP customer win.",
-                "supporting_pass1_agents": ["FUND", "RSRCH"],
-                "evidence": "FUND: D/E 0.42 post-acquisition; RSRCH: SAP competing AI product",
-            },
             # Real schema per backend/prompts/bear_advocate/v1.txt: researcher_archetype,
             # bear_archetype, agrees_with_researcher (bool), disagreement_note. The
             # fixture previously here had "bear_archetype_rationale" -- a field that
@@ -367,72 +360,10 @@ class TestArchetypeAlignmentCrossCheck:
         assert not passed
 
 
-class TestBearTailRiskAssessment:
-    """Rule 7 (86bbuhk82 item 2): content requirements are CONDITIONAL on tail_risk_level,
-    not unconditional -- confirmed live (a real 'negligible' call correctly returned
-    scenario/triggering_event/evidence all empty; requiring them non-empty unconditionally
-    would have rejected the documented, expected case)."""
+def test_bear_prompt_and_schema_no_longer_ask_for_a_tail_risk_assessment():
+    from agents.prompts import load_template
 
-    def test_negligible_with_empty_content_passes(self):
-        out = _valid_bear_output()
-        out["structured_data"]["tail_risk_assessment"] = {
-            "tail_risk_level": "negligible", "scenario": "", "triggering_event": "",
-            "supporting_pass1_agents": [], "evidence": "",
-        }
-        passed, errors = validate_bear_advocate(out)
-        assert passed, f"negligible with empty content is the documented, expected case: {errors}"
-
-    def test_elevated_with_empty_content_fails(self):
-        out = _valid_bear_output()
-        out["structured_data"]["tail_risk_assessment"] = {
-            "tail_risk_level": "elevated", "scenario": "", "triggering_event": "",
-            "supporting_pass1_agents": [], "evidence": "",
-        }
-        passed, errors = validate_bear_advocate(out)
-        assert not passed
-        assert any("scenario" in e for e in errors)
-        assert any("triggering_event" in e for e in errors)
-        assert any("evidence" in e for e in errors)
-        assert any("supporting_pass1_agents" in e for e in errors)
-
-    def test_moderate_with_empty_content_fails(self):
-        out = _valid_bear_output()
-        out["structured_data"]["tail_risk_assessment"] = {
-            "tail_risk_level": "moderate", "scenario": "", "triggering_event": "",
-            "supporting_pass1_agents": [], "evidence": "",
-        }
-        passed, errors = validate_bear_advocate(out)
-        assert not passed
-
-    def test_elevated_with_content_passes(self):
-        out = _valid_bear_output()
-        out["structured_data"]["tail_risk_assessment"] = {
-            "tail_risk_level": "elevated",
-            "scenario": "A sustained oil price collapse below $60/bbl for 12+ months.",
-            "triggering_event": "WTI closing below $60 for 3 consecutive months.",
-            "supporting_pass1_agents": ["MACRO"],
-            "evidence": "MACRO: commodity_context",
-        }
-        passed, errors = validate_bear_advocate(out)
-        assert passed, errors
-
-    def test_missing_tail_risk_level_fails(self):
-        out = _valid_bear_output()
-        out["structured_data"]["tail_risk_assessment"] = {
-            "scenario": "", "triggering_event": "", "supporting_pass1_agents": [], "evidence": "",
-        }
-        passed, errors = validate_bear_advocate(out)
-        assert not passed
-        assert any("tail_risk_level" in e for e in errors)
-
-    def test_invalid_tail_risk_level_value_fails(self):
-        """The enum-value check itself is the shared sweep (tail_risk_level is in
-        DECLARED_ENUMS), not this conditional-content check -- verifying they compose."""
-        out = _valid_bear_output()
-        out["structured_data"]["tail_risk_assessment"]["tail_risk_level"] = "catastrophic"
-        passed, errors = validate_bear_advocate(out)
-        assert not passed
-        assert any("tail_risk_level" in e and "catastrophic" in e for e in errors)
+    assert "tail_risk" not in load_template("bear_advocate").lower()
 
 
 # ─── Tax Strategist Tests ─────────────────────────────────────────────────────

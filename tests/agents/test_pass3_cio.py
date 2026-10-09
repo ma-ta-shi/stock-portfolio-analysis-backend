@@ -425,8 +425,6 @@ def _bear_output() -> dict:
         "structured_data": {
             "core_arguments": [{"argument": "Valuation", "strength": "primary", "evidence": "FUND: pe_ratio 24"}],
             "downside_triggers": [{"trigger": "Volume decline"}],
-            "tail_risk_assessment": {"tail_risk_level": "moderate", "scenario": "s", "triggering_event": "t",
-                                     "evidence": "e", "supporting_pass1_agents": ["FUND"]},
         },
     }
 
@@ -446,8 +444,8 @@ def test_advocates_block_shows_both_sides_under_each_field_with_the_leading_side
     core = lines.index("core_arguments:")
     assert any("Cash conversion" in line for line in lines[core:core + 6])
     # Side-only fields appear once, under their own side.
-    tail = lines.index("tail_risk_assessment:")
-    assert lines[tail + 1].startswith("  BEAR: level=moderate") and not any("BULL" in line for line in lines[tail + 2:])
+    trig = lines.index("downside_triggers:")
+    assert lines[trig + 1].startswith("  BEAR: ") and not any("BULL" in line for line in lines[trig + 2:trig + 3])
 
 
 def test_advocates_block_carries_every_value_the_one_after_the_other_rendering_does():
@@ -464,22 +462,11 @@ def test_advocates_block_falls_back_when_an_advocate_is_missing():
     assert "BULL CASE ADVOCATE:" in block and "BEAR CASE ADVOCATE: NOT AVAILABLE" in block
 
 
-def test_stage_a_prompt_and_message_use_the_same_tail_risk_label():
+def test_stage_a_prompt_and_message_carry_no_tail_risk_cross_check():
     from agents.prompts import load_template
 
-    assert "TAIL-RISK CROSS-CHECK" in load_template("cio", stage="a")
-    assert "TAIL-RISK CROSS-CHECK" in build_user_message(_bundle(), {}, {}, 20, "consensus")
-
-
-def test_stage_a_message_states_the_computed_tail_risk_class():
-    pass2 = {"bear": {**_bear_output(), "structured_data": {**_bear_output()["structured_data"],
-             "tail_risk_assessment": {"tail_risk_level": "negligible"}}}, "bull": _bull_with_detail(),
-             "risk": {**_risk_output(), "risk_profile": {**_risk_output()["risk_profile"],
-                      "downside_scenarios": [{"scenario": "x", "estimated_impact_pct": -28.7}]}}}
-    msg = build_user_message(_bundle(), {}, pass2, 40, "split_decision")
-    assert "tail_risk_cross_check = bear_mild_risk_advisor_elevated" in msg
-    assert "-28.7%" in msg
-    assert "tail_risk_cross_check = insufficient_data" in build_user_message(_bundle(), {}, {}, 20, "consensus")
+    assert "TAIL-RISK" not in load_template("cio", stage="a")
+    assert "TAIL-RISK" not in build_user_message(_bundle(), {}, {}, 20, "consensus")
 
 
 def test_stage_a_schema_asks_for_the_reasoning_before_the_verdict():

@@ -692,7 +692,7 @@ async def test_prepare_with_run_id_adds_llm_call_rows_from_both_precompute_sourc
     back and db.add()s a real LLMCall row per entry from BOTH sources --
     not just one, and not silently dropped."""
 
-    async def _fake_summarize_news_with_capture(articles, *, capture=None):
+    async def _fake_summarize_news_with_capture(articles, *, company=None, ticker=None, capture=None):
         if capture is not None:
             capture.call_log.append(
                 {"call_site": "precompute:sentiment", "seq": next(capture.seq_counter), "model": "gpt-oss:20b"}

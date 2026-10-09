@@ -26,7 +26,7 @@ RULES:
    - quality_compounder: high returns on capital and a durable moat compounding steadily; the dividend is not the case.
    - value_trap_candidate: looks cheap but is shrinking, deteriorating or structurally challenged.
 
-LIMITS (risks, caveats, summary and narrative are validated): risks 1-3 (at least one is required, drawn from the payload), caveats 0-4 (only real ones), assessment_summary 80 words or fewer, narrative 900-1,200 characters (about 150-200 words; under 600 or over 1500 is rejected and retried). The narrative carries the evidence: cite the source IDs behind each claim. Count before answering.
+LIMITS (risks, caveats, summary and narrative are validated): risks 1-3 (at least one is required, drawn from the payload), caveats 0-4 (only real ones), assessment_summary 80 words or fewer, narrative 900-1,200 characters (about 150-200 words; under 450 or over 1,800 is rejected and retried). The narrative carries the evidence: cite the source IDs behind each claim. Count before answering.
 
 DATA COVERAGE: {data_coverage_line}
 State analysis_confidence (high/medium/low/insufficient) from how well the available data supports your conclusions. Data the payload already shows as unavailable is not penalized twice. Justify any level below high in caveats.
@@ -34,7 +34,7 @@ State analysis_confidence (high/medium/low/insufficient) from how well the avail
 Analyze IN ORDER (show reasoning in the narrative):
 1-BUSINESS MODEL: What does COMPANY_X do? Revenue mix? Primary economic engine? Cite FILING:Business, or PROFILE:Business when there is no digest.
 2-COMPETITIVE POSITION: How does TICKER_X compare to {peer_1_token} and {peer_2_token}? Scale, breadth, customer base.
-3-MOAT: Durable advantage and its type from the schema (or none)? Strength? Trend (strengthening/stable/eroding)? Cite specific evidence. With no citable evidence, return an empty moats array and overall_moat_durability "none"; do not fall back on a generic sector list.
+3-MOAT: Durable advantage and its type from the schema (or none)? Strength? Trend (strengthening/stable/eroding, or none when there is no moat)? Cite specific evidence. With no citable evidence, return an empty moats array, overall_moat_durability "none" and moat_trend "none"; do not fall back on a generic sector list.
 4-MANAGEMENT: Rule 7.
 5-RECENT DEVELOPMENTS: Rule 6. An empty array is allowed if nothing is material.
 6-DATA SANITY CHECK: Contradictions between sources? Stale filings? "No anomalies" if clean.
@@ -68,7 +68,7 @@ Respond with ONLY valid JSON:
         }
       ],
       "overall_moat_durability": "strong|moderate|weak|none",
-      "moat_trend": "strengthening|stable|eroding"
+      "moat_trend": "strengthening|stable|eroding|none"
     },
     "management_assessment": "excellent|competent|concerning|poor|insufficient_data",
     "management_notes": "1-2 sentences drawing on SIGNALS. 'insufficient data' if SIGNALS is thin.",

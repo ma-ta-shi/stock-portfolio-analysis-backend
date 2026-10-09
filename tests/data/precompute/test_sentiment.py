@@ -536,3 +536,30 @@ async def test_only_the_items_a_batch_missed_are_scored_one_by_one(monkeypatch):
 
     assert singles == ["The skipped one"]
     assert [a["sentiment"] for a in result["articles"]] == ["positive", "neutral", "negative"]
+
+
+# ---------- the rubric, the company and the temperature (ledger BB-111) ----------
+
+
+def test_the_batch_prompt_names_the_company_and_defines_all_four_labels():
+    prompt = sentiment_module._batch_prompt([_article(id_="N1"), _article(id_="N2")], "Coca-Cola")
+    assert prompt.count("Coca-Cola") >= 4  # the opening line and each label definition
+    for label in ("positive:", "negative:", "neutral:", "unrelated:"):
+        assert label in prompt
+    assert "Return exactly 2 labels" in prompt and "1. " in prompt and "2. " in prompt
+
+
+def test_without_a_company_the_prompt_still_reads_whole():
+    prompt = sentiment_module._batch_prompt([_article(id_="N1")])
+    assert "{company}" not in prompt and sentiment_module._COMPANY_FALLBACK in prompt
+
+
+@pytest.mark.asyncio
+async def test_scoring_is_sampled_at_temperature_zero_with_unrelated_as_a_valid_label():
+    session = FakeSession(FakeResponse(200, _batch_response(["unrelated", "positive"])))
+    labels = await sentiment_module._score_batch(session, [_article(id_="N1"), _article(id_="N2")], company="Plug Power")
+    assert labels == ["unrelated", "positive"]
+    payload = session.calls[0]["json"]
+    assert payload["options"]["temperature"] == 0
+    assert "unrelated" in payload["format"]["properties"]["labels"]["items"]["enum"]
+    assert "Plug Power" in payload["messages"][0]["content"]

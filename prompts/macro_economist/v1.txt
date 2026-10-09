@@ -21,7 +21,7 @@ RULES:
 9. STATCAN: For a Canadian name the STATISTICS CANADA block (housing starts, retail sales YoY) shows domestic demand. Use it, citing STATCAN, only where it bears on {sector} (housing, consumer, lenders, materials); otherwise leave it out.
 10. MATERIAL HEADWINDS ONLY: A geopolitical or trade concern is mentioned only if it ties to a payload block (typically COMMOD). No fabricated stubs.
 
-LIMITS (risks, narrative and summary are validated; keep the rest to them too): risks 1-3 (at least one is required), sector_tailwinds 1-4, sector_headwinds 1-4, evidence 15 words or fewer, tailwind/headwind items 20 words or fewer, assessment_summary 80 words or fewer, narrative 640-720 characters (about 105-120 words; under 480 is rejected, an overshoot is trimmed). Count before answering.
+LIMITS (risks, narrative and summary are validated; keep the rest to them too): risks 1-3 (at least one is required), sector_tailwinds 1-4, sector_headwinds 1-4, evidence 15 words or fewer, tailwind/headwind items 20 words or fewer, assessment_summary 80 words or fewer, narrative 640-720 characters (about 105-120 words; under 360 is rejected, an overshoot is trimmed). Count before answering.
 
 FOCUS: {timeline_instruction}
 SECTOR MACRO SENSITIVITIES: {sector_macro_hint}
@@ -78,3 +78,4 @@ Respond with ONLY valid JSON:
     "overall_macro_environment": "favorable|neutral|unfavorable"
   }
 }
+

@@ -7,13 +7,14 @@ NOT a clean port -- field-by-field notes, verified against
 - `news_sentiment_score` (harness: a 0-1 aggregate float) and
   `news_dominant_themes` (harness: a precomputed list): no precompute source
   for either. `precompute/sentiment.py::summarize_news()` only produces a
-  PER-ARTICLE label (positive/negative/neutral, via a real LLM classification
-  call) -- no aggregate score, no theme extraction. Individual N{num}-cited
-  articles with their sentiment labels are rendered instead, matching this
-  agent's own prompt (rule 4: "Group news into themes... anchored to one
-  representative news_id") -- theme/aggregate synthesis is the LLM's job, the
-  same "give raw data, let the LLM interpret" pattern as every other agent's
-  interpretive_fields.
+  PER-ARTICLE label (positive/negative/neutral/unrelated, from patterns in
+  `headline_rules.py` or a model call) -- no aggregate score, no theme
+  extraction. Individual N{num}-cited articles with their sentiment labels
+  are rendered instead, and the agent cites them in its narrative with a
+  quote from the headline (Rule 1; the quote is checked in
+  `validators/pass1.py::strip_unverified_citation_quotes`). The `dominant_themes`
+  output field was removed 2026-10-09 (ledger BB-111): it repeated the stories
+  the narrative already cited and had no reader.
 - Peer sentiment was retired (2026-10-03): it was `[]` in 48 of 48 real runs, so the payload block, the coverage
   flag, the prompt text and the output field are gone.
 - Analyst: the monthly rating distribution (Finnhub for US, yfinance for CA) plus dated rating changes and
@@ -68,6 +69,8 @@ neither `stale_data` nor `anomalies` had any existing precedent to build on.
 from datetime import date, datetime, timedelta
 from functools import partial
 
+import structlog
+
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import (
@@ -79,7 +82,11 @@ from agents.utils import (
     to_data_coverage,
 )
 from agents.validators.common import validate_confidence_requires_caveat_when_flagged
-from agents.validators.pass1 import validate_canadian_caveat, validate_sentiment_analyst, validate_theme_news_ids
+from agents.validators.pass1 import (
+    strip_unverified_citation_quotes,
+    validate_canadian_caveat,
+    validate_sentiment_analyst,
+)
 from data.precompute.insider import summarize_insider_activity
 from data.precompute.sentiment_signals import (
     ELEVATED_SHORT_INTEREST_PCT,
@@ -87,6 +94,8 @@ from data.precompute.sentiment_signals import (
     summarize_short_interest,
 )
 from data.schemas.data_bundle import DataBundle
+
+logger = structlog.get_logger(__name__)
 
 _INSIDER_WINDOW_DAYS = 90
 _STALE_NEWS_DAYS = 14
@@ -100,7 +109,7 @@ def _validate_with_caveats(
     material_absent: list[str],
     anomalies: list[str],
     stale_data: list[str],
-    news_ids: set[str] | None = None,
+    headlines: dict[str, str] | None = None,
 ) -> tuple[bool, list[str]]:
     """Composing validator (86bbummwp 1d, extended by the follow-on
     confidence/data-quality coupling rule) -- merges the base schema check
@@ -113,6 +122,10 @@ def _validate_with_caveats(
     Economist claiming `analysis_confidence: "high"` while its own
     stale_data flag showed real staleness) -- see
     `validate_confidence_requires_caveat_when_flagged`'s own docstring."""
+    if headlines:
+        dropped_quotes = strip_unverified_citation_quotes(output, headlines)
+        if dropped_quotes:
+            logger.info("sentiment_citation_quotes_dropped", dropped=dropped_quotes)
     passed, errors = validate_sentiment_analyst(output)
     ca_passed, ca_errors = validate_canadian_caveat(output, canadian_sentiment_inferred)
     cq_passed, cq_errors = validate_confidence_requires_caveat_when_flagged(
@@ -122,8 +135,7 @@ def _validate_with_caveats(
         anomalies=anomalies,
         stale_data=stale_data,
     )
-    id_passed, id_errors = validate_theme_news_ids(output, news_ids) if news_ids is not None else (True, [])
-    return passed and ca_passed and cq_passed and id_passed, errors + ca_errors + cq_errors + id_errors
+    return passed and ca_passed and cq_passed, errors + ca_errors + cq_errors
 
 
 _COVERAGE_GAP_SENTENCES = {
@@ -184,6 +196,7 @@ def _anomalies(bundle: DataBundle) -> list[str]:
     """D6's `anomalies` flag (86bbummwp Tier 2) -- see module docstring for
     why this is genuinely new logic, not adapted from an existing check."""
     articles = bundle.news_with_sentiment or []
+    scored_all = [a for a in articles if a.get("sentiment") in _TONES]
     scored = [a for a in articles if a.get("sentiment") in ("positive", "negative")]
     if not scored:
         return []
@@ -191,17 +204,21 @@ def _anomalies(bundle: DataBundle) -> list[str]:
     if positive_ratio < _POSITIVE_SENTIMENT_RATIO:
         return []
 
+    # The lean (positive among positive plus negative) decides whether to flag, but the warning states the tone counts of the
+    # whole scored sample, the same figures as the news section: "100% positive" beside "57% positive, 43% neutral" read as a
+    # contradiction and BAM.TO came out "very_positive" on it (ledger BB-111).
+    tone = _tone_counts(scored_all)
     flags = []
     buys_90d, sells_90d = _insider_counts(bundle)
     if sells_90d > 0 and sells_90d > buys_90d:
         flags.append(
-            f"news sentiment is {positive_ratio:.0%} positive but insiders are net sellers "
+            f"news tone is strongly positive ({tone} in the scored sample) but insiders are net sellers "
             f"over the past {_INSIDER_WINDOW_DAYS} days ({sells_90d} sales vs {buys_90d} purchases)"
         )
     si_pct = (bundle.short_interest or {}).get("short_interest_pct")
     if si_pct is not None and si_pct >= ELEVATED_SHORT_INTEREST_PCT:
         flags.append(
-            f"news sentiment is {positive_ratio:.0%} positive despite elevated short interest "
+            f"news tone is strongly positive ({tone} in the scored sample) despite elevated short interest "
             f"({si_pct}% of float)"
         )
     return flags
@@ -245,9 +262,11 @@ def _coverage_lines(articles: list[dict], shown: list[dict], coverage: dict) -> 
     the agent can read across the whole window, not only from the headlines listed. The
     listed headlines are a small slice of a scored SAMPLE of what was fetched (BB-023);
     saying so keeps the sample from being mistaken for everything that was published."""
+    unrelated = sum(1 for a in articles if a.get("sentiment") == "unrelated")
+    left_out = f" ({unrelated} of them not about the company, left out of the tone and the list)" if unrelated else ""
     lines = [
         f"  Coverage: {coverage['fetched']} articles fetched over the last {coverage['window_days']} days; "
-        f"{len(articles)} sampled evenly across the days and scored; {len(shown)} listed below.",
+        f"{len(articles)} sampled evenly across the days and scored{left_out}; {len(shown)} listed below.",
         f"  Tone of the scored sample: {_tone_counts(articles)} ({_tone_shares(articles)}).",
     ]
     weeks: dict[date, list[dict]] = {}
@@ -404,7 +423,7 @@ class SentimentAnalystRunner(BaseRunner):
                 material_absent=material_absent,
                 anomalies=self.last_anomalies,
                 stale_data=self.last_stale_data,
-                news_ids={a["id"] for a in (bundle.news_with_sentiment or []) if a.get("shown", True)},
+                headlines={a["id"]: a["headline"] for a in (bundle.news_with_sentiment or []) if a.get("shown", True)},
             ),
             max_tokens=3500,
             temperature=0.3,

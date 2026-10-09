@@ -25,10 +25,16 @@ def _narrative_errors(validator, n_chars: int, ids: str = "RSRCH FUND TECH") -> 
     return [e for e in validator({"narrative": text})[1] if e.startswith("narrative: too")]
 
 
-@pytest.mark.parametrize("validator", [validate_bull_advocate, validate_bear_advocate])
-def test_the_validator_bounds_are_what_the_prompt_says(validator):
-    assert _narrative_errors(validator, 799) and not _narrative_errors(validator, 800)
-    assert not _narrative_errors(validator, 2800) and _narrative_errors(validator, 2801)
+@pytest.mark.parametrize(
+    "validator, floor, ceiling",
+    [(validate_bull_advocate, 800, 3300), (validate_bear_advocate, 650, 2800)],
+    ids=["bull", "bear"],
+)
+def test_the_validator_bounds_are_what_the_prompt_says(validator, floor, ceiling):
+    assert _narrative_errors(validator, floor - 1) and not _narrative_errors(validator, floor)
+    assert not _narrative_errors(validator, ceiling) and _narrative_errors(validator, ceiling + 1)
+    prompt = BULL if validator is validate_bull_advocate else BEAR
+    assert f"rejects under {floor} or over {ceiling:,}" in prompt
 
 
 @BOTH

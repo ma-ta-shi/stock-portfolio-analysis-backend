@@ -125,6 +125,16 @@ def _spread(items: list[dict], limit: int) -> list[dict]:
     return [items[i] for i in picks]
 
 
+def pick_shown(scored_days: list[list[dict]], sentiment_by_id: dict[str, str | None], shown_per_day: int = SHOWN_PER_DAY) -> list[dict]:
+    """The articles the Sentiment agent lists, chosen AFTER scoring: per day the best `shown_per_day` of the scored articles that
+    the scorer did not call "unrelated" (a forum post that mentions the ticker, a rival's story). Choosing before scoring left those
+    slots empty (RDDT: 30 of 86 scored items were unrelated). Oldest first, like every other list here."""
+    shown: list[dict] = []
+    for day in scored_days:
+        shown.extend([a for a in day if sentiment_by_id.get(a["id"]) != "unrelated"][:shown_per_day])
+    return sorted(shown, key=lambda a: a["date"])
+
+
 def select_news(
     articles: list[dict],
     *,
@@ -138,7 +148,9 @@ def select_news(
     `quality_tier`). Returns the SAME dicts, never copies, as three lists:
 
     - "scored":     the sample whose sentiment gets scored (superset of "shown")
-    - "shown":      the subset the Sentiment agent lists
+    - "shown":      the subset the Sentiment agent lists, chosen before scoring; the pipeline lists `pick_shown` instead,
+                    which skips articles the scorer calls unrelated and takes the next best one that day
+    - "scored_days": the scored articles grouped by day (oldest day first), best first within the day, for `pick_shown`
     - "researcher": the Stock Researcher's headlines ("low" tier excluded, company-naming items only when the window
                     holds enough of them, `researcher_max` spread evenly across the window)
     - "fetched":    how many articles went in (after de-duplication)
@@ -156,6 +168,7 @@ def select_news(
         by_day[_day_of(article)].append(article)
 
     scored: list[dict] = []
+    scored_days: list[list[dict]] = []
     shown: list[dict] = []
     researcher: list[dict] = []
     fetched = 0
@@ -165,6 +178,7 @@ def select_news(
         fetched += len(ranked)
         pool = ranked[:named] if only_named else ranked
         scored.extend(pool[:scored_per_day])
+        scored_days.append(pool[:scored_per_day])
         shown.extend(pool[:shown_per_day])
         researcher.extend(
             [a for a in pool if a.get("quality_tier") != "low"][:researcher_per_day]
@@ -176,6 +190,7 @@ def select_news(
     return {
         "scored": oldest_first(scored),
         "shown": oldest_first(shown),
+        "scored_days": scored_days,
         "researcher": _spread(oldest_first(researcher), researcher_max),
         "fetched": fetched,
     }

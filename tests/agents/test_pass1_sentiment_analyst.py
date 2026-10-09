@@ -541,7 +541,24 @@ def test_the_anomaly_check_uses_the_whole_scored_sample_not_just_the_shown_ones(
 
     flags = _anomalies(bundle)
 
-    assert flags and "100% positive" in flags[0]  # 30 of 30, though only 1 headline is shown
+    assert flags and "30 positive, 0 negative, 0 neutral" in flags[0]  # 30 of 30, though only 1 headline is shown
+
+
+def test_anomaly_states_the_whole_sample_tone_not_a_share_that_ignores_neutral_articles():
+    """BAM.TO: 13 positive, 0 negative, 10 neutral. The warning said "100% positive" beside the news section's
+    "57% positive, 43% neutral"; it now quotes the same counts as the news section."""
+    sample = _sample(23)
+    tones = ["positive"] * 13 + ["neutral"] * 10
+    articles = [{**a, "sentiment": t, "shown": a["id"] == "N1"} for a, t in zip(sample, tones, strict=True)]
+    bundle = _bundle(
+        news_with_sentiment=articles,
+        insider_activity={"transactions": [
+            {"is_issuer": False, "transaction_type": "sale", "date": "2026-09-10"} for _ in range(5)
+        ]},
+    )
+    flags = _anomalies(bundle)
+    assert len(flags) == 1 and "13 positive, 0 negative, 10 neutral" in flags[0]
+    assert "100%" not in flags[0] and "% positive" not in flags[0]
 
 
 def test_insider_line_keeps_only_notable_transactions_for_the_companys_size():
@@ -553,33 +570,26 @@ def test_insider_line_keeps_only_notable_transactions_for_the_companys_size():
     assert "none above the notable threshold of $30.0M: routine" in small
 
 
-# ---------- dominant_themes anchored to real news IDs (2026-10-03) ----------
+# ---------- dominant_themes was removed (ledger BB-111) ----------
 
 
-def _themed(ids):
-    return _valid_sentiment_analyst_output(structured_data={
-        **_valid_sentiment_analyst_output()["structured_data"],
-        "news_sentiment": {"overall": "positive", "sentiment_trend": "stable",
-                           "dominant_themes": [{"theme": "t", "sentiment": "positive", "primary_news_id": i} for i in ids]},
-    })
+def test_the_sentiment_prompt_and_schema_no_longer_have_dominant_themes_and_the_rules_are_renumbered():
+    from agents.prompts import load_template
+
+    prompt = load_template("sentiment_analyst")
+    assert "dominant_themes" not in prompt and "THEMES" not in prompt and "primary_news_id" not in prompt
+    numbers = [int(line.split(".")[0]) for line in prompt.splitlines() if line[:1].isdigit() and ". " in line[:3]]
+    assert numbers == list(range(1, 8)) and "7. CANADIAN" in prompt
 
 
-def test_a_theme_anchored_to_a_listed_news_id_passes():
-    passed, errors = _validate_with_caveats(
-        _themed(["N1", "N4"]), canadian_sentiment_inferred=False, material_absent=[], anomalies=[], stale_data=[],
-        news_ids={"N1", "N4", "N7"},
-    )
+def test_an_output_without_themes_validates_and_a_stray_themes_field_is_ignored():
+    out = _valid_sentiment_analyst_output()
+    out["structured_data"]["news_sentiment"].pop("dominant_themes", None)
+    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=False, material_absent=[], anomalies=[], stale_data=[])
     assert passed, errors
-
-
-def test_a_theme_anchored_to_a_source_label_or_unlisted_id_is_rejected():
-    """KO 2026-10-03: a theme's primary_news_id was 'ANALYST'."""
-    passed, errors = _validate_with_caveats(
-        _themed(["N1", "ANALYST", "N99"]), canadian_sentiment_inferred=False, material_absent=[], anomalies=[], stale_data=[],
-        news_ids={"N1", "N4"},
-    )
-    assert not passed
-    assert any("'ANALYST'" in e for e in errors) and any("'N99'" in e for e in errors)
+    out["structured_data"]["news_sentiment"]["dominant_themes"] = [{"theme": "x", "primary_news_id": "ANALYST"}]
+    passed, errors = _validate_with_caveats(out, canadian_sentiment_inferred=False, material_absent=[], anomalies=[], stale_data=[])
+    assert passed, errors
 
 
 def test_the_average_target_is_shown_to_cents_not_as_yahoo_gave_it():
@@ -598,3 +608,76 @@ def test_an_identical_second_monthly_distribution_row_is_not_repeated():
     changed = {**same, "buy": 6}
     msg, _ = build_user_message(_bundle(analyst_recommendation_trends=[{"period": "0m", **changed}, {"period": "-1m", **same}]))
     assert "0m: strong_buy=5 buy=6" in msg and "-1m: strong_buy=5 buy=4" in msg
+
+
+def test_articles_scored_as_not_about_the_company_are_left_out_of_the_tone_and_the_message_says_so():
+    sample = _sample(30)
+    for a in sample[:6]:
+        a["sentiment"], a["shown"] = "unrelated", False
+    bundle = _bundle(news_with_sentiment=sample, news_coverage={"window_days": 30, "fetched": 900})
+    msg, _ = build_user_message(bundle)
+    assert "6 of them not about the company, left out of the tone and the list" in msg
+    tone = next(line for line in msg.splitlines() if "Tone of the scored sample" in line)
+    counts = tone.split(": ", 1)[1].split(" (", 1)[0]  # "8 positive, 8 negative, 8 neutral"
+    assert sum(int(part.split()[0]) for part in counts.split(", ")) == 24
+
+
+# ---------- quoted citations (ledger BB-111) ----------
+
+
+HEADLINES = {"N21": "Coca-Cola Plans $10 Billion US Investment Through 2030 \u2014 Here's Where It Will Build",
+             "N63": "Coca-Cola Has Raised Its Dividend Through Every Market Crash Since 1962"}
+
+
+def test_a_quote_that_is_words_from_the_cited_headline_is_kept():
+    from agents.validators.pass1 import strip_unverified_citation_quotes
+
+    out = {"narrative": 'The buildout (N21 "Plans $10 Billion US Investment") and dividends (N63 "raised its dividend").'}
+    assert strip_unverified_citation_quotes(out, HEADLINES) == 0
+    assert out["narrative"].count('"') == 4
+
+
+def test_a_quote_that_is_not_in_the_headline_or_cites_an_unknown_id_loses_the_quote_and_keeps_the_id():
+    from agents.validators.pass1 import strip_unverified_citation_quotes
+
+    out = {"narrative": 'Growth (N21 "record earnings beat") and a stray one (N99 "anything").'}
+    assert strip_unverified_citation_quotes(out, HEADLINES) == 2
+    assert out["narrative"] == "Growth (N21) and a stray one (N99)."
+
+
+def test_curly_quotes_case_and_punctuation_do_not_make_a_real_quote_fail():
+    from agents.validators.pass1 import strip_unverified_citation_quotes
+
+    out = {"narrative": "Dividends (N63 \u201cRAISED ITS DIVIDEND through every market crash\u201d) hold."}
+    assert strip_unverified_citation_quotes(out, HEADLINES) == 0
+
+
+def test_bare_ids_and_a_missing_narrative_are_left_alone():
+    from agents.validators.pass1 import strip_unverified_citation_quotes
+
+    out = {"narrative": "Two stories (N21, N63)."}
+    assert strip_unverified_citation_quotes(out, HEADLINES) == 0 and out["narrative"] == "Two stories (N21, N63)."
+    assert strip_unverified_citation_quotes({}, HEADLINES) == 0
+
+
+def test_the_sentiment_prompt_asks_for_a_quote_with_each_news_citation():
+    from agents.prompts import load_template
+
+    prompt = load_template("sentiment_analyst")
+    assert "3-8 words copied exactly from that headline" in prompt and "one claim, one headline" in prompt
+
+
+def test_a_one_word_quote_proves_nothing_and_is_dropped():
+    from agents.validators.pass1 import strip_unverified_citation_quotes
+
+    out = {"narrative": 'Dividends (N63 "dividend") and growth (N21 "Plans $10 Billion").'}
+    assert strip_unverified_citation_quotes(out, HEADLINES) == 1
+    assert out["narrative"] == 'Dividends (N63) and growth (N21 "Plans $10 Billion").'
+
+
+def test_a_quote_placed_before_its_citation_is_checked_too_and_loses_only_its_quotation_marks():
+    from agents.validators.pass1 import strip_unverified_citation_quotes
+
+    out = {"narrative": 'Coverage of "Plans $10 Billion US Investment" (N21) and of "a record earnings beat" (N63, N21) differs.'}
+    assert strip_unverified_citation_quotes(out, HEADLINES) == 1
+    assert out["narrative"] == 'Coverage of "Plans $10 Billion US Investment" (N21) and of a record earnings beat (N63, N21) differs.'

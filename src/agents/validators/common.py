@@ -72,7 +72,6 @@ DECLARED_ENUMS = {
     # Stock Researcher's recent_developments[].significance -- same 3-value vocabulary,
     # confirmed no conflicting usage elsewhere. Surfaced by the permanent enum-inventory test.
     "significance": {"high", "medium", "low"},
-    "tail_risk_level": {"elevated", "moderate", "negligible"},
     # Technical Analyst -- live-verified (2 real samples each, gpt-oss:20b, real fixtures).
     "nearest_level_bias": {"near_support", "near_resistance", "midrange"},
     "pattern_signal": {"bullish", "bearish", "neutral", "none"},
