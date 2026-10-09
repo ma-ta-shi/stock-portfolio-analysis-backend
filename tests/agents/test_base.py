@@ -1091,3 +1091,35 @@ class TestTimingSummary:
         assert summary["calls"] == 2
         assert summary["retry_calls"] == 1
         assert summary["total_llm_s"] == 2.0
+
+
+
+# ---------- closing brackets the model forgot (ledger BB-112) ----------
+
+
+class TestMissingClosingBrackets:
+    """Macro 2026-10-09 (twice), and 3 times before: the answer is complete but ends one `}` short."""
+
+    def test_a_missing_final_brace_is_added(self):
+        text = '{"summary": "x", "structured_data": {"a": 1, "overall": "neutral"}'
+        assert base_module._parse_json_response(text) == {"summary": "x", "structured_data": {"a": 1, "overall": "neutral"}}
+
+    def test_several_missing_closers_are_added_in_order(self):
+        assert base_module._parse_json_response('{"a": [{"b": [1, 2]') == {"a": [{"b": [1, 2]}]}
+
+    def test_brackets_and_escaped_quotes_inside_strings_are_ignored(self):
+        text = '{"narrative": "a } and a \\"quoted\\" { here", "n": 1'
+        assert base_module._parse_json_response(text) == {"narrative": 'a } and a "quoted" { here', "n": 1}
+
+    def test_an_answer_cut_off_inside_a_string_a_key_or_after_a_comma_is_not_repaired(self):
+        for text in ('{"a": "cut o', '{"a": 1, "b":', '{"a": 1,', '{"a": [1, 2,'):
+            with pytest.raises(json.JSONDecodeError):
+                base_module._parse_json_response(text)
+
+    def test_a_mismatched_closer_is_not_repaired(self):
+        with pytest.raises(json.JSONDecodeError):
+            base_module._parse_json_response('{"a": [1, 2}')
+
+    def test_complete_json_and_the_extra_brace_tolerance_are_unchanged(self):
+        assert base_module._parse_json_response('{"a": 1}') == {"a": 1}
+        assert base_module._parse_json_response('{"a": 1}}') == {"a": 1}
