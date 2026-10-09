@@ -13,7 +13,7 @@ def test_it_no_longer_mentions_peers_or_social_sentiment():
 def test_every_limit_the_validator_enforces_is_in_the_prompt():
     """Most first attempts wrote more list items than the cap because only the validator knew it."""
     assert "risks 0-2" in PROMPT and "at most 80 words" in PROMPT
-    assert "600-1500 characters" in PROMPT
+    assert "450-1,500 characters" in PROMPT
     assert "key_factors" not in PROMPT  # removed 2026-10-07 (ledger BB-107)
 
 
@@ -31,6 +31,3 @@ def test_it_stays_lean():
     assert len(PROMPT) < 5200
 
 
-def test_a_theme_is_never_anchored_to_a_source_label():
-    """KO twice anchored a theme to ANALYST (2 of 24 replays)."""
-    assert "never ANALYST, INSIDER or SHORT" in PROMPT

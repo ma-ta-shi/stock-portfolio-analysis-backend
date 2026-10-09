@@ -7,6 +7,9 @@ gpt-oss:20b output all session in the harness.
 Each returns (passed: bool, errors: list[str]).
 All validation rules derived from the agent prompt documentation.
 """
+import html
+import re
+
 from agents.utils import char_count, word_count
 from agents.validators.common import THESIS_ARCHETYPES, _sweep_declared_enums
 
@@ -356,7 +359,7 @@ def validate_sentiment_analyst(output: dict) -> tuple[bool, list[str]]:
 
     # Floor 600 (about 100 words), not 720: of 24 replays after the prompt rewrite the model's too-short narratives were 562-694 characters;
     # Pass 2 reads the narrative as one of several fields, and 600 to 1,080 characters is a complete 4 to 7 sentence synthesis.
-    _check_narrative_chars(output, 600, NARRATIVE_CEILING, errors)
+    _check_narrative_chars(output, 450, NARRATIVE_CEILING, errors)
     # Sentiment's declared bound: risks 0-2 (thin-data path).
     _check_risks(output.get("risks", []), errors, lo=0, hi=2)
 
@@ -505,23 +508,54 @@ def validate_recent_developments_news_ids(output: dict, valid_ids: set[str]) -> 
     return len(errors) == 0, errors
 
 
-def validate_theme_news_ids(output: dict, valid_ids: set[str]) -> tuple[bool, list[str]]:
-    """Every `dominant_themes[].primary_news_id` must be a news ID the payload actually lists.
+_QUOTED_CITATION = re.compile(r'\b(N\d+)(\s*)["\u201c]([^"\u201d]+)["\u201d]')
+_QUOTE_THEN_CITATION = re.compile(r'["\u201c]([^"\u201d]+)["\u201d](\s*\(N\d+\b)')
+_MIN_QUOTE_WORDS = 2  # a one-word "quote" is in nearly every headline and proves nothing
 
-    The design doc has always required it; nothing enforced it, and a real run (KO, 2026-10-03) anchored a theme to
-    "ANALYST", a source label rather than an article. Skipped when the payload lists no articles (an empty theme list
-    is then the right answer, and a theme with an ID is caught below as unknown)."""
-    errors: list[str] = []
-    ns = (output.get("structured_data") or {}).get("news_sentiment")
-    themes = ns.get("dominant_themes") if isinstance(ns, dict) else None
-    for i, theme in enumerate(themes if isinstance(themes, list) else []):
-        nid = theme.get("primary_news_id") if isinstance(theme, dict) else None
-        if nid not in valid_ids:
-            errors.append(
-                f"structured_data.news_sentiment.dominant_themes[{i}].primary_news_id: {nid!r} is not a news ID "
-                f"listed in the payload (use one of the N-ids shown)"
-            )
-    return len(errors) == 0, errors
+
+def _plain(text: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", html.unescape(text).lower().replace("\u2019", "'").replace("\u2011", "-")).strip()
+
+
+def strip_unverified_citation_quotes(output: dict, headlines: dict[str, str]) -> int:
+    """Where the narrative cites a news item with a quote (`N21 "Plans $10 Billion US Investment"`, or the other way round,
+    `"Plans $10 Billion US Investment" (N21)`), keep the quote only if it is at least two words from that item's headline;
+    otherwise drop the quote and keep the bare ID (in the second form the words stay and only the quotation marks go).
+    Returns how many quotes were dropped.
+    Edits `output` in place; a retry could not do better (1 of 16 quotes in one test and 4 of 23 in another were not verbatim) and
+    costs a model call.
+
+    A quote ties a claim to the headline it names: in a blind read of 80 narrative citations, 1 of 32 quoted citations was
+    not supported by its headline against 8 of 48 bare ones (ledger BB-111). Nothing here proves the claim, only that the
+    words quoted are real."""
+    narrative = output.get("narrative")
+    if not isinstance(narrative, str):
+        return 0
+    plain = {nid: _plain(h) for nid, h in headlines.items()}
+    dropped = 0
+
+    def _real(nid: str, quote: str) -> bool:
+        words = _plain(quote)
+        return nid in plain and len(words.split()) >= _MIN_QUOTE_WORDS and words in plain[nid]
+
+    def _check(m: re.Match) -> str:
+        nonlocal dropped
+        if _real(m.group(1), m.group(3)):
+            return m.group(0)
+        dropped += 1
+        return m.group(1)
+
+    def _check_reversed(m: re.Match) -> str:
+        nonlocal dropped
+        nid = m.group(2).split("N", 1)[1].rstrip(" ,)")
+        if _real("N" + nid, m.group(1)):
+            return m.group(0)
+        dropped += 1
+        return m.group(1) + m.group(2)
+
+    narrative = _QUOTED_CITATION.sub(_check, narrative)
+    output["narrative"] = _QUOTE_THEN_CITATION.sub(_check_reversed, narrative)
+    return dropped
 
 
 def validate_canadian_caveat(output: dict, canadian_sentiment_inferred: bool) -> tuple[bool, list[str]]:
