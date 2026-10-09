@@ -21,7 +21,7 @@
 
 **Investment implications:**
 - **Best for:** Highest-growth investments, since gains compound tax-free permanently.
-- **Capital gains:** Tax-free. A stock that 10x in a TFSA generates zero tax.
+- **Capital gains:** Tax-free, however large.
 - **Canadian dividends:** Tax-free (no dividend tax credit needed since there's no tax).
 - **Foreign dividend withholding:** Not recoverable in a TFSA — see Cross-border considerations for the mechanics and the Withholding tax grid for exact rates. For a US stock yielding 3%, the non-recoverable 15% US withholding costs ~0.45% annually.
 - **Losses:** Cannot be used to offset gains elsewhere. A loss in a TFSA is a permanent loss of tax-sheltered room. This makes permanent capital loss risk especially painful in a TFSA.
