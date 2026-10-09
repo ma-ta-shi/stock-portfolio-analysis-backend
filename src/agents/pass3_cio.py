@@ -17,7 +17,7 @@ originally -- no longer accurate as of 86bc8eg3j, which added
 only; see that function's own docstring, and `build_user_message()`'s comment
 on why Stage A gets neither).
 
-Synthesis pass. Cloud-only. Produces final stock_outlook and prediction.
+Synthesis pass (local gpt-oss:20b in v1; see CLAUDE.md LLM Routing). Produces final stock_outlook and prediction.
 Input semantics: Bull/Bear confidence = directional conviction.
 Risk/Tax groundedness_score = data quality (NOT direction).
 Directional proxies: Risk → risk_reward_ratio (Stage A); Tax → tax_efficiency_for_account
@@ -29,14 +29,14 @@ import json
 from agents.base import BaseRunner
 from agents.prompts import fill, load_template
 from agents.utils import compute_disagreement_score
-from agents.validators.cio import validate_cio_stage_a, validate_cio_stage_b
+from agents.validators.cio import tail_risk_line, validate_cio_stage_a, validate_cio_stage_b
 from data.schemas.data_bundle import DataBundle
 
 # The old embedded system_prompt (independently authored, diverged from the
 # real documented prompt) is deleted, not commented out -- the real prompt
 # now loads from backend/prompts/cio/v1_stage_a.txt via load_template()
 # (ClickUp 86bbdutn6). Stage B's template also exists (backend/prompts/cio/
-# v1_stage_b.txt) but this runner still makes only one call. This is NOT a
+# v1_stage_b.txt) and this runner makes both calls (run() and run_stage_b()). This is NOT a
 # missing-primitive gap the way it is for Risk Advisor: per
 # docs/technical/two-turn-execution-mechanism.md's "Why CIO doesn't use this
 # mechanism", the CIO's Stage A->B was deliberately designed to NOT use
@@ -103,10 +103,9 @@ def build_pass1_summaries(compressed_pass1: dict) -> str:
             # anywhere else Pass 1 quality reaches Pass 2/CIO -- see
             # agents/utils.py::build_pass1_reliability_warnings()'s own
             # docstring for why both signals are shown side by side instead.
-            # finding={assessment_summary}: added 86bbt1k1p -- Stage A's own "Pass 1
-            # citation inventory" step requires a concrete finding per agent ("FUND:
-            # revenue grew 15.7% YoY", not just "FUND"), which confidence alone can
-            # never supply. Single pipe-delimited line, matching this file's existing
+            # finding={assessment_summary}: added 86bbt1k1p -- the CIO cites Pass 1 in its decision
+            # factors and falsifier ("FUND: revenue grew 15.7% YoY", not just "FUND"), which confidence
+            # alone can never supply. Single pipe-delimited line, matching this file's existing
             # convention elsewhere (e.g. the Risk Advisor block below).
             lines.append(
                 f"  {agent_id}: confidence={out['analysis_confidence']}, "
@@ -116,68 +115,73 @@ def build_pass1_summaries(compressed_pass1: dict) -> str:
     return "\n".join(lines) if lines else "(no Pass 1 output available)"
 
 
-def build_advocate_summary(output: dict | None, label: str) -> str:
-    """Renders one advocate's (Bull or Bear) Stage A block. Extracted
-    (86bbt1kct) from build_user_message's own inline Bull/Bear rendering --
-    the Shadow CIO is a second real consumer of this exact content
-    (docs/agents/shadow_cio.md: reuses format_advocate_for_cio 'verbatim'
-    from the primary CIO). `label` must be "BULL" or "BEAR"; the two share
-    almost everything but differ in a few field names/shapes (Bull's
-    catalysts/valuation_argument vs Bear's downside_triggers/
-    tail_risk_assessment; Bull's alignment_with_researcher is a string,
-    Bear's agrees_with_researcher is a bool), matching the branching the
-    reference pseudocode (format_advocate_for_cio) already uses for the
-    same reason -- one shared function, not two near-duplicates.
-
-    Byte-for-byte equivalence with the pre-extraction inline version
-    matters here: build_user_message joins its `lines` list with "\\n",
-    and every element below is built the same way (a list of lines
-    "\\n".join()-ed internally) so the leading "\\n" on the header line
-    produces the exact same blank-line separator between sections as
-    before.
+def _advocate_entries(output: dict, label: str) -> list[tuple[str, list[str]]]:
+    """One advocate's (Bull or Bear) Stage A content as (field, lines) entries, the first line being the
+    value and any further lines its continuation. `label` must be "BULL" or "BEAR"; the two share almost
+    everything but differ in a few field names/shapes (Bull's catalysts/valuation_argument vs Bear's
+    downside_triggers/tail_risk_assessment; Bull's alignment_with_researcher is a string, Bear's
+    agrees_with_researcher is a bool), matching the branching the reference pseudocode
+    (format_advocate_for_cio) already uses for the same reason -- one shared function, not two
+    near-duplicates. Rendered either one advocate at a time (build_advocate_summary) or both side by side
+    (build_advocates_block).
     """
-    if not output:
-        return f"\n{label} CASE ADVOCATE: NOT AVAILABLE"
-
     default_recommendation = "bullish" if label == "BULL" else "bearish"
-    lines = [
-        f"\n{label} CASE ADVOCATE:",
-        f"  recommendation: {output.get('recommendation', default_recommendation)} | confidence: {output.get('confidence', 0)}/100",
-        f"  thesis_summary: {output.get('thesis_summary', '')}",
-        f"  strongest_argument: {output.get('strongest_argument', '')}",
-        f"  weakest_point: {output.get('weakest_point', '')}",
+    entries: list[tuple[str, list[str]]] = [
+        ("recommendation", [f"{output.get('recommendation', default_recommendation)} | confidence: {output.get('confidence', 0)}/100"]),
+        ("thesis_summary", [str(output.get("thesis_summary", ""))]),
+        ("strongest_argument", [str(output.get("strongest_argument", ""))]),
+        ("weakest_point", [str(output.get("weakest_point", ""))]),
     ]
     sd = output.get("structured_data", {})
+    # The advocate's case for THIS horizon, its variant view of what the market gets wrong, and its own invalidators were all
+    # produced for the CIO but never shown to it (the first port followed the reference pseudocode, which dropped them).
+    timeline_arg = str(sd.get("timeline_focused_argument") or "").strip()
+    if timeline_arg:
+        entries.append(("timeline_focused_argument", [timeline_arg]))
     if sd.get("core_arguments"):
         # Each argument with its strength and the evidence behind it (the design's
         # format_advocate_for_cio passes the whole object; the first port kept only the claim, so
         # the CIO weighed claims stripped of their figures).
-        lines.append("  core_arguments:")
-        for arg in sd["core_arguments"]:
-            if isinstance(arg, dict):
-                lines.append(
-                    f"    - [{arg.get('strength', 'N/A')}] {arg.get('argument', '')} | "
-                    f"evidence: {arg.get('evidence', '')}"
-                )
+        args = [
+            f"  - [{arg.get('strength', 'N/A')}] {arg.get('argument', '')} | evidence: {arg.get('evidence', '')}"
+            for arg in sd["core_arguments"] if isinstance(arg, dict)
+        ]
+        entries.append(("core_arguments", [""] + args))
+    va = sd.get("valuation_argument")
+    if isinstance(va, dict) and (va.get("claim") or va.get("evidence")):
+        entries.append(("valuation_argument", [f"{va.get('claim', '')} | evidence: {va.get('evidence', '')}"]))
+    misreads = [
+        f"  - {m.get('misread', '')} (why it persists: {m.get('why_this_persists', '')}) | evidence: {m.get('evidence', '')}"
+        for m in (sd.get("market_misreads") or []) if isinstance(m, dict)
+    ]
+    if misreads:
+        entries.append(("market_misreads (where this side says the market is wrong)", [""] + misreads))
+    risks = [
+        f"  - {r.get('risk', '')} (severity {r.get('severity', 'N/A')}, likelihood {r.get('likelihood', 'N/A')}) | evidence: {r.get('evidence', '')}"
+        for r in (output.get("thesis_risks") or []) if isinstance(r, dict)
+    ]
+    if risks:
+        entries.append(("thesis_risks (what would invalidate this side's case)", [""] + risks))
 
     if label == "BULL":
         if sd.get("catalysts"):
-            lines.append(f"  catalysts: {json.dumps([c['catalyst'] for c in sd['catalysts']])}")
-        if sd.get("valuation_argument"):
-            lines.append(f"  valuation_argument: {sd['valuation_argument'].get('claim', '')}")
+            entries.append(("catalysts", [json.dumps([c["catalyst"] for c in sd["catalysts"]])]))
         # 86bbt1k1p: Stage A's "Archetype check" step names this field directly, comparing
         # it against Bear's equivalent.
         taa = sd.get("thesis_archetype_alignment")
         if isinstance(taa, dict):
-            lines.append(
-                f"  thesis_archetype_alignment: bull_archetype={taa.get('bull_archetype', 'N/A')} "
-                f"vs researcher_archetype={taa.get('researcher_archetype', 'N/A')} | "
-                f"alignment={taa.get('alignment_with_researcher', 'N/A')} | "
-                f"reason: {taa.get('disagreement_reason', '')}"
-            )
+            entries.append((
+                "thesis_archetype_alignment",
+                [
+                    f"bull_archetype={taa.get('bull_archetype', 'N/A')} "
+                    f"vs researcher_archetype={taa.get('researcher_archetype', 'N/A')} | "
+                    f"alignment={taa.get('alignment_with_researcher', 'N/A')} | "
+                    f"reason: {taa.get('disagreement_reason', '')}"
+                ],
+            ))
     else:
         if sd.get("downside_triggers"):
-            lines.append(f"  downside_triggers: {json.dumps([t['trigger'] for t in sd['downside_triggers']])}")
+            entries.append(("downside_triggers", [json.dumps([t["trigger"] for t in sd["downside_triggers"]])]))
         # 86bbt1k1p: Stage A's "Tail-risk cross-check" step explicitly requires comparing
         # this against Risk Advisor's downside_scenarios -- the validator already
         # numerically checks the CIO's answer against this same data (see run()'s
@@ -185,12 +189,15 @@ def build_advocate_summary(output: dict | None, label: str) -> str:
         # shown it to reason from.
         tra = sd.get("tail_risk_assessment")
         if isinstance(tra, dict):
-            lines.append(
-                f"  tail_risk_assessment: level={tra.get('tail_risk_level', 'N/A')} | "
-                f"scenario: {tra.get('scenario', '')} | trigger: {tra.get('triggering_event', '')} | "
-                f"evidence: {tra.get('evidence', '')} | supporting_pass1_agents: "
-                f"{json.dumps(tra.get('supporting_pass1_agents', []))}"
-            )
+            entries.append((
+                "tail_risk_assessment",
+                [
+                    f"level={tra.get('tail_risk_level', 'N/A')} | "
+                    f"scenario: {tra.get('scenario', '')} | trigger: {tra.get('triggering_event', '')} | "
+                    f"evidence: {tra.get('evidence', '')} | supporting_pass1_agents: "
+                    f"{json.dumps(tra.get('supporting_pass1_agents', []))}"
+                ],
+            ))
         # 86bbt1k1p: Stage A's "Archetype check" step names this field directly. Bear's
         # schema uses agrees_with_researcher as a BOOL (Bull's equivalent is a string) --
         # normalized to the same agrees/disagrees vocabulary so the CIO doesn't have to
@@ -199,24 +206,63 @@ def build_advocate_summary(output: dict | None, label: str) -> str:
         if isinstance(taa, dict):
             agrees = taa.get("agrees_with_researcher")
             alignment_str = "agrees" if agrees is True else "disagrees" if agrees is False else "N/A"
-            lines.append(
-                f"  thesis_archetype_alignment: bear_archetype={taa.get('bear_archetype', 'N/A')} "
-                f"vs researcher_archetype={taa.get('researcher_archetype', 'N/A')} | "
-                f"alignment={alignment_str} | "
-                f"reason: {taa.get('disagreement_note', '')}"
-            )
+            entries.append((
+                "thesis_archetype_alignment",
+                [
+                    f"bear_archetype={taa.get('bear_archetype', 'N/A')} "
+                    f"vs researcher_archetype={taa.get('researcher_archetype', 'N/A')} | "
+                    f"alignment={alignment_str} | "
+                    f"reason: {taa.get('disagreement_note', '')}"
+                ],
+            ))
     # The rest of what the design specifies for the advocate block and the first port dropped: the
     # asymmetry read, the advocate's own data caveats and its written case. The narrative is supporting
     # detail (the structured fields above stay authoritative), the way the Tax narrative is shown.
     asymmetry = str(sd.get("asymmetry_assessment") or "").strip()
     if asymmetry:
-        lines.append(f"  asymmetry_assessment: {asymmetry}")
+        entries.append(("asymmetry_assessment", [asymmetry]))
     caveats = [str(c) for c in (output.get("caveats") or []) if str(c).strip()]
     if caveats:
-        lines.append(f"  caveats: {'; '.join(caveats)}")
+        entries.append(("caveats", ["; ".join(caveats)]))
     narrative = str(output.get("narrative") or "").strip()
     if narrative:
-        lines.append(f"  narrative (supporting detail; the structured fields above are authoritative): {narrative}")
+        entries.append(("narrative (supporting detail; the structured fields above are authoritative)", [narrative]))
+    return entries
+
+
+def build_advocate_summary(output: dict | None, label: str) -> str:
+    """Renders one advocate's (Bull or Bear) Stage A block, one after the other. build_advocates_block
+    (both side by side) is what the CIO and Shadow CIO now use; this stays for a single advocate."""
+    if not output:
+        return f"\n{label} CASE ADVOCATE: NOT AVAILABLE"
+    lines = [f"\n{label} CASE ADVOCATE:"]
+    for key, value_lines in _advocate_entries(output, label):
+        head = f"  {key}:" + (f" {value_lines[0]}" if value_lines[0] else "")
+        lines.append(head)
+        lines.extend(f"  {v}" for v in value_lines[1:])
+    return "\n".join(lines)
+
+
+def build_advocates_block(bull: dict | None, bear: dict | None) -> str:
+    """Bull and Bear shown field by field, both sides under each field, the side listed first alternating
+    from field to field, so neither case gets the last word or the first impression throughout. Measured when
+    this was built: with the cases one after the other, swapping their order moved the CIO's call up to 4 notches;
+    shown this way it moved most cases not at all. If either advocate is missing there is no pair to
+    interleave, so it falls back to the one-after-the-other rendering."""
+    if not bull or not bear:
+        return build_advocate_summary(bull, "BULL") + "\n" + build_advocate_summary(bear, "BEAR")
+    sides = {"BULL": dict(_advocate_entries(bull, "BULL")), "BEAR": dict(_advocate_entries(bear, "BEAR"))}
+    keys = list(sides["BULL"]) + [k for k in sides["BEAR"] if k not in sides["BULL"]]
+    lines = ["\nBULL AND BEAR CASES (each field is shown for both advocates; the one listed first alternates):"]
+    for n, key in enumerate(keys):
+        lines.append(f"{key}:")
+        order = ("BULL", "BEAR") if n % 2 == 0 else ("BEAR", "BULL")
+        for who in order:
+            value_lines = sides[who].get(key)
+            if value_lines is None:
+                continue
+            lines.append(f"  {who}: {value_lines[0]}".rstrip())
+            lines.extend(f"    {v.strip()}" for v in value_lines[1:])
     return "\n".join(lines)
 
 
@@ -266,6 +312,20 @@ def build_risk_advisor_stage_a_summary(risk_output: dict | None) -> str:
     return "\n".join(lines)
 
 
+def tail_risk_inputs(pass2_outputs: dict) -> tuple[str | None, float | None]:
+    """(Bear's tail_risk_level, Risk Advisor's worst estimated_impact_pct), both from the payload rather
+    than from the CIO's own output. Shared by the user message (which shows the computed classification)
+    and the validator (which checks it)."""
+    bear_tra = (pass2_outputs.get("bear") or {}).get("structured_data", {}).get("tail_risk_assessment")
+    level = bear_tra.get("tail_risk_level") if isinstance(bear_tra, dict) else None
+    scenarios = (pass2_outputs.get("risk") or {}).get("risk_profile", {}).get("downside_scenarios") or []
+    impacts = [
+        s.get("estimated_impact_pct") for s in scenarios
+        if isinstance(s, dict) and isinstance(s.get("estimated_impact_pct"), (int, float))
+    ]
+    return level, (min(impacts) if impacts else None)
+
+
 def build_user_message(
     bundle: DataBundle,
     compressed_pass1: dict,
@@ -284,8 +344,7 @@ def build_user_message(
     # The Pass 1 summaries are in the system prompt ({pass1_summaries}); this message used to repeat them (the same five
     # lines twice in every stage A prompt, about 450 tokens), as the Bull and Risk messages did before they were fixed.
     lines.append("=== PASS 2 OUTPUTS ===")
-    lines.append(build_advocate_summary(pass2_outputs.get("bull"), "BULL"))
-    lines.append(build_advocate_summary(pass2_outputs.get("bear"), "BEAR"))
+    lines.append(build_advocates_block(pass2_outputs.get("bull"), pass2_outputs.get("bear")))
 
     # Tax Strategist has NO input into Stage A, deliberately and by documented
     # design -- confirmed directly: the Stage A runtime prompt states the read
@@ -300,6 +359,7 @@ def build_user_message(
     # back here, even a "NOT AVAILABLE" placeholder -- Stage A shouldn't
     # reference Tax Strategist's existence at all, not just its content.
     lines.append(build_risk_advisor_stage_a_summary(pass2_outputs.get("risk")))
+    lines.append("\n" + tail_risk_line(*tail_risk_inputs(pass2_outputs)))
 
     if disagreement_category in ("split_decision", "high_conflict"):
         lines.append(f"\n⚠️ DISAGREEMENT CAP: category={disagreement_category}")
@@ -308,6 +368,7 @@ def build_user_message(
         else:
             lines.append("  → stock_outlook must be neutral/somewhat range (not full bullish or bearish)")
 
+    lines.append("\nProduce the Stage A JSON now: the reasoning fields first, then the verdict.")
     return "\n".join(lines)
 
 
@@ -430,10 +491,19 @@ def _build_tax_strategist_summary(tax_result: dict | None) -> str:
         else ""
     )
 
+    # What the Tax Strategist wrote for exactly this purpose: which tax mechanics dominate for this account and
+    # timeline, and the listing/domicile read that drives withholding. They were computed on every run and never shown.
+    lens_lines = "".join(
+        f"{field}: {tp[field]}\n"
+        for field in ("account_axis_summary", "context_aware_strongest_argument", "listing_summary")
+        if str(tp.get(field) or "").strip()
+    )
+
     return (
         f"groundedness_score: {tax_result.get('groundedness_score', 'N/A')}/100\n"
         f"tax_efficiency_for_account: {tp.get('tax_efficiency_for_account', 'N/A')}\n"
         f"account_fit_score: {tp.get('account_fit_score', 'N/A')}\n"
+        f"{lens_lines}"
         f"thesis_summary: {tax_result.get('thesis_summary', '')}\n"
         f"strongest_signal: {tax_result.get('strongest_signal', '')}\n"
         f"dividend_classification: {tp.get('dividend_classification', 'N/A')} | "
@@ -472,14 +542,7 @@ class CIORunner(BaseRunner):
         # tail_inputs_present and the numeric mapping's two values come from the actual
         # payload, not the CIO's own output, so they're computed here and handed to the
         # validator rather than inferred from what the CIO claims.
-        bear_tra = (pass2_outputs.get("bear") or {}).get("structured_data", {}).get("tail_risk_assessment")
-        bear_tail_risk_level = bear_tra.get("tail_risk_level") if isinstance(bear_tra, dict) else None
-        risk_scenarios = (pass2_outputs.get("risk") or {}).get("risk_profile", {}).get("downside_scenarios") or []
-        risk_impacts = [
-            s.get("estimated_impact_pct") for s in risk_scenarios
-            if isinstance(s, dict) and isinstance(s.get("estimated_impact_pct"), (int, float))
-        ]
-        risk_worst_impact = min(risk_impacts) if risk_impacts else None
+        bear_tail_risk_level, risk_worst_impact = tail_risk_inputs(pass2_outputs)
         tail_inputs_present = bear_tail_risk_level is not None and risk_worst_impact is not None
 
         # Risk Advisor Stage A's own risk_reward_ratio, for the risk_reward_consumed_as
@@ -521,7 +584,7 @@ class CIORunner(BaseRunner):
                 risk_worst_estimated_impact_pct=risk_worst_impact,
             ),
             max_tokens=5000,
-            temperature=0.3,
+            temperature=0.0,
         )
         if result:
             result["disagreement_score"] = disagreement_score
@@ -554,7 +617,6 @@ class CIORunner(BaseRunner):
             {
                 "account_type": acct,
                 "timeline": ctx.timeline,
-                "account_instruction": f"Account: {acct.upper()}.",
                 "general_outlook_summary": _build_general_outlook_summary(stage_a_result),
                 "tax_strategist_summary": _build_tax_strategist_summary(tax_result),
             },
@@ -570,7 +632,8 @@ class CIORunner(BaseRunner):
                 out,
                 stage_a_expected_return_tier=stage_a_result.get("expected_return_tier"),
                 tax_efficiency_source=tax_efficiency_source,
+                stage_a_outlook=stage_a_result.get("stock_outlook"),
             ),
             max_tokens=2000,
-            temperature=0.3,
+            temperature=0.0,
         )

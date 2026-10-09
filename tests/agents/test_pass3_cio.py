@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from agents.pass3_cio import (
     _build_tax_strategist_summary,
     build_advocate_summary,
+    build_advocates_block,
     build_pass1_summaries,
     build_risk_advisor_stage_a_summary,
     build_user_message,
@@ -414,4 +415,143 @@ def test_advocate_summary_omits_what_the_advocate_did_not_produce():
 def test_the_shadow_cio_gets_the_same_advocate_detail():
     from agents import pass3_shadow_cio
 
-    assert "narrative (supporting detail" in pass3_shadow_cio.build_advocate_summary(_bull_with_detail(), "BULL")
+    assert "narrative (supporting detail" in pass3_shadow_cio.build_advocates_block(_bull_with_detail(), _bear_output())
+
+
+def _bear_output() -> dict:
+    return {
+        "recommendation": "bearish", "confidence": 35, "thesis_summary": "Premium valuation.",
+        "strongest_argument": "P/E well above peers (FUND).", "weakest_point": "Cash conversion is strong (FUND).",
+        "structured_data": {
+            "core_arguments": [{"argument": "Valuation", "strength": "primary", "evidence": "FUND: pe_ratio 24"}],
+            "downside_triggers": [{"trigger": "Volume decline"}],
+            "tail_risk_assessment": {"tail_risk_level": "moderate", "scenario": "s", "triggering_event": "t",
+                                     "evidence": "e", "supporting_pass1_agents": ["FUND"]},
+        },
+    }
+
+
+def test_advocates_block_shows_both_sides_under_each_field_with_the_leading_side_alternating():
+    block = build_advocates_block(_bull_with_detail(), _bear_output())
+    lines = block.splitlines()
+    # Field order is Bull's, then Bear-only fields; each shared field lists both advocates.
+    first = lines.index("recommendation:")
+    assert lines[first + 1].startswith("  BULL: bullish")
+    assert lines[first + 2].startswith("  BEAR: bearish")
+    second = lines.index("thesis_summary:")
+    assert lines[second + 1].startswith("  BEAR: ") and lines[second + 2].startswith("  BULL: ")
+    third = lines.index("strongest_argument:")
+    assert lines[third + 1].startswith("  BULL: ")
+    # Multi-line core_arguments keep their items under the right side.
+    core = lines.index("core_arguments:")
+    assert any("Cash conversion" in line for line in lines[core:core + 6])
+    # Side-only fields appear once, under their own side.
+    tail = lines.index("tail_risk_assessment:")
+    assert lines[tail + 1].startswith("  BEAR: level=moderate") and not any("BULL" in line for line in lines[tail + 2:])
+
+
+def test_advocates_block_carries_every_value_the_one_after_the_other_rendering_does():
+    bull, bear = _bull_with_detail(), _bear_output()
+    block = build_advocates_block(bull, bear)
+    for text in (build_advocate_summary(bull, "BULL") + build_advocate_summary(bear, "BEAR")).splitlines():
+        value = text.split(": ", 1)[-1].strip()
+        if len(value) > 12 and "CASE ADVOCATE" not in value:
+            assert value in block, value
+
+
+def test_advocates_block_falls_back_when_an_advocate_is_missing():
+    block = build_advocates_block(_bull_with_detail(), None)
+    assert "BULL CASE ADVOCATE:" in block and "BEAR CASE ADVOCATE: NOT AVAILABLE" in block
+
+
+def test_stage_a_prompt_and_message_use_the_same_tail_risk_label():
+    from agents.prompts import load_template
+
+    assert "TAIL-RISK CROSS-CHECK" in load_template("cio", stage="a")
+    assert "TAIL-RISK CROSS-CHECK" in build_user_message(_bundle(), {}, {}, 20, "consensus")
+
+
+def test_stage_a_message_states_the_computed_tail_risk_class():
+    pass2 = {"bear": {**_bear_output(), "structured_data": {**_bear_output()["structured_data"],
+             "tail_risk_assessment": {"tail_risk_level": "negligible"}}}, "bull": _bull_with_detail(),
+             "risk": {**_risk_output(), "risk_profile": {**_risk_output()["risk_profile"],
+                      "downside_scenarios": [{"scenario": "x", "estimated_impact_pct": -28.7}]}}}
+    msg = build_user_message(_bundle(), {}, pass2, 40, "split_decision")
+    assert "tail_risk_cross_check = bear_mild_risk_advisor_elevated" in msg
+    assert "-28.7%" in msg
+    assert "tail_risk_cross_check = insufficient_data" in build_user_message(_bundle(), {}, {}, 20, "consensus")
+
+
+def test_stage_a_schema_asks_for_the_reasoning_before_the_verdict():
+    """The verdict used to be the first field written, so the assessments and factors could only justify it
+    (PLUG: bear case 'accepted, high weight', risk 'unfavorable', four of five factors bearish, yet somewhat
+    bullish). Replays with the reasoning first moved the two weak names to neutral and bearish."""
+    from agents.prompts import load_template
+
+    schema = load_template("cio", stage="a").split("## OUTPUT FORMAT")[1]
+    for reasoning in ("bull_case_assessment", "bear_case_assessment", "risk_reward_consumed_as", "key_decision_factors"):
+        assert schema.index(f'"{reasoning}"') < schema.index('"stock_outlook"')
+    assert schema.index('"stock_outlook"') < schema.index('"confidence"') < schema.index('"expected_return_tier"')
+
+
+def _with_own_case_fields(out: dict, side: str) -> dict:
+    out = {**out, "thesis_risks": [{"risk": f"{side} invalidator", "severity": "high", "likelihood": "medium", "evidence": "FUND: payout_ratio 0.61"}]}
+    out["structured_data"] = {
+        **out.get("structured_data", {}),
+        "timeline_focused_argument": f"{side} medium-term case.",
+        "market_misreads": [{"misread": f"{side} misread", "why_this_persists": "neutral sentiment", "supporting_pass1_agents": ["SENT"], "evidence": "SENT: neutral"}],
+        "valuation_argument": {"claim": f"{side} valuation claim", "supporting_pass1_agents": ["FUND"], "evidence": "FUND: pe_ratio 26.04"},
+    }
+    return out
+
+
+def test_the_cio_sees_each_sides_timeline_case_market_misreads_and_own_invalidators():
+    """These Pass 2 fields were produced for the CIO and never rendered (the reference pseudocode dropped them)."""
+    block = build_advocates_block(_with_own_case_fields(_bull_with_detail(), "Bull"), _with_own_case_fields(_bear_output(), "Bear"))
+    for text in ("Bull medium-term case.", "Bear medium-term case.", "Bull misread (why it persists: neutral sentiment)",
+                 "Bear invalidator (severity high, likelihood medium) | evidence: FUND: payout_ratio 0.61",
+                 "Bull valuation claim | evidence: FUND: pe_ratio 26.04", "Bear valuation claim | evidence: FUND: pe_ratio 26.04"):
+        assert text in block, text
+    assert "thesis_risks (what would invalidate this side's case):" in block
+
+
+def test_stage_a_prompt_tells_the_cio_how_to_use_the_advocates_own_case_fields():
+    from agents.prompts import load_template
+
+    prompt = load_template("cio", stage="a")
+    for name in ("timeline_focused_argument", "market_misreads", "thesis_risks"):
+        assert name in prompt
+    assert "conditions drawn from the thesis_risks of the side you back" in prompt
+
+
+def test_stage_a_message_ends_with_the_ask():
+    assert build_user_message(_bundle(), {}, {}, 20, "consensus").rstrip().endswith("then the verdict.")
+
+
+def test_stage_b_gets_the_tax_fields_written_for_the_account_lens():
+    tax = _tax_result_with_detail()
+    tax["tax_profile"] = {**tax["tax_profile"], "account_axis_summary": "TFSA shelters all gains.",
+                          "context_aware_strongest_argument": "Tax-free gains dominate.", "listing_summary": "TSX listing, no withholding."}
+    summary = _build_tax_strategist_summary(tax)
+    for text in ("account_axis_summary: TFSA shelters all gains.", "context_aware_strongest_argument: Tax-free gains dominate.",
+                 "listing_summary: TSX listing, no withholding."):
+        assert text in summary
+    assert "account_axis_summary" not in _build_tax_strategist_summary(_tax_result_with_detail())
+
+
+def test_stage_b_prompt_covers_an_unavailable_tax_strategist_and_tax_illustrations():
+    from agents.prompts import load_template
+
+    prompt = load_template("cio", stage="b")
+    assert "NOT AVAILABLE" in prompt
+    assert "is not a forecast for this stock" in prompt
+
+
+def test_stage_b_prompt_keeps_the_room_point_to_a_tfsa_and_bars_hold_buy_sell():
+    """PG in an RRSP came back with TFSA logic ("any loss would permanently reduce future room"); PG in a taxable account
+    ended "the recommendation to hold the stock"."""
+    from agents.prompts import load_template
+
+    prompt = load_template("cio", stage="b")
+    assert "that point is specific to a TFSA" in prompt
+    assert "do not tell the investor to hold, buy or sell" in prompt

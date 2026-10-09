@@ -570,7 +570,9 @@ async def test_strong_underperform_expected_return_tier_persists_without_lossy_c
 
     cio_stage_a = _completed(
         stock_outlook="bearish", expected_return_tier="strong_underperform",
-        thesis_summary="Deteriorating fundamentals.", key_decision_factors=[{"factor": "margins"}],
+        thesis_summary="Deteriorating fundamentals.",
+        key_decision_factors=[{"factor": "margins", "direction": "bearish"}, {"factor": "cash", "direction": "bullish"}],
+        dissent_note="The bull's cash-flow case is the main dissent.",
     )
     cio_stage_b = {
         "synthesis_narrative": "Exit position.",
@@ -607,6 +609,11 @@ async def test_strong_underperform_expected_return_tier_persists_without_lossy_c
 
     rec = (await session.execute(select(Recommendation).where(Recommendation.run_id == run.run_id))).scalar_one()
     assert rec.expected_return_tier == "strong_underperform"  # not "minimal"
+    # The persisted record says what the CIO said: no code-invented buy/sell/hold, its own risks and dissent.
+    assert "action" not in rec.account_recommendation
+    assert rec.account_recommendation["rationale"] == "Exit position."
+    assert rec.key_risks == [{"factor": "margins", "direction": "bearish"}]
+    assert rec.dissenting_views == ["The bull's cash-flow case is the main dissent."]
 
     shadow = (await session.execute(select(ShadowPrediction).where(ShadowPrediction.analysis_run_id == run.run_id))).scalar_one()
     assert shadow.primary_expected_return_tier == "strong_underperform"

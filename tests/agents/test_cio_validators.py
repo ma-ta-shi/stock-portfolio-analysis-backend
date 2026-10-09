@@ -484,3 +484,172 @@ class TestCIOTailRiskAndCitation:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_expected_tail_risk_class_covers_every_branch():
+    from agents.validators.cio import expected_tail_risk_class as cls
+
+    assert cls("elevated", -10.0) == "bear_elevated_risk_advisor_mild"
+    assert cls("negligible", -30.0) == "bear_mild_risk_advisor_elevated"
+    assert cls("moderate", -30.0) == "aligned"
+    assert cls("elevated", -30.0) == "aligned"
+    assert cls("negligible", -10.0) == "aligned"
+    assert cls(None, -30.0) == "insufficient_data"
+    assert cls("elevated", None) == "insufficient_data"
+
+
+def test_tail_risk_line_names_the_value_the_validator_will_expect():
+    from agents.validators.cio import expected_tail_risk_class, tail_risk_line
+
+    for level, impact in (("negligible", -28.7), ("elevated", -5.0), ("moderate", -40.0), (None, None)):
+        assert f"tail_risk_cross_check = {expected_tail_risk_class(level, impact)}" in tail_risk_line(level, impact)
+
+
+class TestVerdictFollowsOwnAssessments:
+    """PLUG came out somewhat_bullish with the bear case accepted and the bull case only partly accepted."""
+
+    @staticmethod
+    def _with(outlook, bull, bear):
+        out = _valid_stage_a_output()
+        out["stock_outlook"] = outlook
+        out["bull_case_assessment"]["verdict"] = bull
+        out["bear_case_assessment"]["verdict"] = bear
+        return out
+
+    def test_bullish_outlook_against_an_accepted_bear_case_is_flagged(self):
+        for outlook in ("bullish", "somewhat_bullish"):
+            passed, errors = validate_cio_stage_a(self._with(outlook, "partially_accepted", "accepted"))
+            assert not passed and any(e.startswith("stock_outlook: contradicts your own assessments") for e in errors)
+
+    def test_bearish_outlook_against_an_accepted_bull_case_is_flagged(self):
+        for outlook in ("bearish", "somewhat_bearish"):
+            passed, errors = validate_cio_stage_a(self._with(outlook, "accepted", "partially_accepted"))
+            assert not passed and any(e.startswith("stock_outlook: contradicts your own assessments") for e in errors)
+
+    def test_consistent_calls_are_not_flagged(self):
+        for outlook, bull, bear in (
+            ("somewhat_bullish", "accepted", "partially_accepted"),
+            ("neutral", "partially_accepted", "accepted"),
+            ("neutral", "accepted", "accepted"),
+            ("somewhat_bearish", "partially_accepted", "accepted"),
+            ("bullish", "accepted", "rejected"),
+            ("bullish", "accepted", "accepted"),  # both accepted: no rule
+        ):
+            _, errors = validate_cio_stage_a(self._with(outlook, bull, bear))
+            assert not any("contradicts your own assessments" in e for e in errors), (outlook, bull, bear)
+
+    def test_the_contradiction_is_a_soft_error(self):
+        _, errors = validate_cio_stage_a(self._with("somewhat_bullish", "partially_accepted", "accepted"))
+        hard, soft = split_soft_errors(errors)
+        assert not hard and len(soft) == 1
+
+
+class TestStageBAccountLens:
+    @staticmethod
+    def _out(chars: int, impact: str = "neutral") -> dict:
+        out = _valid_stage_b_output()
+        out["synthesis_narrative"] = "x" * chars
+        out["tax_summary"]["tax_impact_on_recommendation"] = impact
+        return out
+
+    def test_narrative_length_bounds_are_400_to_2000_characters(self):
+        assert validate_cio_stage_b(self._out(900))[0]
+        assert any("too short" in e for e in validate_cio_stage_b(self._out(300))[1])
+        assert any("too long" in e for e in validate_cio_stage_b(self._out(2100))[1])
+
+    def test_strengthens_on_a_non_bullish_read_is_a_soft_error(self):
+        for outlook in ("neutral", "somewhat_bearish", "bearish"):
+            _, errors = validate_cio_stage_b(self._out(900, "strengthens"), stage_a_outlook=outlook)
+            hard, soft = split_soft_errors(errors)
+            assert not hard and len(soft) == 1, outlook
+
+    def test_strengthens_on_a_bullish_read_or_neutral_on_a_bearish_read_is_fine(self):
+        assert validate_cio_stage_b(self._out(900, "strengthens"), stage_a_outlook="somewhat_bullish")[0]
+        assert validate_cio_stage_b(self._out(900, "neutral"), stage_a_outlook="bearish")[0]
+
+
+class TestStageAShapeNormalisation:
+    def test_agent_names_and_full_names_become_the_schema_labels(self):
+        out = _valid_stage_a_output()
+        out["key_decision_factors"] = [
+            {"factor": "a", "direction": "bullish", "source": "FUND", "evidence": "e"},
+            {"factor": "b", "direction": "bearish", "source": "tech", "evidence": "e"},
+            {"factor": "c", "direction": "bearish", "source": "Risk Advisor", "evidence": "e"},
+            {"factor": "d", "direction": "bullish", "source": "bull_advocate", "evidence": "e"},
+        ]
+        _, errors = validate_cio_stage_a(out)
+        assert [f["source"] for f in out["key_decision_factors"]] == ["pass1", "pass1", "risk", "bull"]
+        assert not any("source" in e for e in errors)
+
+    def test_a_real_wrong_label_is_still_rejected(self):
+        out = _valid_stage_a_output()
+        out["key_decision_factors"][0]["source"] = "tax"
+        _, errors = validate_cio_stage_a(out)
+        assert any("key_decision_factors[0].source" in e for e in errors)
+
+    def test_a_risk_label_in_direction_becomes_the_direction_it_points(self):
+        out = _valid_stage_a_output()
+        out["key_decision_factors"][0]["direction"] = "unfavorable"
+        out["key_decision_factors"][1]["direction"] = "favorable"
+        _, errors = validate_cio_stage_a(out)
+        assert [f["direction"] for f in out["key_decision_factors"][:2]] == ["bearish", "bullish"]
+        assert not any("direction" in e for e in errors)
+
+    def test_a_falsifier_returned_as_a_list_is_joined_not_a_crash(self):
+        out = _valid_stage_a_output()
+        out["what_would_change_my_mind"] = ["FUND: payout_ratio above 0.8 would turn it neutral.", "TECH: a break of 85.22 would turn it bearish."]
+        _, errors = validate_cio_stage_a(out)
+        assert isinstance(out["what_would_change_my_mind"], str)
+        assert not any("what_would_change_my_mind" in e for e in errors)
+
+    def test_a_falsifier_of_the_wrong_type_is_an_error_not_a_crash(self):
+        out = _valid_stage_a_output()
+        out["what_would_change_my_mind"] = {"condition": "x"}
+        _, errors = validate_cio_stage_a(out)
+        assert any("must be a single string" in e for e in errors)
+
+
+class TestValidatorsNeverCrash:
+    """A wrong type anywhere in the output (a list where an enum or text belongs) used to raise and stop the stage."""
+
+    BAD = [None, 5, 2.5, [], ["x"], {}, {"a": 1}, "", True]
+
+    @staticmethod
+    def _paths(obj, path=()):
+        yield path
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                yield from TestValidatorsNeverCrash._paths(value, path + (key,))
+        elif isinstance(obj, list):
+            for index, value in enumerate(obj):
+                yield from TestValidatorsNeverCrash._paths(value, path + (index,))
+
+    def _sweep(self, make, call):
+        import copy
+
+        base = make()
+        for path in list(self._paths(base))[1:]:
+            for bad in self.BAD:
+                out = copy.deepcopy(base)
+                target = out
+                for step in path[:-1]:
+                    target = target[step]
+                target[path[-1]] = bad
+                passed, errors = call(out)  # must return, not raise
+                assert isinstance(passed, bool) and isinstance(errors, list)
+
+    def test_stage_a(self):
+        self._sweep(_valid_stage_a_output, lambda o: validate_cio_stage_a(o, "split_decision", True, "favorable", "negligible", -30.0))
+
+    def test_stage_b(self):
+        self._sweep(_valid_stage_b_output, lambda o: validate_cio_stage_b(o, "outperform", "favorable", "bullish"))
+
+    def test_free_form_source_labels_are_matched_by_their_words(self):
+        from agents.validators.cio import _normalise_source
+
+        for raw, expected in (("pass 1: tech", "pass1"), ("TECH/SENT", "pass1"), ("Fundamental", "pass1"), ("Risk Advisor", "risk"),
+                              ("FUND", "pass1"), ("risk_advisor", "risk"),
+                              ("risk", "risk"), ("Bull Advocate", "bull"), ("bear_advocate", "bear"), ("pass1", "pass1")):
+            assert _normalise_source(raw) == expected, raw
+        for raw in ("tax", "market", ""):
+            assert _normalise_source(raw) == raw

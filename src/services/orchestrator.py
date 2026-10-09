@@ -1622,11 +1622,14 @@ class AnalysisOrchestrator:
         this module's own docstring.
         """
         outlook = stage_a_result["stock_outlook"]
-        action = (
-            "buy" if outlook in ("bullish", "somewhat_bullish")
-            else "sell" if outlook in ("bearish", "somewhat_bearish")
-            else "hold"
-        )
+        # No buy/sell/hold here: the CIO's rule is that the outlook is its answer and the action belongs to the
+        # Portfolio Optimizer. This used to derive "buy"/"sell"/"hold" from the outlook in code.
+        # The risks and the dissent are the CIO's own: its bearish decision factors and its dissent note.
+        key_risks = [
+            kf for kf in (stage_a_result.get("key_decision_factors") or [])
+            if isinstance(kf, dict) and kf.get("direction") == "bearish"
+        ]
+        dissent_note = str(stage_a_result.get("dissent_note") or "").strip()
         bull_conf = (pass2_outputs.get("bull") or {}).get("confidence") or 0
         bear_conf = (pass2_outputs.get("bear") or {}).get("confidence") or 0
 
@@ -1635,14 +1638,11 @@ class AnalysisOrchestrator:
             stock_id=run.stock_id,
             stock_outlook_direction=outlook,
             overall_confidence=stage_a_result["confidence"],
-            account_recommendation={
-                "action": action,
-                "rationale": stage_b_result.get("synthesis_narrative", ""),
-            },
+            account_recommendation={"rationale": stage_b_result.get("synthesis_narrative", "")},
             key_drivers=stage_a_result.get("key_decision_factors") or [],
-            key_risks=[],
+            key_risks=key_risks,
             synthesis_narrative=stage_b_result.get("synthesis_narrative", ""),
-            dissenting_views=None,
+            dissenting_views=[dissent_note] if dissent_note else None,
             bull_case_strength=bull_conf,
             bear_case_strength=bear_conf,
             expected_return_tier=stage_b_result.get("expected_return_tier"),

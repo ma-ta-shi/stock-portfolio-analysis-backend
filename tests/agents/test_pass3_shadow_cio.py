@@ -15,7 +15,7 @@ def test_reuses_primary_cios_summary_functions_verbatim_not_a_duplicate():
     identity check (same function object), not just equal behavior, so a
     future edit to the primary CIO's rendering can't silently diverge from
     what the shadow sees."""
-    assert shadow_module.build_advocate_summary is cio_module.build_advocate_summary
+    assert shadow_module.build_advocates_block is cio_module.build_advocates_block
     assert shadow_module.build_pass1_summaries is cio_module.build_pass1_summaries
     assert (
         shadow_module.build_risk_advisor_stage_a_summary
@@ -26,3 +26,10 @@ def test_reuses_primary_cios_summary_functions_verbatim_not_a_duplicate():
 def test_runner_is_constructible():
     runner = ShadowCIORunner()
     assert runner.current_agent is None  # set only once run() actually executes
+
+
+def test_shadow_schema_asks_for_the_bear_weighting_note_before_the_verdict():
+    from agents.prompts import load_template
+
+    schema = load_template("shadow_cio").split("## OUTPUT FORMAT")[1]
+    assert schema.index('"bear_weighting_application_note"') < schema.index('"stock_outlook"')
