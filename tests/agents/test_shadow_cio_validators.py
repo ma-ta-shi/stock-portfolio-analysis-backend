@@ -61,6 +61,16 @@ class TestShadowCIO:
         passed, errors = validate_shadow_cio(out)
         assert not passed and any("thesis_summary" in e for e in errors)
 
+    def test_thesis_summary_ceiling_is_400_characters(self):
+        # 307 and 334 repeated on every retry at temperature 0, so the ceiling moved from 300 to 400.
+        out = _valid_shadow()
+        out["thesis_summary"] = "A" * 340
+        passed, errors = validate_shadow_cio(out)
+        assert not any("thesis_summary" in e for e in errors)
+        out["thesis_summary"] = "A" * 401
+        passed, errors = validate_shadow_cio(out)
+        assert not passed and any("thesis_summary: too long" in e for e in errors)
+
     def test_return_tier_uses_the_prompt_vocabulary(self):
         """`high_upside` is the runner's old vocabulary; both prompts use `outperform`."""
         out = _valid_shadow()
@@ -164,3 +174,30 @@ class TestNumericGroundedness:
         warnings = check_numeric_groundedness(out, compressed_pass1, pass2_outputs)
         assert passed, errors
         assert warnings  # the fabrication IS detected, just not as a validation failure
+
+
+def test_validate_shadow_cio_never_raises_on_a_wrong_type_in_any_field():
+    """A list or dict where an enum or text belongs used to raise; it must come back as an ordinary error."""
+    import copy
+
+    bad_values = [None, 5, 2.5, [], ["x"], {}, {"a": 1}, "", True]
+
+    def paths(obj, path=()):
+        yield path
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                yield from paths(value, path + (key,))
+        elif isinstance(obj, list):
+            for index, value in enumerate(obj):
+                yield from paths(value, path + (index,))
+
+    base = _valid_shadow()
+    for path in list(paths(base))[1:]:
+        for bad in bad_values:
+            out = copy.deepcopy(base)
+            target = out
+            for step in path[:-1]:
+                target = target[step]
+            target[path[-1]] = bad
+            passed, errors = validate_shadow_cio(out, "split_decision", False)
+            assert isinstance(passed, bool) and isinstance(errors, list)

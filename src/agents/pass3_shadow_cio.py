@@ -40,7 +40,7 @@ stale) numbers -- see that ticket and its plan for the full evidence:
 """
 from agents.base import BaseRunner
 from agents.pass3_cio import (
-    build_advocate_summary,
+    build_advocates_block,
     build_pass1_summaries,
     build_risk_advisor_stage_a_summary,
 )
@@ -108,9 +108,9 @@ class ShadowCIORunner(BaseRunner):
         # this session's own probe.
         user_message = "\n".join([
             "=== PASS 2 OUTPUTS (Bull, Bear, Risk Advisor general risk profile) ===",
-            build_advocate_summary(bull_out, "BULL"),
-            build_advocate_summary(bear_out, "BEAR"),
+            build_advocates_block(bull_out, bear_out),
             build_risk_advisor_stage_a_summary(risk_out),
+            "\nProduce the Shadow CIO JSON now: the bear-weighting note first, then the verdict.",
         ])
 
         return await self.call_with_validation(
@@ -118,5 +118,5 @@ class ShadowCIORunner(BaseRunner):
             user_message,
             lambda out: validate_shadow_cio(out, disagreement_category, low_groundedness),
             max_tokens=1200,
-            temperature=0.3,
+            temperature=0.0,
         )

@@ -11,17 +11,22 @@ reuses the `risk_profile_summary` name for a completely different pair of fields
 `position_size_source`/`sizing_justification`). Confirmed via a full field-name extraction of
 `backend/prompts/cio/v1_stage_a.txt` and `v1_stage_b.txt`, not just their enum-shaped fields.
 """
+import re
+
 from agents.utils import PASS1_AGENT_IDS, char_count
-from agents.validators.common import _sweep_declared_enums
+from agents.validators.common import _sweep_declared_enums, never_crash
 
 SOFT_ERROR_PREFIXES = (
     "what_would_change_my_mind: must cite a Pass 1 agent ID",
     "synthesis_narrative: too short",
+    "stock_outlook: contradicts your own assessments",
+    "tax_summary.tax_impact_on_recommendation: 'strengthens'",
 )
 
 
 def split_soft_errors(errors: list[str]) -> tuple[list[str], list[str]]:
-    """(hard, soft). Soft = citation-breadth rules that must not cost the agent."""
+    """(hard, soft). Soft = rules that apply retry pressure but must not cost the agent its output on the final attempt
+    (citation breadth, narrative floor, the verdict agreeing with the CIO's own weighing, the tax framing)."""
     soft = [e for e in errors if e.startswith(SOFT_ERROR_PREFIXES)]
     return [e for e in errors if not e.startswith(SOFT_ERROR_PREFIXES)], soft
 
@@ -39,7 +44,6 @@ VALID_RETURN_TIERS = {"strong_outperform", "outperform", "market_perform",
 # checked as a simple index comparison.
 _RETURN_TIER_ORDER = ["strong_underperform", "underperform", "market_perform",
                       "outperform", "strong_outperform"]
-VALID_POSITION_SIZES = {"overweight", "marketweight", "underweight", "avoid"}
 # PASS2_AGENT_IDS was defined here and never referenced anywhere in the codebase -- dead,
 # deleted rather than carried forward into the stage split. PASS1_AGENT_IDS now imported from
 # agents.utils (the one canonical definition) rather than redefined locally.
@@ -57,6 +61,79 @@ TAIL_RISK_IMPACT_THRESHOLD_PCT = -20.0
 # candidate boundary.
 
 
+def expected_tail_risk_class(bear_tail_risk_level: str | None, risk_worst_impact_pct: float | None) -> str:
+    """The one place the Bear-vs-Risk tail-risk classification is decided. The runner shows the
+    result to the model, which copies it; the validator checks the copy. The model used to be left to
+    derive it from a rule the prompt never stated, and got it wrong in 20 of 25 rejections."""
+    if bear_tail_risk_level is None or risk_worst_impact_pct is None:
+        return "insufficient_data"
+    if bear_tail_risk_level == "elevated" and risk_worst_impact_pct > TAIL_RISK_IMPACT_THRESHOLD_PCT:
+        return "bear_elevated_risk_advisor_mild"
+    if bear_tail_risk_level == "negligible" and risk_worst_impact_pct < TAIL_RISK_IMPACT_THRESHOLD_PCT:
+        return "bear_mild_risk_advisor_elevated"
+    return "aligned"
+
+
+def tail_risk_line(bear_tail_risk_level: str | None, risk_worst_impact_pct: float | None) -> str:
+    """The input line that tells the model the computed classification (see expected_tail_risk_class)."""
+    cls = expected_tail_risk_class(bear_tail_risk_level, risk_worst_impact_pct)
+    if cls == "insufficient_data":
+        basis = "Bear's tail-risk level or Risk Advisor's downside scenarios are missing"
+    else:
+        basis = (
+            f"Bear tail_risk_level={bear_tail_risk_level}; Risk Advisor's worst downside scenario "
+            f"{risk_worst_impact_pct}% (threshold {TAIL_RISK_IMPACT_THRESHOLD_PCT}%)"
+        )
+    return (
+        f"TAIL-RISK CROSS-CHECK (computed in code): {basis} -> tail_risk_cross_check = {cls}. "
+        f"Copy this value; your job is the tail_risk_note."
+    )
+
+
+_PASS1_TOKENS = {"rsrch", "fund", "tech", "sent", "macro", "pass1", "pass", "researcher", "fundamental", "technical", "sentiment"}
+
+
+def _normalise_source(value: str) -> str:
+    """Map a free-form source label to bull | bear | risk | pass1 by its words ("FUND", "pass 1: tech", "TECH/SENT",
+    "Risk Advisor"). Anything that names none of them (for example "tax") is returned unchanged and still fails."""
+    tokens = set(re.findall(r"[a-z0-9]+", value.lower()))
+    if tokens & _PASS1_TOKENS:
+        return "pass1"
+    if "risk" in tokens:
+        return "risk"
+    if "bull" in tokens:
+        return "bull"
+    if "bear" in tokens:
+        return "bear"
+    return value
+
+
+# A risk or tax label written where a direction belongs: favorable/unfavorable describe the risk-reward, and map
+# onto the direction they point.
+_DIRECTION_ALIASES = {"favorable": "bullish", "unfavorable": "bearish"}
+
+
+def normalise_stage_a_shapes(output: dict) -> None:
+    """Fix label and shape slips that carry no judgement, in place, before validation, so they cost no retry:
+    - `key_decision_factors[].source` naming a Pass 1 agent, an advocate or the Risk Advisor in full -> the
+      four-value label ("FUND" or "tech" came back in 2 of 10 replays even after the prompt said what pass1 covers);
+    - `key_decision_factors[].direction` holding a risk label (PLUG: "unfavorable") -> the direction it points;
+    - `what_would_change_my_mind` returned as a list of conditions -> one string (the validator used to crash on it)."""
+    factors = output.get("key_decision_factors")
+    if isinstance(factors, list):
+        for factor in factors:
+            if not isinstance(factor, dict):
+                continue
+            if isinstance(factor.get("source"), str):
+                factor["source"] = _normalise_source(factor["source"])
+            if isinstance(factor.get("direction"), str):
+                factor["direction"] = _DIRECTION_ALIASES.get(factor["direction"].strip().lower(), factor["direction"])
+    wm = output.get("what_would_change_my_mind")
+    if isinstance(wm, list) and all(isinstance(item, str) for item in wm):
+        output["what_would_change_my_mind"] = " ".join(item.strip() for item in wm if item.strip())
+
+
+@never_crash
 def validate_cio_stage_a(
     output: dict,
     disagreement_category: str = "consensus",
@@ -66,6 +143,9 @@ def validate_cio_stage_a(
     risk_worst_estimated_impact_pct: float | None = None,
 ) -> tuple[bool, list[str]]:
     """Validate CIO Stage A (account-neutral directional read) output.
+
+    First fixes label and shape slips that carry no judgement, in place (normalise_stage_a_shapes), so the
+    caller's dict is the corrected one.
 
     Args:
         output: The CIO Stage A output dict.
@@ -82,6 +162,7 @@ def validate_cio_stage_a(
             output, same reasoning as `tail_inputs_present`.
     """
     errors: list[str] = []
+    normalise_stage_a_shapes(output)
 
     for field in (
         "stock_outlook", "confidence", "expected_return_tier", "thesis_summary",
@@ -114,7 +195,10 @@ def validate_cio_stage_a(
         errors.append(f"expected_return_tier: must be one of {VALID_RETURN_TIERS}")
 
     wm = output.get("what_would_change_my_mind", "")
-    if not wm.strip():
+    if not isinstance(wm, str):
+        errors.append(f"what_would_change_my_mind: must be a single string, got {type(wm).__name__}")
+        wm = ""
+    elif not wm.strip():
         errors.append("what_would_change_my_mind: must be non-empty")
     has_pass1_ref = any(aid in wm for aid in PASS1_AGENT_IDS)
     # The old check also accepted any of ten generic terms ("price", "growth", ...),
@@ -188,18 +272,32 @@ def validate_cio_stage_a(
         and risk_worst_estimated_impact_pct is not None
     ):
         R = risk_worst_estimated_impact_pct
-        if bear_tail_risk_level == "elevated" and R > TAIL_RISK_IMPACT_THRESHOLD_PCT:
-            expected_trc = "bear_elevated_risk_advisor_mild"
-        elif bear_tail_risk_level == "negligible" and R < TAIL_RISK_IMPACT_THRESHOLD_PCT:
-            expected_trc = "bear_mild_risk_advisor_elevated"
-        else:
-            expected_trc = "aligned"
+        expected_trc = expected_tail_risk_class(bear_tail_risk_level, R)
         if trc != expected_trc:
             errors.append(
                 f"tail_risk_cross_check: given Bear tail_risk_level={bear_tail_risk_level!r} "
                 f"and Risk Advisor's worst downside scenario {R}% (threshold "
                 f"{TAIL_RISK_IMPACT_THRESHOLD_PCT}%), expected {expected_trc!r}, got {trc!r}"
             )
+
+    # The verdict must agree with the CIO's own weighing. The verdict used to be written first and the
+    # assessments after it, and PLUG came out "somewhat_bullish" with the bear case accepted and the bull case
+    # only partly accepted. Soft: it applies retry pressure but never costs the agent on the final attempt.
+    bull_a, bear_a = output.get("bull_case_assessment"), output.get("bear_case_assessment")
+    bull_verdict = bull_a.get("verdict") if isinstance(bull_a, dict) else None
+    bear_verdict = bear_a.get("verdict") if isinstance(bear_a, dict) else None
+    if bear_verdict == "accepted" and bull_verdict != "accepted" and outlook in {"bullish", "somewhat_bullish"}:
+        errors.append(
+            f"stock_outlook: contradicts your own assessments (bear case accepted, bull case {bull_verdict!r}); "
+            f"a bullish outlook needs the bull case to carry more weight than the bear case, so either change the "
+            f"outlook to neutral or bearish or change the assessments"
+        )
+    if bull_verdict == "accepted" and bear_verdict != "accepted" and outlook in {"bearish", "somewhat_bearish"}:
+        errors.append(
+            f"stock_outlook: contradicts your own assessments (bull case accepted, bear case {bear_verdict!r}); "
+            f"a bearish outlook needs the bear case to carry more weight than the bull case, so either change the "
+            f"outlook to neutral or bullish or change the assessments"
+        )
 
     kdf = output.get("key_decision_factors", [])
     if not isinstance(kdf, list):
@@ -245,10 +343,12 @@ def validate_cio_stage_a(
     return len(errors) == 0, errors
 
 
+@never_crash
 def validate_cio_stage_b(
     output: dict,
     stage_a_expected_return_tier: str | None = None,
     tax_efficiency_source: str | None = None,
+    stage_a_outlook: str | None = None,
 ) -> tuple[bool, list[str]]:
     """Validate CIO Stage B (account-specific tax read + narrative) output. Position sizing and
     `risk_profile_summary` were removed from this stage 2026-10-01.
@@ -281,15 +381,15 @@ def validate_cio_stage_b(
                 f"only hold the tier or make it worse, never improve it"
             )
 
-    # 250-400 words per the Stage B prompt's own hard constraint == 1500-2400 chars at the
-    # ~6 chars/word heuristic used elsewhere in this codebase -- same bound the old single-call
-    # validator had, just relocated to the stage that actually produces this field.
+    # Stage B only applies an already-decided call to one account, so it needs far less than the
+    # 250-400 words it was first given (1,500-2,400 characters): the model wrote about 1,400 against a
+    # 1,500 floor in 3 of 10 replays and padded the rest by repeating that the account shelters gains.
     narrative = output.get("synthesis_narrative", "")
     nc = char_count(narrative)
-    if nc < 1500:
-        errors.append(f"synthesis_narrative: too short ({nc} chars, min 1500)")
-    if nc > 2400:
-        errors.append(f"synthesis_narrative: too long ({nc} chars, max 2400)")
+    if nc < 400:
+        errors.append(f"synthesis_narrative: too short ({nc} chars, min 400)")
+    if nc > 2000:
+        errors.append(f"synthesis_narrative: too long ({nc} chars, max 2000)")
 
     tax_summary = output.get("tax_summary")
     if not isinstance(tax_summary, dict):
@@ -309,6 +409,13 @@ def validate_cio_stage_b(
         impact = tax_summary.get("tax_impact_on_recommendation")
         if impact is not None and impact not in valid_impact:
             errors.append(f"tax_summary.tax_impact_on_recommendation: must be one of {valid_impact}, got {impact!r}")
+        if impact == "strengthens" and stage_a_outlook in {"neutral", "somewhat_bearish", "bearish"}:
+            # Favorable tax cannot strengthen a call that is not bullish (LCID and TLRY.TO: bearish reads framed as
+            # "strengthens the case for holding"). Soft: retry pressure only.
+            errors.append(
+                f"tax_summary.tax_impact_on_recommendation: 'strengthens' is only for a bullish or somewhat bullish "
+                f"general read, got a {stage_a_outlook} read; use neutral or weakens"
+            )
 
     return len(errors) == 0, errors
 

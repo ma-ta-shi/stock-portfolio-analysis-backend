@@ -13,6 +13,32 @@ Lives in `agents/validators/` rather than `agents/utils.py` -- these are
 validator-domain concepts (declared enum vocabularies), not general shared plumbing.
 """
 
+import functools
+
+import structlog
+
+_logger = structlog.get_logger()
+
+
+def never_crash(validator):
+    """Make a validator unable to raise. A model that returns a list or a dict where a value or text belongs
+    (what_would_change_my_mind as a list, an enum field as an object) made the CIO validators raise TypeError or
+    AttributeError, which stops the stage instead of costing one retry. Any exception inside the validator is turned
+    into an ordinary error naming the problem, so the retry message tells the model to fix the shape, and the
+    exception is logged so a real validator bug is still visible."""
+
+    @functools.wraps(validator)
+    def wrapper(*args, **kwargs):
+        try:
+            return validator(*args, **kwargs)
+        except (TypeError, AttributeError, KeyError, ValueError, IndexError) as exc:
+            _logger.warning("validator_raised", validator=validator.__name__, error=repr(exc))
+            return False, [f"output has a field of the wrong type or shape ({type(exc).__name__}: {str(exc)[:120]}); "
+                           f"return every field with the type the schema shows"]
+
+    return wrapper
+
+
 THESIS_ARCHETYPES = {
     "secular_grower",
     "dividend_compounder",
